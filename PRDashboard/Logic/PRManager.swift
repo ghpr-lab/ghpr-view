@@ -30,6 +30,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
     private var timer: Timer?
     private var previousPRs: [Int: PullRequest] = [:]
+    private var pendingAutoRetryPRIds: Set<Int> = []
     private var cancellables = Set<AnyCancellable>()
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isOnExpensiveNetwork: Bool = false
@@ -252,6 +253,9 @@ final class PRManager: PRManagerType, ObservableObject {
                     checkForChangesAndNotify(newPRs: prs)
                 }
 
+                // Auto-retry failed CI when workflow completes
+                checkAndAutoRetryCI(newPRs: prs)
+
                 // Update previous state
                 previousPRs = Dictionary(uniqueKeysWithValues: prs.map { ($0.id, $0) })
 
@@ -343,6 +347,36 @@ final class PRManager: PRManagerType, ObservableObject {
         // Restart polling with new interval if currently polling
         if timer != nil {
             enablePolling(true)
+        }
+    }
+
+    private func checkAndAutoRetryCI(newPRs: [PullRequest]) {
+        let currentIds = Set(newPRs.map { $0.id })
+        // Clean up tracking for PRs that have disappeared
+        pendingAutoRetryPRIds = pendingAutoRetryPRIds.filter { currentIds.contains($0) }
+
+        for pr in newPRs {
+            guard pr.category == .authored else { continue }
+
+            if pr.ciIsRunning && pr.checkFailureCount > 0 {
+                // Mark for auto-retry when workflow completes
+                pendingAutoRetryPRIds.insert(pr.id)
+            } else if !pr.ciIsRunning && pr.ciStatus == .failure && pendingAutoRetryPRIds.contains(pr.id) {
+                // Workflow just completed with failure — auto-retry
+                pendingAutoRetryPRIds.remove(pr.id)
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    do {
+                        let count = try await self.rerunFailedCI(for: pr)
+                        logger.info("Auto-retried \(count) failed workflow(s) for PR #\(pr.number)")
+                    } catch {
+                        logger.error("Auto-retry failed for PR #\(pr.number): \(error.localizedDescription)")
+                    }
+                }
+            } else if !pr.ciIsRunning || pr.ciStatus == .success {
+                // Clean up tracking
+                pendingAutoRetryPRIds.remove(pr.id)
+            }
         }
     }
 

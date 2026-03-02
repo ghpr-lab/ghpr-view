@@ -137,7 +137,7 @@ struct PRRowView: View {
             Button("Copy URL") {
                 onCopyURL()
             }
-            if pr.category == .authored && pr.ciStatus == .failure {
+            if pr.category == .authored && pr.checkFailureCount > 0 {
                 Divider()
                 Button {
                     onRerunFailedCI?()
