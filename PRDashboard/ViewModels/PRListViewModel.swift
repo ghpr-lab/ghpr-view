@@ -10,6 +10,7 @@ final class PRListViewModel: ObservableObject {
     @Published var prList: PRList = .empty
     @Published var searchText: String = ""
     @Published private(set) var authState: AuthState = .empty
+    @Published private(set) var pinnedPRIdentifiers: Set<String> = []
     @Published private(set) var deviceCode: DeviceCodeInfo?
     @Published private(set) var isAuthenticating: Bool = false
     @Published private(set) var authError: Error?
@@ -94,6 +95,14 @@ final class PRListViewModel: ObservableObject {
                 self?.patError = error
             }
             .store(in: &cancellables)
+
+        // Bind pinned PRs
+        prManager.$pinnedPRIdentifiers
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] identifiers in
+                self?.pinnedPRIdentifiers = identifiers
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Computed Properties
@@ -116,12 +125,20 @@ final class PRListViewModel: ObservableObject {
         filteredPRs.filter { $0.category == .authored }
     }
 
+    var pinnedAuthoredPRs: [PullRequest] {
+        authoredPRs.filter { pinnedPRIdentifiers.contains($0.pinIdentifier) }
+    }
+
+    var unpinnedAuthoredPRs: [PullRequest] {
+        authoredPRs.filter { !pinnedPRIdentifiers.contains($0.pinIdentifier) }
+    }
+
     var reviewRequestPRs: [PullRequest] {
         filteredPRs.filter { $0.category == .reviewRequest }
     }
 
     var groupedAuthoredPRs: [(String, [PullRequest])] {
-        groupByRepo(authoredPRs)
+        groupByRepo(unpinnedAuthoredPRs)
     }
 
     var groupedReviewPRs: [(String, [PullRequest])] {
@@ -251,6 +268,14 @@ final class PRListViewModel: ObservableObject {
 
     func clearPATError() {
         oauthManager.clearPATError()
+    }
+
+    func isPinned(_ pr: PullRequest) -> Bool {
+        pinnedPRIdentifiers.contains(pr.pinIdentifier)
+    }
+
+    func togglePin(_ pr: PullRequest) {
+        prManager.togglePinPR(pr.pinIdentifier)
     }
 
     func rerunFailedCI(_ pr: PullRequest) {

@@ -17,6 +17,7 @@ final class PRManager: PRManagerType, ObservableObject {
     @Published private(set) var refreshState: RefreshState = .idle
     @Published private(set) var rateLimitInfo: RateLimitInfo = .empty
     @Published var configuration: Configuration
+    @Published private(set) var pinnedPRIdentifiers: Set<String>
 
     enum RefreshState {
         case idle
@@ -45,6 +46,7 @@ final class PRManager: PRManagerType, ObservableObject {
         self.notificationManager = notificationManager
         self.oauthManager = oauthManager
         self.configuration = Self.loadConfiguration()
+        self.pinnedPRIdentifiers = Self.loadPinnedPRs()
 
         setupBindings()
     }
@@ -418,9 +420,30 @@ final class PRManager: PRManagerType, ObservableObject {
         }
     }
 
+    // MARK: - Pin PR
+
+    func pinPR(_ identifier: String) {
+        pinnedPRIdentifiers.insert(identifier)
+        Self.savePinnedPRs(pinnedPRIdentifiers)
+    }
+
+    func unpinPR(_ identifier: String) {
+        pinnedPRIdentifiers.remove(identifier)
+        Self.savePinnedPRs(pinnedPRIdentifiers)
+    }
+
+    func togglePinPR(_ identifier: String) {
+        if pinnedPRIdentifiers.contains(identifier) {
+            unpinPR(identifier)
+        } else {
+            pinPR(identifier)
+        }
+    }
+
     // MARK: - Configuration Persistence
 
     private static let configurationKey = "PRDashboard.Configuration"
+    private static let pinnedPRsKey = "PRDashboard.PinnedPRs"
 
     private static func loadConfiguration() -> Configuration {
         guard let data = UserDefaults.standard.data(forKey: configurationKey),
@@ -434,5 +457,16 @@ final class PRManager: PRManagerType, ObservableObject {
         if let data = try? JSONEncoder().encode(config) {
             UserDefaults.standard.set(data, forKey: configurationKey)
         }
+    }
+
+    private static func loadPinnedPRs() -> Set<String> {
+        guard let array = UserDefaults.standard.stringArray(forKey: pinnedPRsKey) else {
+            return []
+        }
+        return Set(array)
+    }
+
+    private static func savePinnedPRs(_ identifiers: Set<String>) {
+        UserDefaults.standard.set(Array(identifiers), forKey: pinnedPRsKey)
     }
 }

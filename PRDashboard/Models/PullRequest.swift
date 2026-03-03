@@ -105,6 +105,11 @@ struct PullRequest: Identifiable, Codable, Equatable {
         "\(repositoryOwner)/\(repositoryName)"
     }
 
+    /// Stable identifier used for pinning (e.g. "owner/repo#123")
+    var pinIdentifier: String {
+        "\(repoFullName)#\(number)"
+    }
+
     /// Computed review status for review-requested PRs (returns nil for authored PRs)
     var myReviewStatus: MyReviewStatus? {
         guard category == .reviewRequest else { return nil }

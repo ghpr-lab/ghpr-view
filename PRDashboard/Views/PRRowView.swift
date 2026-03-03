@@ -23,6 +23,8 @@ struct PRRowView: View {
     let onOpen: () -> Void
     let onCopyURL: () -> Void
     var onRerunFailedCI: (() -> Void)?
+    var onTogglePin: (() -> Void)?
+    var isPinned: Bool = false
     var showCIStatus: Bool = true
     var showMyReviewStatus: Bool = false
 
@@ -50,6 +52,12 @@ struct PRRowView: View {
             VStack(alignment: .leading, spacing: 4) {
                 // Repo and PR number
                 HStack(spacing: 4) {
+                    if isPinned {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(.orange)
+                    }
+
                     Text(pr.repoFullName)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -146,6 +154,17 @@ struct PRRowView: View {
             }
             Button("Copy URL") {
                 onCopyURL()
+            }
+            if let onTogglePin {
+                Divider()
+                Button {
+                    onTogglePin()
+                } label: {
+                    Label(
+                        isPinned ? "Unpin" : "Pin to Top",
+                        systemImage: isPinned ? "pin.slash" : "pin"
+                    )
+                }
             }
             if pr.category == .authored && pr.checkFailureCount > 0 {
                 Divider()
