@@ -719,6 +719,10 @@ final class GitHubAPIClient: ObservableObject {
                     .filter { $0.state == "APPROVED" }
                     .count ?? 0
 
+                let changesRequestedCount = node.latestReviews?.nodes
+                    .filter { $0.state == "CHANGES_REQUESTED" }
+                    .count ?? 0
+
                 let ciExtendedInfo: CIExtendedInfo? = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
                     isRunning: ciResult.isRunning,
                     workflows: Array(ciResult.workflows.values)
@@ -752,6 +756,7 @@ final class GitHubAPIClient: ObservableObject {
                     reviewRequestedAt: nil,
                     myThreadsAllResolved: false,
                     approvalCount: approvalCount,
+                    changesRequestedCount: changesRequestedCount,
                     ciExtendedInfo: ciExtendedInfo
                 )
             }
@@ -1279,6 +1284,10 @@ final class GitHubAPIClient: ObservableObject {
                 .filter { $0.state == "APPROVED" }
                 .count ?? 0
 
+            let changesRequestedCount = node.latestReviews?.nodes
+                .filter { $0.state == "CHANGES_REQUESTED" }
+                .count ?? 0
+
             // Check if all threads started by user are resolved
             let myThreadsAllResolved: Bool = {
                 guard let usernameLower else { return false }
@@ -1318,6 +1327,7 @@ final class GitHubAPIClient: ObservableObject {
                 reviewRequestedAt: reviewRequestedAt,
                 myThreadsAllResolved: myThreadsAllResolved,
                 approvalCount: approvalCount,
+                changesRequestedCount: changesRequestedCount,
                 ciExtendedInfo: ciExtendedInfo
             )
         }

@@ -86,6 +86,7 @@ struct PullRequest: Identifiable, Codable, Equatable {
     var reviewRequestedAt: Date?
     var myThreadsAllResolved: Bool
     var approvalCount: Int
+    var changesRequestedCount: Int
     var ciExtendedInfo: CIExtendedInfo?
 
     var ciIsRunning: Bool { ciExtendedInfo?.isRunning ?? false }

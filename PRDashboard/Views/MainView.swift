@@ -83,6 +83,14 @@ struct MainView: View {
     private var prListView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                PRSummaryView(
+                    readyToMerge: viewModel.summaryReadyToMerge,
+                    changesRequested: viewModel.summaryChangesRequested,
+                    ciFailing: viewModel.summaryCIFailing,
+                    ciRunning: viewModel.summaryCIRunning,
+                    toReview: viewModel.summaryWaitingForMyReview
+                )
+
                 // My PRs section
                 if !viewModel.authoredPRs.isEmpty {
                     sectionHeader("My PRs", count: viewModel.authoredPRs.count)

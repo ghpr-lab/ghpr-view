@@ -180,7 +180,8 @@ struct PRRowView: View {
                 myLastReviewAt: nil,
                 reviewRequestedAt: nil,
                 myThreadsAllResolved: false,
-                approvalCount: 2
+                approvalCount: 2,
+                changesRequestedCount: 0
             ),
             onOpen: {},
             onCopyURL: {}
@@ -212,7 +213,8 @@ struct PRRowView: View {
                 myLastReviewAt: Date().addingTimeInterval(-3600),
                 reviewRequestedAt: nil,
                 myThreadsAllResolved: false,
-                approvalCount: 0
+                approvalCount: 0,
+                changesRequestedCount: 0
             ),
             onOpen: {},
             onCopyURL: {},
