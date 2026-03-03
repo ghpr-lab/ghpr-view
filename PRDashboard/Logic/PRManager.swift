@@ -256,6 +256,15 @@ final class PRManager: PRManagerType, ObservableObject {
                 // Auto-retry failed CI when workflow completes
                 checkAndAutoRetryCI(newPRs: prs)
 
+                // Enrich PRs with Jira tickets from body (fetches only for uncached PRs)
+                do {
+                    let jiraCache = try await apiClient.fetchJiraTickets(for: prs + mergedPRs)
+                    GitHubAPIClient.applyJiraTickets(to: &prs, cache: jiraCache)
+                    GitHubAPIClient.applyJiraTickets(to: &mergedPRs, cache: jiraCache)
+                } catch {
+                    logger.error("Failed to enrich Jira tickets: \(error.localizedDescription)")
+                }
+
                 // Update previous state
                 previousPRs = Dictionary(uniqueKeysWithValues: prs.map { ($0.id, $0) })
 

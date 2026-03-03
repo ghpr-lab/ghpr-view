@@ -57,6 +57,16 @@ struct PRRowView: View {
                     Text("#\(pr.number)")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.secondary)
+
+                    if let ticket = pr.jiraTicket {
+                        Text(ticket)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(.blue)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.blue.opacity(0.15))
+                            .cornerRadius(4)
+                    }
                 }
 
                 // PR title
@@ -181,7 +191,8 @@ struct PRRowView: View {
                 reviewRequestedAt: nil,
                 myThreadsAllResolved: false,
                 approvalCount: 2,
-                changesRequestedCount: 0
+                changesRequestedCount: 0,
+                jiraTicket: "AG-1234"
             ),
             onOpen: {},
             onCopyURL: {}

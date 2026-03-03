@@ -1550,6 +1550,100 @@ final class GitHubAPIClient: ObservableObject {
         return rerunCount
     }
 
+    // MARK: - Jira Ticket Extraction
+
+    private static let jiraCacheKey = "PRDashboard.JiraTicketCache"
+
+    static func extractJiraTicket(from text: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: "[A-Z][A-Z0-9]+-\\d+") else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              let matchRange = Range(match.range, in: text) else { return nil }
+        return String(text[matchRange])
+    }
+
+    private static func loadJiraCache() -> [String: String] {
+        UserDefaults.standard.dictionary(forKey: jiraCacheKey) as? [String: String] ?? [:]
+    }
+
+    private static func saveJiraCache(_ cache: [String: String]) {
+        UserDefaults.standard.set(cache, forKey: jiraCacheKey)
+    }
+
+    static func jiraCacheKey(for pr: PullRequest) -> String {
+        "\(pr.repositoryOwner)/\(pr.repositoryName)#\(pr.number)"
+    }
+
+    /// Fetches PR bodies for uncached PRs and extracts Jira tickets. Returns the full cache.
+    func fetchJiraTickets(for prs: [PullRequest]) async throws -> [String: String] {
+        var cache = Self.loadJiraCache()
+
+        // Filter PRs not yet in cache
+        let uncached = prs.filter { cache[Self.jiraCacheKey(for: $0)] == nil }
+        if uncached.isEmpty {
+            return cache
+        }
+
+        logger.info("Fetching Jira tickets for \(uncached.count) uncached PRs")
+
+        // Batch into groups of 20 to avoid overly large queries
+        let batchSize = 20
+        for batch in stride(from: 0, to: uncached.count, by: batchSize) {
+            let end = min(batch + batchSize, uncached.count)
+            let slice = Array(uncached[batch..<end])
+
+            // Build batched GraphQL query using aliases
+            var queryParts: [String] = []
+            for (index, pr) in slice.enumerated() {
+                queryParts.append("""
+                    pr_\(index): repository(owner: "\(pr.repositoryOwner)", name: "\(pr.repositoryName)") {
+                        pullRequest(number: \(pr.number)) {
+                            body
+                        }
+                    }
+                """)
+            }
+
+            let query = "query {\n" + queryParts.joined(separator: "\n") + "\n}"
+
+            do {
+                let responseData = try await executeGraphQL(query: query)
+                guard let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
+                      let data = json["data"] as? [String: Any] else {
+                    continue
+                }
+
+                for (index, pr) in slice.enumerated() {
+                    let key = Self.jiraCacheKey(for: pr)
+                    if let repo = data["pr_\(index)"] as? [String: Any],
+                       let prData = repo["pullRequest"] as? [String: Any],
+                       let body = prData["body"] as? String {
+                        let ticket = Self.extractJiraTicket(from: body) ?? ""
+                        cache[key] = ticket
+                    } else {
+                        // Store empty to avoid re-fetching
+                        cache[key] = ""
+                    }
+                }
+            } catch {
+                logger.error("Failed to fetch Jira tickets batch: \(error.localizedDescription)")
+            }
+        }
+
+        Self.saveJiraCache(cache)
+        return cache
+    }
+
+    /// Apply cached Jira tickets to PRs
+    static func applyJiraTickets(to prs: inout [PullRequest], cache: [String: String]) {
+        for index in prs.indices {
+            let key = jiraCacheKey(for: prs[index])
+            if let ticket = cache[key], !ticket.isEmpty {
+                prs[index].jiraTicket = ticket
+            }
+        }
+    }
+
     // MARK: - Configuration
 
     private static let configurationKey = "PRDashboard.Configuration"

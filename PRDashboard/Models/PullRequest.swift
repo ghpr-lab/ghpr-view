@@ -88,6 +88,7 @@ struct PullRequest: Identifiable, Codable, Equatable {
     var approvalCount: Int
     var changesRequestedCount: Int?
     var ciExtendedInfo: CIExtendedInfo?
+    var jiraTicket: String? = nil
 
     var ciIsRunning: Bool { ciExtendedInfo?.isRunning ?? false }
     var ciWorkflows: [CIWorkflowInfo] { ciExtendedInfo?.workflows ?? [] }
