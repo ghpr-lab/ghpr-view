@@ -1554,10 +1554,17 @@ final class GitHubAPIClient: ObservableObject {
 
     private static let jiraCacheKey = "PRDashboard.JiraTicketCache"
 
+    private static let jiraTicketRegex: NSRegularExpression = {
+        do {
+            return try NSRegularExpression(pattern: "[A-Z][A-Z0-9]+-\\d+")
+        } catch {
+            fatalError("Invalid Jira ticket regex: \(error)")
+        }
+    }()
+
     static func extractJiraTicket(from text: String) -> String? {
-        guard let regex = try? NSRegularExpression(pattern: "[A-Z][A-Z0-9]+-\\d+") else { return nil }
         let range = NSRange(text.startIndex..., in: text)
-        guard let match = regex.firstMatch(in: text, range: range),
+        guard let match = jiraTicketRegex.firstMatch(in: text, range: range),
               let matchRange = Range(match.range, in: text) else { return nil }
         return String(text[matchRange])
     }
@@ -1566,8 +1573,15 @@ final class GitHubAPIClient: ObservableObject {
         UserDefaults.standard.dictionary(forKey: jiraCacheKey) as? [String: String] ?? [:]
     }
 
+    private static let maxJiraCacheSize = 500
+
     private static func saveJiraCache(_ cache: [String: String]) {
-        UserDefaults.standard.set(cache, forKey: jiraCacheKey)
+        var trimmed = cache
+        if trimmed.count > maxJiraCacheSize {
+            let excess = trimmed.count - maxJiraCacheSize
+            trimmed = Dictionary(uniqueKeysWithValues: trimmed.dropFirst(excess))
+        }
+        UserDefaults.standard.set(trimmed, forKey: jiraCacheKey)
     }
 
     static func jiraCacheKey(for pr: PullRequest) -> String {
@@ -1610,6 +1624,13 @@ final class GitHubAPIClient: ObservableObject {
                 let responseData = try await executeGraphQL(query: query)
                 guard let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
                       let data = json["data"] as? [String: Any] else {
+                    logger.error("Unexpected Jira GraphQL response: missing or invalid 'data' field")
+                    for pr in slice {
+                        let key = Self.jiraCacheKey(for: pr)
+                        if cache[key] == nil {
+                            cache[key] = ""
+                        }
+                    }
                     continue
                 }
 
@@ -1627,6 +1648,7 @@ final class GitHubAPIClient: ObservableObject {
                 }
             } catch {
                 logger.error("Failed to fetch Jira tickets batch: \(error.localizedDescription)")
+                throw error
             }
         }
 
