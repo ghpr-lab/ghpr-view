@@ -165,11 +165,11 @@ final class PRListViewModel: ObservableObject {
     var groupedMergedTodayPRs: [(String, [PullRequest])] { groupedMergedLast24hPRs }
 
     var summaryReadyToMerge: Int {
-        authoredPRs.filter { $0.approvalCount > 0 && $0.ciStatus == .success }.count
+        authoredPRs.filter { $0.approvalCount > 0 && $0.ciStatus == .success && ($0.changesRequestedCount ?? 0) == 0 }.count
     }
 
     var summaryChangesRequested: Int {
-        authoredPRs.filter { $0.changesRequestedCount > 0 }.count
+        authoredPRs.filter { ($0.changesRequestedCount ?? 0) > 0 }.count
     }
 
     var summaryCIFailing: Int {
