@@ -1671,7 +1671,7 @@ final class GitHubAPIClient: ObservableObject {
     /// Returns the names of workflows that were successfully retried.
     func rerunSelectiveFailedWorkflows(owner: String, repo: String, headSHA: String, excludeWorkflows: Set<String>) async throws -> [String] {
         // 1. Fetch workflow runs for this commit
-        let runsURL = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/actions/runs?head_sha=\(headSHA)")!
+        let runsURL = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/actions/runs?head_sha=\(headSHA)&per_page=100")!
         var runsRequest = URLRequest(url: runsURL)
         runsRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         runsRequest.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")

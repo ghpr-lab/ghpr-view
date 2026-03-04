@@ -453,26 +453,28 @@ final class PRManager: PRManagerType, ObservableObject {
     private func checkCIAutoRetries(newPRs: [PullRequest]) {
         let currentPinIds = Set(newPRs.map { $0.pinIdentifier })
         // Clean up tracking for PRs that disappeared
-        for pinId in ciRetryTracking.keys where !currentPinIds.contains(pinId) {
+        for pinId in Array(ciRetryTracking.keys) where !currentPinIds.contains(pinId) {
             ciRetryTracking.removeValue(forKey: pinId)
         }
 
-        for (pinId, var state) in ciRetryTracking {
+        for (pinId, var state) in Array(ciRetryTracking) {
             guard let pr = newPRs.first(where: { $0.pinIdentifier == pinId }) else { continue }
 
             // 1. Update pendingWorkflows based on current workflow statuses
             let currentWorkflows = pr.ciWorkflows
             let currentNames = Set(currentWorkflows.map { $0.name })
             // Remove pending workflows that no longer exist or have completed
-            state.pendingWorkflows = state.pendingWorkflows.filter { name in
+            state.pendingWorkflows = Set(state.pendingWorkflows.filter { name in
                 guard currentNames.contains(name) else { return false }
                 guard let workflow = currentWorkflows.first(where: { $0.name == name }) else { return false }
-                return workflow.status == .pending  // only keep if still running
-            }
+                return workflow.pendingCount > 0  // only keep if still has pending jobs
+            })
 
             // 2. Find eligible workflows for retry
             let eligible = currentWorkflows.filter { workflow in
+                workflow.isWorkflow &&
                 workflow.status == .failure &&
+                workflow.pendingCount == 0 &&
                 !state.pendingWorkflows.contains(workflow.name) &&
                 (state.workflowRetryCount[workflow.name] ?? 0) < CIRetryState.maxRetries
             }
@@ -548,6 +550,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
     func unpinPR(_ identifier: String) {
         pinnedPRIdentifiers.remove(identifier)
+        ciRetryTracking.removeValue(forKey: identifier)
         Self.savePinnedPRs(pinnedPRIdentifiers)
     }
 

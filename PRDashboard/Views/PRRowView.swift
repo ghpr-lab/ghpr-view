@@ -169,7 +169,7 @@ struct PRRowView: View {
                 }
             }
             if let onToggleCIAutoRetry, pr.category == .authored,
-               ciAutoRetryRound != nil || pr.checkFailureCount > 0 {
+               (ciAutoRetryRound != nil || pr.checkFailureCount > 0) {
                 Divider()
                 if let round = ciAutoRetryRound {
                     Button {
