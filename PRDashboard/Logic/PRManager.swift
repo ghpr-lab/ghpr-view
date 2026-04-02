@@ -34,11 +34,28 @@ final class PRManager: PRManagerType, ObservableObject {
         case error(Error)
     }
 
+    private enum RefreshTrigger: String {
+        case manual
+        case timer
+        case auth
+        case recovery
+        case queued
+    }
+
+    private struct RecoveryRetryPlan {
+        let delay: TimeInterval
+        let reason: String
+    }
+
     private var apiClient: GitHubAPIClient
     private let notificationManager: NotificationManager
     private let oauthManager: GitHubOAuthManager
 
     private var timer: Timer?
+    private var activeRefreshTask: Task<Void, Never>?
+    private var recoveryRetryTask: Task<Void, Never>?
+    private var queuedRefresh = false
+    private var consecutiveTransientFailures = 0
     private var previousPRs: [Int: PullRequest] = [:]
     private var pendingAutoRetryPRIds: Set<Int> = []
     private var cancellables = Set<AnyCancellable>()
@@ -58,6 +75,11 @@ final class PRManager: PRManagerType, ObservableObject {
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
 
         setupBindings()
+    }
+
+    deinit {
+        activeRefreshTask?.cancel()
+        recoveryRetryTask?.cancel()
     }
 
     private func setupBindings() {
@@ -105,6 +127,7 @@ final class PRManager: PRManagerType, ObservableObject {
         if isOnExpensiveNetwork && !wasExpensive {
             timer?.invalidate()
             timer = nil
+            cancelRecoveryRetry()
         } else if !isOnExpensiveNetwork && wasExpensive {
             if oauthManager.authState.isAuthenticated {
                 enablePolling(true)
@@ -121,6 +144,7 @@ final class PRManager: PRManagerType, ObservableObject {
         if isLowPowerMode && !wasLowPowerMode {
             timer?.invalidate()
             timer = nil
+            cancelRecoveryRetry()
         } else if !isLowPowerMode && wasLowPowerMode {
             if oauthManager.authState.isAuthenticated {
                 enablePolling(true)
@@ -132,10 +156,12 @@ final class PRManager: PRManagerType, ObservableObject {
         apiClient.updateToken(authState.accessToken ?? "")
 
         if authState.isAuthenticated {
-            // Start background polling for notifications
-            enablePolling(true)
+            cancelRecoveryRetry(resetFailureCount: true)
+            enablePolling(true, refreshTrigger: .auth, refreshIfNeeded: false)
+            requestRefresh(trigger: .auth)
         } else {
             enablePolling(false)
+            cancelRefreshWork(reason: "sign_out")
             prList = .empty
             previousPRs = [:]
             // Clear caches on sign-out
@@ -156,20 +182,27 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     func enablePolling(_ enabled: Bool) {
+        enablePolling(enabled, refreshTrigger: .timer, refreshIfNeeded: true)
+    }
+
+    private func enablePolling(_ enabled: Bool, refreshTrigger: RefreshTrigger, refreshIfNeeded: Bool) {
         if !enabled {
             timer?.invalidate()
             timer = nil
+            cancelRecoveryRetry()
             return
         }
 
         guard oauthManager.authState.isAuthenticated else { return }
 
-        // Check if we need to refresh on open
-        let isFirstOpen = prList.pullRequests.isEmpty && prList.error == nil && !prList.isLoading
-        let timeSinceLastUpdate = Date().timeIntervalSince(prList.lastUpdated)
-        let isStale = timeSinceLastUpdate >= configuration.refreshInterval
-        if isFirstOpen || configuration.refreshOnOpen || isStale {
-            refresh()
+        if refreshIfNeeded {
+            // Check if we need to refresh on open
+            let isFirstOpen = !prList.hasUsableData && prList.error == nil && !prList.isLoading
+            let timeSinceLastUpdate = Date().timeIntervalSince(prList.lastUpdated)
+            let isStale = timeSinceLastUpdate >= configuration.refreshInterval
+            if isFirstOpen || configuration.refreshOnOpen || isStale {
+                requestRefresh(trigger: refreshTrigger)
+            }
         }
 
         // Only create timer if not already running
@@ -191,7 +224,7 @@ final class PRManager: PRManagerType, ObservableObject {
         let interval = max(configuration.refreshInterval, 60)
         let newTimer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
-                self?.refresh()
+                self?.requestRefresh(trigger: .timer)
             }
         }
         RunLoop.main.add(newTimer, forMode: .common)
@@ -199,21 +232,46 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     func refresh() {
+        requestRefresh(trigger: .manual)
+    }
+
+    private func requestRefresh(trigger: RefreshTrigger) {
+        if trigger != .recovery {
+            cancelRecoveryRetry()
+        }
+
         guard oauthManager.authState.isAuthenticated,
               let username = oauthManager.authState.username else {
             return
         }
 
         guard configuration.isValid else {
+            let error = ConfigurationError.invalidRefreshInterval
             prList = PRList(
-                lastUpdated: Date(),
-                pullRequests: [],
+                lastUpdated: prList.lastUpdated,
+                pullRequests: prList.pullRequests,
+                mergedPullRequests: prList.mergedPullRequests,
                 isLoading: false,
-                error: ConfigurationError.invalidRefreshInterval
+                error: error
             )
+            refreshState = .error(error)
+            consecutiveTransientFailures = 0
             return
         }
 
+        guard activeRefreshTask == nil else {
+            if !queuedRefresh {
+                logger.info("Coalescing refresh request: trigger=\(trigger.rawValue, privacy: .public)")
+            }
+            queuedRefresh = true
+            return
+        }
+
+        startRefresh(username: username, trigger: trigger)
+    }
+
+    private func startRefresh(username: String, trigger: RefreshTrigger) {
+        let hadUsableData = prList.hasUsableData
         refreshState = .loading
         prList = PRList(
             lastUpdated: prList.lastUpdated,
@@ -223,9 +281,22 @@ final class PRManager: PRManagerType, ObservableObject {
             error: nil
         )
 
-        Task { @MainActor in
+        logger.info(
+            "Starting refresh: trigger=\(trigger.rawValue, privacy: .public) staleData=\((hadUsableData ? "true" : "false"), privacy: .public)"
+        )
+
+        activeRefreshTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.activeRefreshTask = nil
+                if self.queuedRefresh {
+                    self.queuedRefresh = false
+                    self.requestRefresh(trigger: .queued)
+                }
+            }
+
             do {
-                let result = try await apiClient.fetchAllPullRequests(username: username)
+                let result = try await self.apiClient.fetchAllPullRequests(username: username)
                 var prs = result.openPRs
                 var mergedPRs = result.mergedPRs
 
@@ -289,35 +360,154 @@ final class PRManager: PRManagerType, ObservableObject {
                     isLoading: false,
                     error: nil
                 )
-                prList = newPRList
-                refreshState = .idle
+                self.prList = newPRList
+                self.refreshState = .idle
+                self.consecutiveTransientFailures = 0
+                self.cancelRecoveryRetry(resetFailureCount: true)
 
                 // Save to cache after successful refresh
                 PRCache.shared.save(newPRList)
+                logger.info(
+                    "Refresh succeeded: trigger=\(trigger.rawValue, privacy: .public) openPRs=\(prs.count) mergedPRs=\(mergedPRs.count)"
+                )
 
             } catch {
+                if error is CancellationError || ((error as? APIError)?.isCancellation == true) {
+                    if self.oauthManager.authState.isAuthenticated {
+                        self.prList = PRList(
+                            lastUpdated: self.prList.lastUpdated,
+                            pullRequests: self.prList.pullRequests,
+                            mergedPullRequests: self.prList.mergedPullRequests,
+                            isLoading: false,
+                            error: nil
+                        )
+                        self.refreshState = .idle
+                    }
+                    logger.debug("Refresh cancelled: trigger=\(trigger.rawValue, privacy: .public)")
+                    return
+                }
+
                 // Try to fallback to stale cache on API error
-                if prList.pullRequests.isEmpty,
+                if !self.prList.hasUsableData,
                    let cached = PRCache.shared.load(ignoreExpiry: true) {
-                    prList = PRList(
+                    self.prList = PRList(
                         lastUpdated: cached.lastUpdated,
                         pullRequests: cached.pullRequests,
                         mergedPullRequests: cached.mergedPullRequests,
                         isLoading: false,
                         error: error  // Still show error to indicate stale data
                     )
+                    self.previousPRs = Dictionary(uniqueKeysWithValues: cached.pullRequests.map { ($0.id, $0) })
                 } else {
-                    prList = PRList(
-                        lastUpdated: prList.lastUpdated,
-                        pullRequests: prList.pullRequests,
-                        mergedPullRequests: prList.mergedPullRequests,
+                    self.prList = PRList(
+                        lastUpdated: self.prList.lastUpdated,
+                        pullRequests: self.prList.pullRequests,
+                        mergedPullRequests: self.prList.mergedPullRequests,
                         isLoading: false,
                         error: error
                     )
                 }
-                refreshState = .error(error)
+                self.refreshState = .error(error)
+
+                let showingStaleData = self.prList.hasUsableData
+                logger.error(
+                    "Refresh failed: trigger=\(trigger.rawValue, privacy: .public) staleData=\((showingStaleData ? "true" : "false"), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+                )
+
+                if !self.queuedRefresh {
+                    self.scheduleRecoveryRetry(after: error, trigger: trigger, showingStaleData: showingStaleData)
+                }
             }
         }
+    }
+
+    private func cancelRefreshWork(reason: String) {
+        activeRefreshTask?.cancel()
+        activeRefreshTask = nil
+        queuedRefresh = false
+        cancelRecoveryRetry(resetFailureCount: true)
+        refreshState = .idle
+        logger.info("Cancelled refresh work: reason=\(reason, privacy: .public)")
+    }
+
+    private func cancelRecoveryRetry(resetFailureCount: Bool = false) {
+        recoveryRetryTask?.cancel()
+        recoveryRetryTask = nil
+        if resetFailureCount {
+            consecutiveTransientFailures = 0
+        }
+    }
+
+    private func scheduleRecoveryRetry(after error: Error, trigger: RefreshTrigger, showingStaleData: Bool) {
+        guard oauthManager.authState.isAuthenticated else { return }
+
+        guard !isAutomaticRecoveryPaused else {
+            logger.info(
+                "Skipping recovery retry because polling is paused: trigger=\(trigger.rawValue, privacy: .public)"
+            )
+            return
+        }
+
+        guard let plan = recoveryRetryPlan(for: error) else { return }
+
+        cancelRecoveryRetry()
+        let retryAt = Date().addingTimeInterval(plan.delay)
+        logger.warning(
+            "Scheduling recovery retry: trigger=\(trigger.rawValue, privacy: .public) reason=\(plan.reason, privacy: .public) retryIn=\(plan.delay.formattedSeconds, privacy: .public)s retryAt=\(retryAt.ISO8601Format(), privacy: .public) staleData=\((showingStaleData ? "true" : "false"), privacy: .public)"
+        )
+
+        recoveryRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: plan.delay.nanoseconds)
+            } catch {
+                return
+            }
+
+            guard let self else { return }
+            self.recoveryRetryTask = nil
+            self.requestRefresh(trigger: .recovery)
+        }
+    }
+
+    private func recoveryRetryPlan(for error: Error) -> RecoveryRetryPlan? {
+        guard let apiError = error as? APIError else {
+            consecutiveTransientFailures = 0
+            return nil
+        }
+
+        if apiError.isCancellation {
+            return nil
+        }
+
+        switch apiError {
+        case .rateLimited(let resetDate):
+            consecutiveTransientFailures = 0
+            let delay = max(0, resetDate.timeIntervalSinceNow) + Double.random(in: 1...3)
+            return RecoveryRetryPlan(delay: delay, reason: "rate_limited")
+        case .network(_), .http(_) where apiError.isTransient:
+            consecutiveTransientFailures += 1
+            let baseDelay: TimeInterval
+            switch min(consecutiveTransientFailures, 3) {
+            case 1:
+                baseDelay = 15
+            case 2:
+                baseDelay = 30
+            default:
+                baseDelay = 60
+            }
+            return RecoveryRetryPlan(
+                delay: baseDelay + Double.random(in: 0...3),
+                reason: "transient_failure"
+            )
+        default:
+            consecutiveTransientFailures = 0
+            return nil
+        }
+    }
+
+    private var isAutomaticRecoveryPaused: Bool {
+        (isLowPowerMode && configuration.pausePollingInLowPowerMode) ||
+        (isOnExpensiveNetwork && configuration.pausePollingOnExpensiveNetwork)
     }
 
     func rerunFailedCI(for pr: PullRequest) async throws -> Int {

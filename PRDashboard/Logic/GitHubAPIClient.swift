@@ -23,6 +23,7 @@ enum APIError: LocalizedError {
     case network(Error)
     case decoding(Error)
     case invalidResponse
+    case http(statusCode: Int)
     case unknown(String)
 
     var errorDescription: String? {
@@ -39,20 +40,92 @@ enum APIError: LocalizedError {
             return "Failed to parse response: \(error.localizedDescription)"
         case .invalidResponse:
             return "Invalid response from GitHub"
+        case .http(let statusCode):
+            switch statusCode {
+            case 408:
+                return "GitHub API request timed out (HTTP 408)"
+            case 429:
+                return "GitHub API temporarily rejected the request (HTTP 429)"
+            case 500, 502, 503, 504:
+                return "GitHub API is temporarily unavailable (HTTP \(statusCode))"
+            default:
+                return "GitHub API request failed (HTTP \(statusCode))"
+            }
         case .unknown(let message):
             return message
+        }
+    }
+
+    var isCancellation: Bool {
+        switch self {
+        case .network(let error):
+            if error is CancellationError {
+                return true
+            }
+            if let urlError = error as? URLError {
+                return urlError.code == .cancelled
+            }
+            return false
+        default:
+            return false
+        }
+    }
+
+    var isTransient: Bool {
+        switch self {
+        case .rateLimited:
+            return true
+        case .network(let error):
+            return Self.isTransientNetworkError(error)
+        case .http(let statusCode):
+            return [408, 429, 500, 502, 503, 504].contains(statusCode)
+        default:
+            return false
+        }
+    }
+
+    private static func isTransientNetworkError(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return false
+        }
+
+        guard let urlError = error as? URLError else {
+            return false
+        }
+
+        switch urlError.code {
+        case .timedOut,
+             .notConnectedToInternet,
+             .networkConnectionLost,
+             .dnsLookupFailed,
+             .cannotFindHost,
+             .cannotConnectToHost,
+             .resourceUnavailable,
+             .cannotLoadFromNetwork,
+             .internationalRoamingOff,
+             .callIsActive,
+             .dataNotAllowed:
+            return true
+        default:
+            return false
         }
     }
 }
 
 final class GitHubAPIClient: ObservableObject {
     private static let maxCIContextsToFetch = 200
+    private static let maxGraphQLAttempts = 3
     private let graphQLURL = URL(string: "https://api.github.com/graphql")!
     private var token: String
     private let session: URLSession
     private var lastETag: String?
 
     @Published private(set) var rateLimitInfo: RateLimitInfo = .empty
+
+    private struct RetryDecision {
+        let classification: String
+        let delay: TimeInterval?
+    }
 
     init(token: String) {
         self.token = token
@@ -67,7 +140,7 @@ final class GitHubAPIClient: ObservableObject {
 
     func fetchPullRequests(username: String, searchQuery: String, category: PRCategory) async throws -> [PullRequest] {
         let query = buildGraphQLQuery(searchQuery: searchQuery)
-        let responseData = try await executeGraphQL(query: query)
+        let responseData = try await executeGraphQL(query: query, operation: "fetchPullRequests")
         return try parseSearchResponse(data: responseData, category: category)
     }
 
@@ -79,7 +152,7 @@ final class GitHubAPIClient: ObservableObject {
     func fetchAllPullRequests(username: String) async throws -> CombinedPRResult {
         // Combined query using GraphQL aliases - single API call instead of 4
         let query = buildCombinedQuery(username: username)
-        let responseData = try await executeGraphQL(query: query)
+        let responseData = try await executeGraphQL(query: query, operation: "fetchAllPullRequests")
         return try await parseCombinedResponse(data: responseData, username: username)
     }
 
@@ -93,7 +166,7 @@ final class GitHubAPIClient: ObservableObject {
         """
 
         do {
-            _ = try await executeGraphQL(query: query)
+            _ = try await executeGraphQL(query: query, operation: "validateToken")
             return true
         } catch APIError.unauthorized {
             return false
@@ -139,7 +212,7 @@ final class GitHubAPIClient: ObservableObject {
         }
         """
 
-        let responseData = try await executeGraphQL(query: query)
+        let responseData = try await executeGraphQL(query: query, operation: "fetchAdditionalCIContexts")
         return try parseCIContextsResponse(data: responseData)
     }
 
@@ -592,7 +665,7 @@ final class GitHubAPIClient: ObservableObject {
         """
     }
 
-    private func executeGraphQL(query: String, attempt: Int = 1) async throws -> Data {
+    private func executeGraphQL(query: String, operation: String) async throws -> Data {
         var request = URLRequest(url: graphQLURL)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -602,21 +675,70 @@ final class GitHubAPIClient: ObservableObject {
         let body = ["query": query]
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let (data, response): (Data, URLResponse)
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw APIError.network(error)
+        for attempt in 1...Self.maxGraphQLAttempts {
+            do {
+                let (data, response) = try await session.data(for: request)
+
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw APIError.invalidResponse
+                }
+
+                updateRateLimitInfo(from: httpResponse)
+
+                switch httpResponse.statusCode {
+                case 200:
+                    if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let errors = json["errors"] as? [[String: Any]],
+                       let firstError = errors.first,
+                       let message = firstError["message"] as? String {
+                        throw APIError.unknown(message)
+                    }
+
+                    if attempt > 1 {
+                        logger.info("GraphQL request recovered: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts)")
+                    }
+                    return data
+                case 401:
+                    throw APIError.unauthorized
+                case 403:
+                    if let rateLimitError = rateLimitError(from: httpResponse) {
+                        throw rateLimitError
+                    }
+                    throw APIError.unauthorized
+                case 429:
+                    if let rateLimitError = rateLimitError(from: httpResponse) {
+                        throw rateLimitError
+                    }
+                    throw APIError.http(statusCode: httpResponse.statusCode)
+                default:
+                    throw APIError.http(statusCode: httpResponse.statusCode)
+                }
+            } catch {
+                let apiError = normalizeGraphQLError(error)
+                let decision = retryDecision(for: apiError, attempt: attempt)
+
+                if let delay = decision.delay, attempt < Self.maxGraphQLAttempts {
+                    logger.warning(
+                        "GraphQL request retry scheduled: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) classification=\(decision.classification, privacy: .public) retryIn=\(delay.formattedSeconds, privacy: .public)s"
+                    )
+                    try await Task.sleep(nanoseconds: delay.nanoseconds)
+                    continue
+                }
+
+                logger.error(
+                    "GraphQL request failed: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) classification=\(decision.classification, privacy: .public) error=\(apiError.localizedDescription, privacy: .public)"
+                )
+                throw apiError
+            }
         }
 
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw APIError.invalidResponse
-        }
+        throw APIError.unknown("GraphQL request failed without a terminal error")
+    }
 
-        // Parse rate limit headers
-        if let limitStr = httpResponse.value(forHTTPHeaderField: "X-RateLimit-Limit"),
-           let remainingStr = httpResponse.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
-           let resetStr = httpResponse.value(forHTTPHeaderField: "X-RateLimit-Reset"),
+    private func updateRateLimitInfo(from response: HTTPURLResponse) {
+        if let limitStr = response.value(forHTTPHeaderField: "X-RateLimit-Limit"),
+           let remainingStr = response.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
+           let resetStr = response.value(forHTTPHeaderField: "X-RateLimit-Reset"),
            let limit = Int(limitStr),
            let remaining = Int(remainingStr),
            let resetTimestamp = TimeInterval(resetStr) {
@@ -628,44 +750,43 @@ final class GitHubAPIClient: ObservableObject {
                 )
             }
         }
+    }
 
-        switch httpResponse.statusCode {
-        case 200:
-            if attempt > 1 {
-                logger.info("GitHub API request succeeded on attempt \(attempt) after previous 5xx error")
-            }
-            // Check for GraphQL errors in response
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errors = json["errors"] as? [[String: Any]],
-               let firstError = errors.first,
-               let message = firstError["message"] as? String {
-                throw APIError.unknown(message)
-            }
-            return data
-        case 401:
-            throw APIError.unauthorized
-        case 403:
-            // Check for rate limiting
-            if let resetTime = httpResponse.value(forHTTPHeaderField: "X-RateLimit-Reset"),
-               let timestamp = TimeInterval(resetTime) {
-                let resetDate = Date(timeIntervalSince1970: timestamp)
-                throw APIError.rateLimited(resetDate: resetDate)
-            }
-            throw APIError.unauthorized
-        case 500, 502, 503, 504:
-            let maxAttempts = 3
-            if attempt < maxAttempts {
-                let delaySeconds: UInt64 = UInt64(attempt) * 2
-                logger.warning("GitHub API HTTP \(httpResponse.statusCode) on attempt \(attempt)/\(maxAttempts), retrying in \(delaySeconds)s")
-                try await Task.sleep(nanoseconds: delaySeconds * 1_000_000_000)
-                return try await executeGraphQL(query: query, attempt: attempt + 1)
-            }
-            logger.error("GitHub API HTTP \(httpResponse.statusCode) after \(maxAttempts) attempts, giving up")
-            throw APIError.unknown("HTTP \(httpResponse.statusCode)")
-        default:
-            logger.warning("GitHub API unexpected HTTP \(httpResponse.statusCode)")
-            throw APIError.unknown("HTTP \(httpResponse.statusCode)")
+    private func rateLimitError(from response: HTTPURLResponse) -> APIError? {
+        guard let resetTime = response.value(forHTTPHeaderField: "X-RateLimit-Reset"),
+              let timestamp = TimeInterval(resetTime) else {
+            return nil
         }
+        return APIError.rateLimited(resetDate: Date(timeIntervalSince1970: timestamp))
+    }
+
+    private func normalizeGraphQLError(_ error: Error) -> APIError {
+        if let apiError = error as? APIError {
+            return apiError
+        }
+        return APIError.network(error)
+    }
+
+    private func retryDecision(for error: APIError, attempt: Int) -> RetryDecision {
+        if error.isCancellation {
+            return RetryDecision(classification: "cancellation", delay: nil)
+        }
+
+        switch error {
+        case .rateLimited:
+            return RetryDecision(classification: "rateLimited", delay: nil)
+        case .network(_) where error.isTransient:
+            return RetryDecision(classification: "transientNetwork", delay: graphQLRetryDelay(for: attempt))
+        case .http(let statusCode) where [408, 429, 500, 502, 503, 504].contains(statusCode):
+            return RetryDecision(classification: "transientHTTP", delay: graphQLRetryDelay(for: attempt))
+        default:
+            return RetryDecision(classification: "terminal", delay: nil)
+        }
+    }
+
+    private func graphQLRetryDelay(for attempt: Int) -> TimeInterval {
+        let cap: TimeInterval = attempt == 1 ? 2 : 4
+        return Double.random(in: 0.5...cap)
     }
 
     private func parseSearchResponse(data: Data, category: PRCategory) throws -> [PullRequest] {
@@ -1005,7 +1126,7 @@ final class GitHubAPIClient: ObservableObject {
         }
         """
 
-        let responseData = try await executeGraphQL(query: query)
+        let responseData = try await executeGraphQL(query: query, operation: "fetchAdditionalReviewThreads")
         return try parseReviewThreadsResponse(data: responseData)
     }
 
@@ -1416,7 +1537,7 @@ final class GitHubAPIClient: ObservableObject {
         }
         """
 
-        let responseData = try await executeGraphQL(query: query)
+        let responseData = try await executeGraphQL(query: query, operation: "fetchSinglePRCIStatus")
         return try parseSinglePRCIResponse(data: responseData)
     }
 
@@ -1665,7 +1786,7 @@ final class GitHubAPIClient: ObservableObject {
             let query = "query {\n" + queryParts.joined(separator: "\n") + "\n}"
 
             do {
-                let responseData = try await executeGraphQL(query: query)
+                let responseData = try await executeGraphQL(query: query, operation: "fetchJiraTicketsBatch")
                 guard let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any],
                       let data = json["data"] as? [String: Any] else {
                     logger.error("Unexpected Jira GraphQL response: missing or invalid 'data' field")

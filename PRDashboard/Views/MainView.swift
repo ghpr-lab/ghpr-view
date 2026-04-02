@@ -11,13 +11,13 @@ struct MainView: View {
 
                 Divider()
 
-                if viewModel.prList.isLoading && viewModel.prList.pullRequests.isEmpty {
+                if viewModel.prList.isLoading && !viewModel.prList.hasUsableData {
                     // Loading state
                     loadingView
-                } else if let error = viewModel.prList.error {
+                } else if !viewModel.prList.hasUsableData, let error = viewModel.prList.error {
                     // Error state
                     errorView(error)
-                } else if viewModel.filteredPRs.isEmpty && viewModel.mergedLast24hPRs.isEmpty {
+                } else if !viewModel.prList.hasUsableData {
                     // Empty state
                     emptyView
                 } else {
@@ -83,6 +83,10 @@ struct MainView: View {
     private var prListView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
+                if let error = viewModel.prList.error {
+                    staleDataBanner(error)
+                }
+
                 PRSummaryView(
                     readyToMerge: viewModel.summaryReadyToMerge,
                     changesRequested: viewModel.summaryChangesRequested,
@@ -219,6 +223,45 @@ struct MainView: View {
         .padding()
     }
 
+    private func staleDataBanner(_ error: Error) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .foregroundColor(.orange)
+                .padding(.top, 2)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Refresh failed")
+                    .font(.system(size: 12, weight: .semibold))
+
+                Text("Showing data updated \(formatRelativeTime(viewModel.prList.lastUpdated)).")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+
+                Text(error.localizedDescription)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Button("Retry") {
+                viewModel.refresh()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        }
+        .padding(10)
+        .background(Color.orange.opacity(0.12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(Color.orange.opacity(0.35), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 8)
+        .padding(.top, 4)
+    }
+
     private var emptyView: some View {
         VStack(spacing: 12) {
             Image(systemName: "tray")
@@ -280,10 +323,14 @@ struct MainView: View {
         .padding(.vertical, 6)
     }
 
+    private static let relativeDateFormatter: RelativeDateTimeFormatter = {
+        let f = RelativeDateTimeFormatter()
+        f.unitsStyle = .abbreviated
+        return f
+    }()
+
     private func formatRelativeTime(_ date: Date) -> String {
-        let formatter = RelativeDateTimeFormatter()
-        formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: date, relativeTo: Date())
+        Self.relativeDateFormatter.localizedString(for: date, relativeTo: Date())
     }
 }
 

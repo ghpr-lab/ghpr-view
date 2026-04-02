@@ -26,6 +26,7 @@
 		A1000012 /* GitHubOAuthManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000012 /* GitHubOAuthManager.swift */; };
 		A1000013 /* DateFormatters.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000013 /* DateFormatters.swift */; };
 		A1000014 /* GitVersion.generated.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000014 /* GitVersion.generated.swift */; };
+		A1000015 /* TimeIntervalHelpers.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000015 /* TimeIntervalHelpers.swift */; };
 		A1000020 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A2000020 /* Assets.xcassets */; };
 		A1000030 /* PATInputView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000030 /* PATInputView.swift */; };
 		A1000031 /* CIStatusIcon.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000031 /* CIStatusIcon.swift */; };
@@ -55,6 +56,7 @@
 		A2000012 /* GitHubOAuthManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubOAuthManager.swift; sourceTree = "<group>"; };
 		A2000013 /* DateFormatters.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DateFormatters.swift; sourceTree = "<group>"; };
 		A2000014 /* GitVersion.generated.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitVersion.generated.swift; sourceTree = "<group>"; };
+		A2000015 /* TimeIntervalHelpers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeIntervalHelpers.swift; sourceTree = "<group>"; };
 		A2000020 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A2000021 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A2000022 /* PRDashboard.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = PRDashboard.entitlements; sourceTree = "<group>"; };
@@ -172,6 +174,7 @@
 			isa = PBXGroup;
 			children = (
 				A2000013 /* DateFormatters.swift */,
+				A2000015 /* TimeIntervalHelpers.swift */,
 				A2000014 /* GitVersion.generated.swift */,
 			);
 			path = Helpers;
@@ -298,6 +301,7 @@
 				A1000011 /* Keychain.swift in Sources */,
 				A1000012 /* GitHubOAuthManager.swift in Sources */,
 				A1000013 /* DateFormatters.swift in Sources */,
+				A1000015 /* TimeIntervalHelpers.swift in Sources */,
 				A1000014 /* GitVersion.generated.swift in Sources */,
 				A1000040 /* PRCache.swift in Sources */,
 				A1000041 /* AvatarCache.swift in Sources */,
