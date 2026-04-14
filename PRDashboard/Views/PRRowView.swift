@@ -29,6 +29,9 @@ struct PRRowView: View {
     var ciAutoRetryRound: Int?  // nil = not active, 0-3 = current round
     var showCIStatus: Bool = true
     var showMyReviewStatus: Bool = false
+    var onboardingManager: OnboardingManager? = nil
+    var approvalOnboardingPRID: Int? = nil
+    var reviewStatusOnboardingPRID: Int? = nil
 
     @ObservedObject private var menuTracker = MenuTracker.shared
     @State private var isHovered = false
@@ -104,7 +107,7 @@ struct PRRowView: View {
                     }
 
                     if pr.approvalCount > 0 {
-                        ApprovalBadge(count: pr.approvalCount)
+                        approvalBadge
                     }
 
                     Spacer()
@@ -122,7 +125,7 @@ struct PRRowView: View {
                         }
                     } else if pr.category == .reviewRequest {
                         if showMyReviewStatus, let reviewStatus = pr.myReviewStatus {
-                            MyReviewStatusBadge(status: reviewStatus)
+                            reviewStatusBadge(reviewStatus)
                         }
                     }
 
@@ -195,6 +198,30 @@ struct PRRowView: View {
                     Label("Rerun Failed CI", systemImage: "arrow.clockwise")
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var approvalBadge: some View {
+        let badge = ApprovalBadge(count: pr.approvalCount)
+            .preference(key: FirstApprovalBadgeIDPreferenceKey.self, value: pr.id)
+
+        if let onboardingManager, approvalOnboardingPRID == pr.id {
+            badge.onboardingAnchor(onboardingManager, step: .approvals)
+        } else {
+            badge
+        }
+    }
+
+    @ViewBuilder
+    private func reviewStatusBadge(_ reviewStatus: MyReviewStatus) -> some View {
+        let badge = MyReviewStatusBadge(status: reviewStatus)
+            .preference(key: FirstReviewStatusBadgeIDPreferenceKey.self, value: pr.id)
+
+        if let onboardingManager, reviewStatusOnboardingPRID == pr.id {
+            badge.onboardingAnchor(onboardingManager, step: .myReviewStatus)
+        } else {
+            badge
         }
     }
 }

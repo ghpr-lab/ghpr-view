@@ -29,27 +29,27 @@ enum APIError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .unauthorized:
-            return "Invalid GitHub token. Please check your settings."
+            return String(localized: "Invalid GitHub token. Please check your settings.")
         case .rateLimited(let resetDate):
             let formatter = DateFormatter()
             formatter.timeStyle = .short
-            return "Rate limited. Try again after \(formatter.string(from: resetDate))"
+            return String(localized: "Rate limited. Try again after \(formatter.string(from: resetDate))")
         case .network(let error):
-            return "Network error: \(error.localizedDescription)"
+            return String(localized: "Network error: \(error.localizedDescription)")
         case .decoding(let error):
-            return "Failed to parse response: \(error.localizedDescription)"
+            return String(localized: "Failed to parse response: \(error.localizedDescription)")
         case .invalidResponse:
-            return "Invalid response from GitHub"
+            return String(localized: "Invalid response from GitHub")
         case .http(let statusCode):
             switch statusCode {
             case 408:
-                return "GitHub API request timed out (HTTP 408)"
+                return String(localized: "GitHub API request timed out (HTTP 408)")
             case 429:
-                return "GitHub API temporarily rejected the request (HTTP 429)"
+                return String(localized: "GitHub API temporarily rejected the request (HTTP 429)")
             case 500, 502, 503, 504:
-                return "GitHub API is temporarily unavailable (HTTP \(statusCode))"
+                return String(localized: "GitHub API is temporarily unavailable (HTTP \(statusCode))")
             default:
-                return "GitHub API request failed (HTTP \(statusCode))"
+                return String(localized: "GitHub API request failed (HTTP \(statusCode))")
             }
         case .unknown(let message):
             return message
@@ -732,7 +732,7 @@ final class GitHubAPIClient: ObservableObject {
             }
         }
 
-        throw APIError.unknown("GraphQL request failed without a terminal error")
+        throw APIError.unknown(String(localized: "GraphQL request failed without a terminal error"))
     }
 
     private func updateRateLimitInfo(from response: HTTPURLResponse) {
@@ -1670,7 +1670,7 @@ final class GitHubAPIClient: ObservableObject {
             if httpResponse.statusCode == 401 {
                 throw APIError.unauthorized
             }
-            throw APIError.unknown("Failed to fetch workflow runs: HTTP \(httpResponse.statusCode)")
+            throw APIError.unknown(String(localized: "Failed to fetch workflow runs: HTTP \(httpResponse.statusCode)"))
         }
 
         // 2. Parse and filter for failed runs
@@ -1856,7 +1856,7 @@ final class GitHubAPIClient: ObservableObject {
             if httpResponse.statusCode == 401 {
                 throw APIError.unauthorized
             }
-            throw APIError.unknown("Failed to fetch workflow runs: HTTP \(httpResponse.statusCode)")
+            throw APIError.unknown(String(localized: "Failed to fetch workflow runs: HTTP \(httpResponse.statusCode)"))
         }
 
         guard let json = try? JSONSerialization.jsonObject(with: runsData) as? [String: Any],

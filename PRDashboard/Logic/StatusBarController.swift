@@ -33,7 +33,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         guard let button = statusItem.button else { return }
 
         // Use SF Symbol for menu bar icon (GitHub-like icon)
-        if let image = NSImage(systemSymbolName: "arrow.triangle.pull", accessibilityDescription: "Pull Requests") {
+        if let image = NSImage(
+            systemSymbolName: "arrow.triangle.pull",
+            accessibilityDescription: String(localized: "Pull Requests")
+        ) {
             image.isTemplate = true
             button.image = image
         } else {
@@ -53,13 +56,21 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
         let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
         let gitVersion = GitVersion.displayString
-        let versionItem = NSMenuItem(title: "PR Dashboard v\(version) (\(build)) \(gitVersion)", action: nil, keyEquivalent: "")
+        let versionItem = NSMenuItem(
+            title: String(localized: "PR Dashboard v\(version) (\(build)) \(gitVersion)"),
+            action: nil,
+            keyEquivalent: ""
+        )
         versionItem.isEnabled = false
         menu.addItem(versionItem)
 
         menu.addItem(NSMenuItem.separator())
 
-        let quitItem = NSMenuItem(title: "Quit PR Dashboard", action: #selector(quitApp), keyEquivalent: "q")
+        let quitItem = NSMenuItem(
+            title: String(localized: "Quit PR Dashboard"),
+            action: #selector(quitApp),
+            keyEquivalent: "q"
+        )
         quitItem.target = self
         menu.addItem(quitItem)
         return menu

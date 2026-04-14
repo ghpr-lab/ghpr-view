@@ -36,7 +36,7 @@ enum ConfigurationError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .invalidRefreshInterval:
-            return "Refresh interval must be at least 1 minute"
+            return String(localized: "Refresh interval must be at least 1 minute")
         }
     }
 }

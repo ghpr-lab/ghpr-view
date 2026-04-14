@@ -43,7 +43,11 @@ final class NotificationManager: NSObject, ObservableObject {
 
         let content = UNMutableNotificationContent()
         content.title = "\(pr.repoFullName) #\(pr.number)"
-        content.body = "\(newUnresolvedCount) new unresolved comment\(newUnresolvedCount == 1 ? "" : "s") on \"\(pr.title)\""
+        if newUnresolvedCount == 1 {
+            content.body = String(localized: "1 new unresolved comment on \"\(pr.title)\"")
+        } else {
+            content.body = String(localized: "\(newUnresolvedCount) new unresolved comments on \"\(pr.title)\"")
+        }
         content.sound = .default
         content.userInfo = ["pr_url": pr.url.absoluteString, "pr_id": pr.id]
         content.categoryIdentifier = "PR_NOTIFICATION"
@@ -78,9 +82,9 @@ final class NotificationManager: NSObject, ObservableObject {
 
         switch newStatus {
         case .success:
-            content.body = "All CI checks passed on \"\(pr.title)\""
+            content.body = String(localized: "All CI checks passed on \"\(pr.title)\"")
         case .failure:
-            content.body = "CI checks failed on \"\(pr.title)\""
+            content.body = String(localized: "CI checks failed on \"\(pr.title)\"")
         default:
             return  // Don't notify for pending/expected
         }
@@ -131,13 +135,13 @@ final class NotificationManager: NSObject, ObservableObject {
     private func registerCategories() {
         let openAction = UNNotificationAction(
             identifier: "OPEN_PR",
-            title: "Open PR",
+            title: String(localized: "Open PR"),
             options: .foreground
         )
 
         let muteAction = UNNotificationAction(
             identifier: "MUTE_PR",
-            title: "Mute Notifications",
+            title: String(localized: "Mute Notifications"),
             options: .destructive
         )
 

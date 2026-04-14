@@ -16,19 +16,49 @@ struct PRSummaryView: View {
     private var segments: [Segment] {
         var result: [Segment] = []
         if readyToMerge > 0 {
-            result.append(Segment(icon: "checkmark.circle.fill", color: .green, label: "\(readyToMerge) ready to merge"))
+            result.append(
+                Segment(
+                    icon: "checkmark.circle.fill",
+                    color: .green,
+                    label: String(localized: "\(readyToMerge) ready to merge")
+                )
+            )
         }
         if changesRequested > 0 {
-            result.append(Segment(icon: "exclamationmark.triangle.fill", color: .red, label: "\(changesRequested) needs changes"))
+            result.append(
+                Segment(
+                    icon: "exclamationmark.triangle.fill",
+                    color: .red,
+                    label: String(localized: "\(changesRequested) needs changes")
+                )
+            )
         }
         if ciFailing > 0 {
-            result.append(Segment(icon: "xmark.circle.fill", color: .red, label: "\(ciFailing) CI failing"))
+            result.append(
+                Segment(
+                    icon: "xmark.circle.fill",
+                    color: .red,
+                    label: String(localized: "\(ciFailing) CI failing")
+                )
+            )
         }
         if ciRunning > 0 {
-            result.append(Segment(icon: "clock.circle.fill", color: .yellow, label: "\(ciRunning) CI running"))
+            result.append(
+                Segment(
+                    icon: "clock.circle.fill",
+                    color: .yellow,
+                    label: String(localized: "\(ciRunning) CI running")
+                )
+            )
         }
         if toReview > 0 {
-            result.append(Segment(icon: "person.crop.circle.badge.clock", color: .orange, label: "\(toReview) to review"))
+            result.append(
+                Segment(
+                    icon: "person.crop.circle.badge.clock",
+                    color: .orange,
+                    label: String(localized: "\(toReview) to review")
+                )
+            )
         }
         return result
     }

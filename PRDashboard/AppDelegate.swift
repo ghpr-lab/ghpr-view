@@ -7,6 +7,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var oauthManager: GitHubOAuthManager?
     var prManager: PRManager?
     var notificationManager: NotificationManager?
+    var onboardingManager: OnboardingManager?
     var settingsWindow: NSWindow?
 
     private var cancellables = Set<AnyCancellable>()
@@ -33,6 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 5. Create view model
         let viewModel = PRListViewModel(prManager: prManager!, oauthManager: oauthManager!)
+        onboardingManager = OnboardingManager()
 
         // Wire up settings window callback
         viewModel.openSettings = { [weak self] in
@@ -40,7 +42,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // 6. Create main view
-        let mainView = MainView(viewModel: viewModel)
+        let mainView = MainView(
+            viewModel: viewModel,
+            onboardingManager: onboardingManager!
+        )
 
         // 7. Create popover
         let popover = NSPopover()
@@ -75,12 +80,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openSettingsWindow(viewModel: PRListViewModel) {
+        guard let onboardingManager else { return }
+
         if settingsWindow == nil {
-            let settingsView = SettingsView(viewModel: viewModel)
+            let settingsView = SettingsView(
+                viewModel: viewModel,
+                onboardingManager: onboardingManager
+            )
             let hostingController = NSHostingController(rootView: settingsView)
 
             let window = NSWindow(contentViewController: hostingController)
-            window.title = "Settings"
+            window.title = String(localized: "Settings")
             window.styleMask = [.titled, .closable]
             window.setContentSize(NSSize(width: 450, height: 450))
             window.center()

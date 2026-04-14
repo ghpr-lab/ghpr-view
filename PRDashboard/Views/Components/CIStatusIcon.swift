@@ -79,12 +79,12 @@ struct CIStatusIcon: View {
             case .failure:
                 let failedWf = workflows.filter { $0.status == .failure }.count
                 let totalFailedTasks = workflows.reduce(0) { $0 + $1.failureCount }
-                return "\(failedWf)/\(totalWf)wf·\(totalFailedTasks)"
+                return String(localized: "\(failedWf)/\(totalWf) wf · \(totalFailedTasks)")
             case .pending:
                 let doneWf = workflows.filter { $0.status == .success || $0.status == .failure }.count
-                return "\(doneWf)/\(totalWf)wf"
+                return String(localized: "\(doneWf)/\(totalWf) wf")
             case .success:
-                return "\(totalWf)wf"
+                return String(localized: "\(totalWf) wf")
             default:
                 return ""
             }
@@ -100,19 +100,26 @@ struct CIStatusIcon: View {
     }
 
     private var hoverText: String {
-        let runningSuffix = isRunning ? ", running" : ""
         let totalWf = workflows.count
         if totalWf > 0 {
             switch status {
             case .failure:
                 let failedWf = workflows.filter { $0.status == .failure }.count
                 let totalFailedTasks = workflows.reduce(0) { $0 + $1.failureCount }
-                return "\(failedWf)/\(totalWf) workflows failed, \(totalFailedTasks) tasks\(runningSuffix)"
+                if isRunning {
+                    return String(localized: "\(failedWf)/\(totalWf) workflows failed, \(totalFailedTasks) tasks, running")
+                } else {
+                    return String(localized: "\(failedWf)/\(totalWf) workflows failed, \(totalFailedTasks) tasks")
+                }
             case .pending:
                 let doneWf = workflows.filter { $0.status == .success || $0.status == .failure }.count
-                return "\(doneWf)/\(totalWf) workflows done\(runningSuffix)"
+                if isRunning {
+                    return String(localized: "\(doneWf)/\(totalWf) workflows done, running")
+                } else {
+                    return String(localized: "\(doneWf)/\(totalWf) workflows done")
+                }
             case .success:
-                return "\(totalWf) workflows passed"
+                return String(localized: "\(totalWf) workflows passed")
             default:
                 return ""
             }
@@ -122,11 +129,19 @@ struct CIStatusIcon: View {
         if total == 0 { return "" }
         switch status {
         case .failure:
-            return "\(failureCount)/\(total) tasks failed\(runningSuffix)"
+            if isRunning {
+                return String(localized: "\(failureCount)/\(total) tasks failed, running")
+            } else {
+                return String(localized: "\(failureCount)/\(total) tasks failed")
+            }
         case .pending:
-            return "\(successCount)/\(total) tasks done\(runningSuffix)"
+            if isRunning {
+                return String(localized: "\(successCount)/\(total) tasks done, running")
+            } else {
+                return String(localized: "\(successCount)/\(total) tasks done")
+            }
         case .success:
-            return "\(total) tasks passed"
+            return String(localized: "\(total) tasks passed")
         default:
             return ""
         }
