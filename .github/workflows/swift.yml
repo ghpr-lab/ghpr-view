@@ -17,9 +17,6 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Build
-      run: xcodebuild -project PRDashboard.xcodeproj -scheme PRDashboard -configuration Release -sdk macosx -arch arm64 CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO build
-
     - name: Get version from tag
       id: version
       run: |
@@ -30,6 +27,25 @@ jobs:
           echo "version=dev" >> $GITHUB_OUTPUT
           echo "is_release=false" >> $GITHUB_OUTPUT
         fi
+
+    - name: Build
+      run: |
+        EXTRA_ARGS=()
+        if [[ "${{ steps.version.outputs.is_release }}" == "true" ]]; then
+          EXTRA_ARGS+=("MARKETING_VERSION=${{ steps.version.outputs.version }}")
+        fi
+
+        xcodebuild \
+          -project PRDashboard.xcodeproj \
+          -scheme PRDashboard \
+          -configuration Release \
+          -sdk macosx \
+          -arch arm64 \
+          CODE_SIGN_IDENTITY="" \
+          CODE_SIGNING_REQUIRED=NO \
+          CODE_SIGNING_ALLOWED=NO \
+          "${EXTRA_ARGS[@]}" \
+          build
 
     - name: Create Release Artifact
       run: |

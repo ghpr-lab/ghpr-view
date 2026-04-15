@@ -7,14 +7,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var statusItem: NSStatusItem
     private var popover: NSPopover
     private weak var prManager: PRManagerType?
+    private let onCheckForUpdates: () -> Void
 
     private var eventMonitor: Any?
 
-    init(popover: NSPopover, prManager: PRManagerType) {
+    init(popover: NSPopover, prManager: PRManagerType, onCheckForUpdates: @escaping () -> Void) {
         self.statusBar = NSStatusBar.system
         self.statusItem = statusBar.statusItem(withLength: NSStatusItem.variableLength)
         self.popover = popover
         self.prManager = prManager
+        self.onCheckForUpdates = onCheckForUpdates
 
         super.init()
 
@@ -66,6 +68,16 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
+        let updateItem = NSMenuItem(
+            title: String(localized: "Check for Updates…"),
+            action: #selector(checkForUpdates),
+            keyEquivalent: ""
+        )
+        updateItem.target = self
+        menu.addItem(updateItem)
+
+        menu.addItem(NSMenuItem.separator())
+
         let quitItem = NSMenuItem(
             title: String(localized: "Quit PR Dashboard"),
             action: #selector(quitApp),
@@ -78,6 +90,10 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     @objc private func quitApp() {
         NSApplication.shared.terminate(nil)
+    }
+
+    @objc private func checkForUpdates() {
+        onCheckForUpdates()
     }
 
     @objc private func handleClick(_ sender: AnyObject) {

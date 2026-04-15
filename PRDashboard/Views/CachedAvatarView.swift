@@ -34,11 +34,15 @@ struct CachedAvatarView: View {
     }
 }
 
-#Preview {
-    CachedAvatarView(
-        url: URL(string: "https://avatars.githubusercontent.com/u/1?v=4"),
-        authorInitial: "X"
-    )
-    .frame(width: 32, height: 32)
-    .clipShape(Circle())
+#if DEBUG
+struct CachedAvatarView_Previews: PreviewProvider {
+    static var previews: some View {
+        CachedAvatarView(
+            url: URL(string: "https://avatars.githubusercontent.com/u/1?v=4"),
+            authorInitial: "X"
+        )
+        .frame(width: 32, height: 32)
+        .clipShape(Circle())
+    }
 }
+#endif

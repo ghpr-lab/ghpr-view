@@ -102,17 +102,21 @@ struct ApprovalBadge: View {
     }
 }
 
-#Preview {
-    VStack(spacing: 10) {
-        Badge(count: 5)
-        Badge(count: 99)
-        Badge(count: 100)
-        DraftBadge()
-        MyReviewStatusBadge(status: .waiting)
-        MyReviewStatusBadge(status: .changesRequested)
-        MyReviewStatusBadge(status: .changesResolved)
-        MyReviewStatusBadge(status: .approved)
-        ApprovalBadge(count: 2)
+#if DEBUG
+struct Badge_Previews: PreviewProvider {
+    static var previews: some View {
+        VStack(spacing: 10) {
+            Badge(count: 5)
+            Badge(count: 99)
+            Badge(count: 100)
+            DraftBadge()
+            MyReviewStatusBadge(status: .waiting)
+            MyReviewStatusBadge(status: .changesRequested)
+            MyReviewStatusBadge(status: .changesResolved)
+            MyReviewStatusBadge(status: .approved)
+            ApprovalBadge(count: 2)
+        }
+        .padding()
     }
-    .padding()
 }
+#endif

@@ -2,13 +2,16 @@ import Cocoa
 import Combine
 import SwiftUI
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     var statusBarController: StatusBarController?
     var oauthManager: GitHubOAuthManager?
     var prManager: PRManager?
     var notificationManager: NotificationManager?
     var onboardingManager: OnboardingManager?
+    var updateManager: UpdateManager?
     var settingsWindow: NSWindow?
+    var updateWindow: NSWindow?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -28,6 +31,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             notificationManager: notificationManager!,
             oauthManager: oauthManager!
         )
+        updateManager = UpdateManager(configuration: prManager!.configuration)
+        updateManager?.onRequestPresentation = { [weak self] in
+            self?.openUpdateWindow()
+        }
 
         // 4.1 Load cached PR data for immediate display
         prManager?.loadCachedData()
@@ -54,13 +61,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentViewController = NSHostingController(rootView: mainView)
 
         // 8. Create status bar controller
-        statusBarController = StatusBarController(popover: popover, prManager: prManager!)
+        statusBarController = StatusBarController(
+            popover: popover,
+            prManager: prManager!,
+            onCheckForUpdates: { [weak self] in
+                self?.checkForUpdates(userInitiated: true)
+            }
+        )
 
         // 9. Observe PR list changes to update badge (authored PRs only)
         prManager?.$prList
             .receive(on: DispatchQueue.main)
             .sink { [weak self] prList in
                 self?.statusBarController?.updateBadge(count: prList.authoredUnresolvedCount)
+            }
+            .store(in: &cancellables)
+
+        prManager?.$configuration
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] configuration in
+                self?.updateManager?.updateConfiguration(configuration)
             }
             .store(in: &cancellables)
 
@@ -77,6 +97,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.notificationManager?.requestPermission()
             }
             .store(in: &cancellables)
+
+        updateManager?.start()
     }
 
     private func openSettingsWindow(viewModel: PRListViewModel) {
@@ -92,12 +114,39 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: hostingController)
             window.title = String(localized: "Settings")
             window.styleMask = [.titled, .closable]
-            window.setContentSize(NSSize(width: 450, height: 480))
+            window.setContentSize(NSSize(width: 450, height: 520))
             window.center()
             settingsWindow = window
         }
 
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func openUpdateWindow() {
+        guard let updateManager else { return }
+
+        if updateWindow == nil {
+            let updateView = UpdateView(updateManager: updateManager)
+            let hostingController = NSHostingController(rootView: updateView)
+
+            let window = NSWindow(contentViewController: hostingController)
+            window.title = String(localized: "Software Update")
+            window.styleMask = [.titled, .closable]
+            window.setContentSize(NSSize(width: 560, height: 520))
+            window.center()
+            updateWindow = window
+        }
+
+        updateWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func checkForUpdates(userInitiated: Bool) {
+        if userInitiated {
+            openUpdateWindow()
+        }
+
+        updateManager?.checkForUpdates(userInitiated: userInitiated)
     }
 }
