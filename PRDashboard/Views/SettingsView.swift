@@ -3,6 +3,7 @@ import ServiceManagement
 
 struct SettingsView: View {
     @ObservedObject var viewModel: PRListViewModel
+    @ObservedObject var onboardingManager: OnboardingManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
@@ -18,7 +19,7 @@ struct SettingsView: View {
     @State private var showPATSwitchSheet = false
     @State private var newPATToken = ""
 
-    private let refreshIntervalOptions: [(String, Double)] = [
+    private let refreshIntervalOptions: [(LocalizedStringKey, Double)] = [
         ("1 minute", 60),
         ("2 minutes", 120),
         ("5 minutes", 300),
@@ -128,23 +129,21 @@ struct SettingsView: View {
                 }
 
                 Section("Filters") {
-                    TextField("Repositories (comma-separated, leave empty for all)", text: $repositories)
-                        .textFieldStyle(.roundedBorder)
-
-                    Text("Example: owner/repo1, owner/repo2")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    HStack {
+                        TextField("Repositories (comma-separated, leave empty for all)", text: $repositories)
+                            .textFieldStyle(.roundedBorder)
+                        HelpHint("Filter PRs to specific repos. Format: owner/repo, comma-separated (e.g., owner/repo1, owner/repo2). Leave empty to show PRs from all repos.")
+                    }
 
                     Toggle("Show draft PRs", isOn: $showDrafts)
 
                     Toggle("Show my review status badges", isOn: $showMyReviewStatus)
 
-                    TextField("CI status exclude filter", text: $ciStatusExcludeFilter)
-                        .textFieldStyle(.roundedBorder)
-
-                    Text("Exclude status checks containing this keyword (e.g., review)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
+                    HStack {
+                        TextField("CI status exclude filter", text: $ciStatusExcludeFilter)
+                            .textFieldStyle(.roundedBorder)
+                        HelpHint("Exclude CI status checks whose name contains this keyword (e.g., \"review\" hides checks like \"code-review\"). Leave empty to include all checks.")
+                    }
                 }
 
                 Section("Notifications") {
@@ -154,6 +153,13 @@ struct SettingsView: View {
                 Section("Power & Network") {
                     Toggle("Pause background refresh in Low Power Mode", isOn: $pausePollingInLowPowerMode)
                     Toggle("Pause background refresh on cellular/hotspot", isOn: $pausePollingOnExpensiveNetwork)
+                }
+
+                Section("Developer Options") {
+                    Button("Show onboarding again") {
+                        onboardingManager.reset()
+                        dismiss()
+                    }
                 }
             }
             .formStyle(.grouped)
@@ -177,7 +183,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 450, height: 450)
+        .frame(width: 450, height: 480)
         .onAppear {
             loadCurrentSettings()
         }
@@ -250,6 +256,47 @@ struct SettingsView: View {
         pausePollingInLowPowerMode = config.pausePollingInLowPowerMode
         pausePollingOnExpensiveNetwork = config.pausePollingOnExpensiveNetwork
         showMyReviewStatus = config.showMyReviewStatus
+    }
+
+    private struct HelpHint: View {
+        let text: LocalizedStringKey
+        @State private var isShown = false
+        @State private var hoverTask: Task<Void, Never>?
+
+        init(_ text: LocalizedStringKey) {
+            self.text = text
+        }
+
+        var body: some View {
+            Image(systemName: "questionmark.circle")
+                .foregroundColor(.secondary)
+                .accessibilityLabel(Text("Help"))
+                .accessibilityHint(Text(text))
+                .onHover { hovering in
+                    hoverTask?.cancel()
+                    if hovering {
+                        hoverTask = Task {
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                            if !Task.isCancelled {
+                                isShown = true
+                            }
+                        }
+                    } else {
+                        isShown = false
+                    }
+                }
+                .popover(isPresented: $isShown, arrowEdge: .top) {
+                    Text(text)
+                        .font(.system(size: 12))
+                        .padding(10)
+                        .frame(maxWidth: 280)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .onDisappear {
+                    hoverTask?.cancel()
+                    hoverTask = nil
+                }
+        }
     }
 
     private func save() {

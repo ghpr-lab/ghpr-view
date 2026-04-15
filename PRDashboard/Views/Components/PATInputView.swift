@@ -15,7 +15,12 @@ struct PATInputView: View {
                 Text("Enter Personal Access Token")
                     .font(.system(size: 13, weight: .medium))
 
-                Text("Create a token at GitHub Settings > Developer settings > Personal access tokens")
+                Text("Create a classic Personal Access Token at GitHub Settings > Developer settings > Personal access tokens (classic)")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+
+                Text("If your organization enforces SAML SSO, authorize this token for it after creation.")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -25,7 +30,7 @@ struct PATInputView: View {
             HStack(spacing: 4) {
                 Image(systemName: "info.circle")
                     .font(.system(size: 11))
-                Text("Required scopes: repo, read:user")
+                Text("Required scopes: repo, read:user, workflow")
                     .font(.system(size: 11))
             }
             .foregroundColor(.secondary)

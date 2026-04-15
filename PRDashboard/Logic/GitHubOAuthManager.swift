@@ -6,7 +6,7 @@ class GitHubOAuthManager: NSObject, ObservableObject {
     // OAuth App credentials
     // Create at: https://github.com/settings/developers
     private let clientID = "Ov23liGCAVv1nOHzVVhf"
-    private let scope = "repo read:user"
+    private let scope = "repo read:user workflow"
 
     @Published private(set) var authState: AuthState = .empty
     @Published private(set) var isAuthenticating = false
@@ -77,7 +77,7 @@ class GitHubOAuthManager: NSObject, ObservableObject {
             }
 
             // Check required scopes
-            let requiredScopes = ["repo", "read:user"]
+            let requiredScopes = ["repo", "read:user", "workflow"]
             let missingScopes = requiredScopes.filter { required in
                 !scopes.contains { $0 == required || $0.hasPrefix("\(required):") }
             }
@@ -257,7 +257,7 @@ class GitHubOAuthManager: NSObject, ObservableObject {
 
         guard let httpResponse = response as? HTTPURLResponse,
               httpResponse.statusCode == 200 else {
-            throw OAuthError.tokenExchangeFailed("HTTP error")
+            throw OAuthError.tokenExchangeFailed(String(localized: "HTTP error"))
         }
 
         let tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
@@ -272,11 +272,11 @@ class GitHubOAuthManager: NSObject, ObservableObject {
         case "slow_down":
             return .slowDown
         case "expired_token":
-            return .error("Code expired. Please try again.")
+            return .error(String(localized: "Code expired. Please try again."))
         case "access_denied":
-            return .error("Access denied by user.")
+            return .error(String(localized: "Access denied by user."))
         default:
-            return .error(tokenResponse.error ?? "Unknown error")
+            return .error(tokenResponse.error ?? String(localized: "Unknown error"))
         }
     }
 
@@ -344,11 +344,11 @@ enum OAuthError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .deviceCodeFailed:
-            return "Failed to get device code from GitHub"
+            return String(localized: "Failed to get device code from GitHub")
         case .tokenExchangeFailed(let reason):
-            return "Failed to get access token: \(reason)"
+            return String(localized: "Failed to get access token: \(reason)")
         case .userFetchFailed:
-            return "Failed to fetch user information"
+            return String(localized: "Failed to fetch user information")
         }
     }
 }
@@ -362,13 +362,13 @@ enum PATError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .emptyToken:
-            return "Please enter a Personal Access Token"
+            return String(localized: "Please enter a Personal Access Token")
         case .invalidToken:
-            return "The token is invalid or expired"
+            return String(localized: "The token is invalid or expired")
         case .insufficientScopes(let missing):
-            return "Token missing required scopes: \(missing.joined(separator: ", "))"
+            return String(localized: "Token missing required scopes: \(missing.joined(separator: ", "))")
         case .networkError(let error):
-            return "Network error: \(error.localizedDescription)"
+            return String(localized: "Network error: \(error.localizedDescription)")
         }
     }
 }

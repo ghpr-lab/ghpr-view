@@ -484,7 +484,8 @@ final class PRManager: PRManagerType, ObservableObject {
             consecutiveTransientFailures = 0
             let delay = max(0, resetDate.timeIntervalSinceNow) + Double.random(in: 1...3)
             return RecoveryRetryPlan(delay: delay, reason: "rate_limited")
-        case .network(_), .http(_) where apiError.isTransient:
+        case .network(_) where apiError.isTransient,
+             .http(_) where apiError.isTransient:
             consecutiveTransientFailures += 1
             let baseDelay: TimeInterval
             switch min(consecutiveTransientFailures, 3) {
@@ -512,7 +513,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
     func rerunFailedCI(for pr: PullRequest) async throws -> Int {
         guard let headSHA = pr.headCommitOid else {
-            throw APIError.unknown("No head commit SHA available for PR #\(pr.number)")
+            throw APIError.unknown(String(localized: "No head commit SHA available for PR #\(pr.number)"))
         }
         let count = try await apiClient.rerunFailedWorkflows(
             owner: pr.repositoryOwner, repo: pr.repositoryName, headSHA: headSHA

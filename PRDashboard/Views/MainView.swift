@@ -2,6 +2,9 @@ import SwiftUI
 
 struct MainView: View {
     @ObservedObject var viewModel: PRListViewModel
+    @ObservedObject var onboardingManager: OnboardingManager
+    @State private var firstVisibleApprovalPRID: Int?
+    @State private var firstVisibleReviewStatusPRID: Int?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,6 +38,12 @@ struct MainView: View {
             }
         }
         .frame(width: 400, height: 500)
+        .onAppear(perform: syncOnboardingState)
+        .onChange(of: onboardingAvailableSteps) { _ in
+            syncOnboardingState()
+        }
+        .onPreferenceChange(FirstApprovalBadgeIDPreferenceKey.self) { firstVisibleApprovalPRID = $0 }
+        .onPreferenceChange(FirstReviewStatusBadgeIDPreferenceKey.self) { firstVisibleReviewStatusPRID = $0 }
     }
 
     // MARK: - Header
@@ -58,6 +67,7 @@ struct MainView: View {
             .padding(6)
             .background(Color.primary.opacity(0.05))
             .cornerRadius(6)
+            .onboardingAnchor(onboardingManager, step: .filter)
 
             Spacer()
 
@@ -74,6 +84,7 @@ struct MainView: View {
                 Image(systemName: "gear")
             }
             .buttonStyle(.plain)
+            .onboardingAnchor(onboardingManager, step: .repoFilter)
         }
         .padding(10)
     }
@@ -97,7 +108,7 @@ struct MainView: View {
 
                 // My PRs section
                 if !viewModel.authoredPRs.isEmpty {
-                    sectionHeader("My PRs", count: viewModel.authoredPRs.count)
+                    sectionHeader("My PRs", count: viewModel.authoredPRs.count, onboardingStep: .myPRs)
 
                     // Pinned PRs at top
                     if !viewModel.pinnedAuthoredPRs.isEmpty {
@@ -118,7 +129,10 @@ struct MainView: View {
                                 isPinned: true,
                                 ciAutoRetryRound: viewModel.ciAutoRetryRound(for: pr),
                                 showCIStatus: true,
-                                showMyReviewStatus: viewModel.configuration.showMyReviewStatus
+                                showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
+                                onboardingManager: onboardingManager,
+                                approvalOnboardingPRID: firstVisibleApprovalPRID,
+                                reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
                             )
                         }
                     }
@@ -132,7 +146,7 @@ struct MainView: View {
 
                 // Review Requests section
                 if !viewModel.reviewRequestPRs.isEmpty {
-                    sectionHeader("Review Requests", count: viewModel.reviewRequestPRs.count)
+                    sectionHeader("Review Requests", count: viewModel.reviewRequestPRs.count, onboardingStep: .reviewRequests)
 
                     ForEach(viewModel.groupedReviewPRs, id: \.0) { repo, prs in
                         repoSection(repo: repo, prs: prs)
@@ -142,7 +156,7 @@ struct MainView: View {
 
                 // Merged Today section
                 if !viewModel.mergedLast24hPRs.isEmpty {
-                    sectionHeader("Merged Today", count: viewModel.mergedLast24hPRs.count)
+                    sectionHeader("Merged Today", count: viewModel.mergedLast24hPRs.count, onboardingStep: .mergedToday)
 
                     ForEach(viewModel.groupedMergedLast24hPRs, id: \.0) { repo, prs in
                         repoSection(repo: repo, prs: prs, showCIStatus: false)
@@ -156,8 +170,12 @@ struct MainView: View {
         .id(viewModel.pinChangeToken)
     }
 
-    private func sectionHeader(_ title: String, count: Int) -> some View {
-        HStack {
+    private func sectionHeader(
+        _ title: LocalizedStringKey,
+        count: Int,
+        onboardingStep: OnboardingManager.Step? = nil
+    ) -> some View {
+        let header = HStack {
             Text(title)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
@@ -169,6 +187,14 @@ struct MainView: View {
         .padding(.horizontal, 8)
         .padding(.top, 12)
         .padding(.bottom, 4)
+
+        return Group {
+            if let onboardingStep {
+                header.onboardingAnchor(onboardingManager, step: onboardingStep)
+            } else {
+                header
+            }
+        }
     }
 
     @ViewBuilder
@@ -182,7 +208,10 @@ struct MainView: View {
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
                 isPinned: showPin && viewModel.isPinned(pr),
                 showCIStatus: showCIStatus,
-                showMyReviewStatus: viewModel.configuration.showMyReviewStatus
+                showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
+                onboardingManager: onboardingManager,
+                approvalOnboardingPRID: firstVisibleApprovalPRID,
+                reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
             )
         }
     }
@@ -307,16 +336,27 @@ struct MainView: View {
                     .font(.system(size: 10))
             }
             .foregroundColor(viewModel.rateLimitInfo.isLow ? .orange : .secondary)
-            .help("API rate limit: \(viewModel.rateLimitInfo.remaining) remaining of \(viewModel.rateLimitInfo.limit)")
+            .help(
+                String(
+                    localized:
+                        "API rate limit: \(viewModel.rateLimitInfo.remaining) remaining of \(viewModel.rateLimitInfo.limit)"
+                )
+            )
 
             if viewModel.totalUnresolvedCount > 0 {
-                HStack(spacing: 4) {
+                let unresolvedView = HStack(spacing: 4) {
                     Image(systemName: "bubble.left.and.bubble.right")
                         .font(.system(size: 10))
                     Text("\(viewModel.totalUnresolvedCount) unresolved")
                         .font(.system(size: 10))
                 }
                 .foregroundColor(.orange)
+
+                unresolvedView.onboardingAnchor(
+                    onboardingManager,
+                    step: .unresolvedComments,
+                    arrow: .top
+                )
             }
         }
         .padding(.horizontal, 10)
@@ -331,6 +371,50 @@ struct MainView: View {
 
     private func formatRelativeTime(_ date: Date) -> String {
         Self.relativeDateFormatter.localizedString(for: date, relativeTo: Date())
+    }
+
+    private var orderedVisiblePRs: [PullRequest] {
+        viewModel.pinnedAuthoredPRs
+            + viewModel.groupedAuthoredPRs.flatMap(\.1)
+            + viewModel.groupedReviewPRs.flatMap(\.1)
+            + viewModel.groupedMergedLast24hPRs.flatMap(\.1)
+    }
+
+    private var onboardingAvailableSteps: Set<OnboardingManager.Step> {
+        guard viewModel.authState.isAuthenticated, viewModel.prList.hasUsableData else {
+            return []
+        }
+
+        var steps: Set<OnboardingManager.Step> = [.filter, .repoFilter]
+
+        if !viewModel.authoredPRs.isEmpty {
+            steps.insert(.myPRs)
+        }
+        if !viewModel.reviewRequestPRs.isEmpty {
+            steps.insert(.reviewRequests)
+        }
+        if !viewModel.mergedLast24hPRs.isEmpty {
+            steps.insert(.mergedToday)
+        }
+        if viewModel.totalUnresolvedCount > 0 {
+            steps.insert(.unresolvedComments)
+        }
+        if firstVisibleReviewStatusPRID != nil {
+            steps.insert(.myReviewStatus)
+        }
+        if firstVisibleApprovalPRID != nil {
+            steps.insert(.approvals)
+        }
+
+        return steps
+    }
+
+    private func syncOnboardingState() {
+        onboardingManager.updateAvailableSteps(onboardingAvailableSteps)
+
+        if viewModel.prList.hasUsableData {
+            onboardingManager.startIfNeeded()
+        }
     }
 }
 
@@ -441,6 +525,27 @@ struct AuthView: View {
             }
             .padding(.horizontal, 60)
 
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Device Flow (recommended)")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("No setup needed. Works for most personal & public accounts.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Use PAT (classic) if your org requires separate SSO authorization")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text("After creating the token, click \"Configure SSO\" on GitHub to authorize it for your organization.")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(.horizontal, 40)
+
             // PAT button (secondary)
             Button(action: { showPATInput = true }) {
                 HStack(spacing: 8) {
@@ -453,12 +558,6 @@ struct AuthView: View {
             .buttonStyle(.bordered)
             .controlSize(.large)
             .padding(.horizontal, 40)
-
-            // Info text
-            Text("OAuth is recommended for better security")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
         }
     }
 

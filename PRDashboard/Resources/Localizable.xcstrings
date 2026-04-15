@@ -1,0 +1,1536 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "#%lld": {},
+    "%lld": {},
+    "%lld CI failing": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 个 CI 失败"
+          }
+        }
+      }
+    },
+    "%lld CI running": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 个 CI 运行中"
+          }
+        }
+      }
+    },
+    "%lld needs changes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 个需修改"
+          }
+        }
+      }
+    },
+    "%lld new unresolved comments on \"%@\"": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld new unresolved comments on \"%2$@\""
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%2$@”上有 %1$lld 条新的未解决评论"
+          }
+        }
+      }
+    },
+    "%lld ready to merge": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 个可合并"
+          }
+        }
+      }
+    },
+    "%lld tasks passed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 个任务已通过"
+          }
+        }
+      }
+    },
+    "%lld to review": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 个待 review"
+          }
+        }
+      }
+    },
+    "%lld unresolved": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 条未解决"
+          }
+        }
+      }
+    },
+    "%lld wf": {},
+    "%lld workflows passed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld 个工作流已通过"
+          }
+        }
+      }
+    },
+    "%lld/%lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld"
+          }
+        }
+      }
+    },
+    "%lld/%lld tasks done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld tasks done"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个任务完成"
+          }
+        }
+      }
+    },
+    "%lld/%lld tasks done%@": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld tasks done%3$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个任务完成%3$@"
+          }
+        }
+      }
+    },
+    "%lld/%lld tasks done, running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld tasks done, running"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个任务完成，运行中"
+          }
+        }
+      }
+    },
+    "%lld/%lld tasks failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld tasks failed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个任务失败"
+          }
+        }
+      }
+    },
+    "%lld/%lld tasks failed%@": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld tasks failed%3$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个任务失败%3$@"
+          }
+        }
+      }
+    },
+    "%lld/%lld tasks failed, running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld tasks failed, running"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个任务失败，运行中"
+          }
+        }
+      }
+    },
+    "%lld/%lld wf": {},
+    "%lld/%lld wf · %lld": {},
+    "%lld/%lld workflows done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld workflows done"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个工作流完成"
+          }
+        }
+      }
+    },
+    "%lld/%lld workflows done%@": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld workflows done%3$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个工作流完成%3$@"
+          }
+        }
+      }
+    },
+    "%lld/%lld workflows done, running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld workflows done, running"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个工作流完成，运行中"
+          }
+        }
+      }
+    },
+    "%lld/%lld workflows failed, %lld tasks": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld workflows failed, %3$lld tasks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个工作流失败，%3$lld 个任务"
+          }
+        }
+      }
+    },
+    "%lld/%lld workflows failed, %lld tasks%@": {
+      "extractionState": "stale",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld workflows failed, %3$lld tasks%4$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个工作流失败，%3$lld 个任务%4$@"
+          }
+        }
+      }
+    },
+    "%lld/%lld workflows failed, %lld tasks, running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "%1$lld/%2$lld workflows failed, %3$lld tasks, running"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$lld/%2$lld 个工作流失败，%3$lld 个任务，运行中"
+          }
+        }
+      }
+    },
+    "(%lld)": {},
+    "1 minute": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 分钟"
+          }
+        }
+      }
+    },
+    "1 new unresolved comment on \"%@\"": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%1$@”上有 1 条新的未解决评论"
+          }
+        }
+      }
+    },
+    "10 minutes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "10 分钟"
+          }
+        }
+      }
+    },
+    "15 minutes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟"
+          }
+        }
+      }
+    },
+    "2 minutes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "2 分钟"
+          }
+        }
+      }
+    },
+    "30 minutes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "30 分钟"
+          }
+        }
+      }
+    },
+    "5 minutes": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5 分钟"
+          }
+        }
+      }
+    },
+    "99+": {},
+    "API rate limit: %lld remaining of %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "API rate limit: %1$lld remaining of %2$lld"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "API 速率限制：剩余 %1$lld / %2$lld"
+          }
+        }
+      }
+    },
+    "Access denied by user.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用户拒绝了授权。"
+          }
+        }
+      }
+    },
+    "Account": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "账户"
+          }
+        }
+      }
+    },
+    "After creating the token, click \"Configure SSO\" on GitHub to authorize it for your organization.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建令牌后，在 GitHub 上点击 \"Configure SSO\" 为所在组织授权。"
+          }
+        }
+      }
+    },
+    "All CI checks passed on \"%@\"": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%1$@”的所有 CI 检查均已通过"
+          }
+        }
+      }
+    },
+    "All clear": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "一切正常"
+          }
+        }
+      }
+    },
+    "Auto-retry CI (3x)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "自动重试 CI（3 次）"
+          }
+        }
+      }
+    },
+    "CI checks failed on \"%@\"": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "“%1$@”的 CI 检查失败"
+          }
+        }
+      }
+    },
+    "CI status exclude filter": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "CI 状态排除关键字"
+          }
+        }
+      }
+    },
+    "Cancel": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消"
+          }
+        }
+      }
+    },
+    "Cancel Auto-retry (%lld/3)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消自动重试（%1$lld/3）"
+          }
+        }
+      }
+    },
+    "Code expired. Please try again.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "验证码已过期，请重试。"
+          }
+        }
+      }
+    },
+    "Copy URL": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "复制 URL"
+          }
+        }
+      }
+    },
+    "Copy code": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "复制代码"
+          }
+        }
+      }
+    },
+    "Create a classic Personal Access Token at GitHub Settings > Developer settings > Personal access tokens (classic)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前往 GitHub Settings > Developer settings > Personal access tokens (classic) 创建经典令牌。"
+          }
+        }
+      }
+    },
+    "Developer Options": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开发者选项"
+          }
+        }
+      }
+    },
+    "Device Flow (recommended)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备流（推荐）"
+          }
+        }
+      }
+    },
+    "Done": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完成"
+          }
+        }
+      }
+    },
+    "Draft": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "草稿"
+          }
+        }
+      }
+    },
+    "Enable notifications for new unresolved comments": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "为新的未解决评论开启通知"
+          }
+        }
+      }
+    },
+    "Enter Personal Access Token": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入 Personal Access Token"
+          }
+        }
+      }
+    },
+    "Enter this code on GitHub:": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在 GitHub 上输入此代码："
+          }
+        }
+      }
+    },
+    "Exclude CI status checks whose name contains this keyword (e.g., \"review\" hides checks like \"code-review\"). Leave empty to include all checks.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "排除名称包含此关键字的 CI 状态检查（例如填 \"review\" 会隐藏 \"code-review\" 等检查）。留空则包含所有检查。"
+          }
+        }
+      }
+    },
+    "Expected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预期"
+          }
+        }
+      }
+    },
+    "Failed to fetch user information": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "获取用户信息失败"
+          }
+        }
+      }
+    },
+    "Failed to fetch workflow runs: HTTP %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "获取工作流运行记录失败：HTTP %1$lld"
+          }
+        }
+      }
+    },
+    "Failed to get access token: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "获取访问令牌失败：%1$@"
+          }
+        }
+      }
+    },
+    "Failed to get device code from GitHub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "从 GitHub 获取设备码失败"
+          }
+        }
+      }
+    },
+    "Failed to load PRs": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加载 PR 失败"
+          }
+        }
+      }
+    },
+    "Failed to parse response: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解析响应失败：%1$@"
+          }
+        }
+      }
+    },
+    "Failure fallback (3/5)": {},
+    "Failure running (2/3wf·5)": {},
+    "Filter PRs to specific repos. Format: owner/repo, comma-separated (e.g., owner/repo1, owner/repo2). Leave empty to show PRs from all repos.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 PR 限定到特定仓库。格式：owner/repo，多个用逗号分隔（例如 owner/repo1, owner/repo2）。留空则显示所有仓库的 PR。"
+          }
+        }
+      }
+    },
+    "Filters": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "过滤"
+          }
+        }
+      }
+    },
+    "General": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "常规"
+          }
+        }
+      }
+    },
+    "GitHub API is temporarily unavailable (HTTP %lld)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub API 暂时不可用（HTTP %1$lld）"
+          }
+        }
+      }
+    },
+    "GitHub API request failed (HTTP %lld)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub API 请求失败（HTTP %1$lld）"
+          }
+        }
+      }
+    },
+    "GitHub API request timed out (HTTP 408)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub API 请求超时（HTTP 408）"
+          }
+        }
+      }
+    },
+    "GitHub API temporarily rejected the request (HTTP 429)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub API 暂时拒绝了请求（HTTP 429）"
+          }
+        }
+      }
+    },
+    "GitHub OAuth": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub OAuth"
+          }
+        }
+      }
+    },
+    "Got it": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我知道了"
+          }
+        }
+      }
+    },
+    "GraphQL request failed without a terminal error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GraphQL 请求失败，且未返回明确错误"
+          }
+        }
+      }
+    },
+    "HTTP error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTP 错误"
+          }
+        }
+      }
+    },
+    "Here are PRs merged in the last 24 hours.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里是最近 24 小时内合并的 PR。"
+          }
+        }
+      }
+    },
+    "Here are PRs requesting your review.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里是请你 review 的 PR。"
+          }
+        }
+      }
+    },
+    "Here are your PRs.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里是你发起的 PR。"
+          }
+        }
+      }
+    },
+    "If your organization enforces SAML SSO, authorize this token for it after creation.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "若组织启用了 SAML SSO，请在创建后为该令牌授权。"
+          }
+        }
+      }
+    },
+    "Invalid GitHub token. Please check your settings.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub 令牌无效，请检查设置。"
+          }
+        }
+      }
+    },
+    "Invalid response from GitHub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub 返回了无效响应"
+          }
+        }
+      }
+    },
+    "Launch at login": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录时启动"
+          }
+        }
+      }
+    },
+    "Loading pull requests...": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载 PR..."
+          }
+        }
+      }
+    },
+    "Merged Today": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今日已合并"
+          }
+        }
+      }
+    },
+    "Mute Notifications": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "静音通知"
+          }
+        }
+      }
+    },
+    "My PRs": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我的 PR"
+          }
+        }
+      }
+    },
+    "Network error: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网络错误：%1$@"
+          }
+        }
+      }
+    },
+    "Next": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下一步"
+          }
+        }
+      }
+    },
+    "No head commit SHA available for PR #%lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PR #%1$lld 没有可用的 head commit SHA"
+          }
+        }
+      }
+    },
+    "No pull requests": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有 PR"
+          }
+        }
+      }
+    },
+    "No setup needed. Works for most personal & public accounts.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无需额外配置，适用于大多数个人或公开账号。"
+          }
+        }
+      }
+    },
+    "Notifications": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "通知"
+          }
+        }
+      }
+    },
+    "Open PR": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开 PR"
+          }
+        }
+      }
+    },
+    "Open Settings to filter by specific org or repo.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开设置，按指定的 org 或 repo 过滤。"
+          }
+        }
+      }
+    },
+    "Open github.com/login/device": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开 github.com/login/device"
+          }
+        }
+      }
+    },
+    "Open in Browser": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在浏览器中打开"
+          }
+        }
+      }
+    },
+    "PR Dashboard": {},
+    "PR Dashboard v%@ (%@) %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "new",
+            "value": "PR Dashboard v%1$@ (%2$@) %3$@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PR Dashboard v%1$@（%2$@）%3$@"
+          }
+        }
+      }
+    },
+    "Pause background refresh in Low Power Mode": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在低电量模式下暂停后台刷新"
+          }
+        }
+      }
+    },
+    "Pause background refresh on cellular/hotspot": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在蜂窝网络或热点下暂停后台刷新"
+          }
+        }
+      }
+    },
+    "Pending running (1/2wf)": {},
+    "Personal Access Token": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personal Access Token"
+          }
+        }
+      }
+    },
+    "Pin to Top": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "置顶"
+          }
+        }
+      }
+    },
+    "Please enter a Personal Access Token": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请输入 Personal Access Token"
+          }
+        }
+      }
+    },
+    "Power & Network": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "电源与网络"
+          }
+        }
+      }
+    },
+    "Pull Requests": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拉取请求"
+          }
+        }
+      }
+    },
+    "Quit PR Dashboard": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出 PR Dashboard"
+          }
+        }
+      }
+    },
+    "Rate limited. Try again after %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "触发速率限制，请在 %1$@ 后重试"
+          }
+        }
+      }
+    },
+    "Refresh": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新"
+          }
+        }
+      }
+    },
+    "Refresh Interval": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新间隔"
+          }
+        }
+      }
+    },
+    "Refresh failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新失败"
+          }
+        }
+      }
+    },
+    "Refresh interval must be at least 1 minute": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新间隔至少为 1 分钟"
+          }
+        }
+      }
+    },
+    "Refresh when opened": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开时刷新"
+          }
+        }
+      }
+    },
+    "Repositories (comma-separated, leave empty for all)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仓库（逗号分隔，留空表示全部）"
+          }
+        }
+      }
+    },
+    "Required scopes: repo, read:user, workflow": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "所需权限：repo、read:user、workflow"
+          }
+        }
+      }
+    },
+    "Rerun Failed CI": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新运行失败的 CI"
+          }
+        }
+      }
+    },
+    "Retry": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试"
+          }
+        }
+      }
+    },
+    "Review Requests": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review 请求"
+          }
+        }
+      }
+    },
+    "Save": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        }
+      }
+    },
+    "Search PRs...": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索 PR..."
+          }
+        }
+      }
+    },
+    "Settings": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置"
+          }
+        }
+      }
+    },
+    "Show draft PRs": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示草稿 PR"
+          }
+        }
+      }
+    },
+    "Show my review status badges": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示我的 Review 状态徽章"
+          }
+        }
+      }
+    },
+    "Show onboarding again": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新播放引导"
+          }
+        }
+      }
+    },
+    "Showing data updated %@.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "显示 %@ 更新的数据。"
+          }
+        }
+      }
+    },
+    "Sign In": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录"
+          }
+        }
+      }
+    },
+    "Sign Out": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出登录"
+          }
+        }
+      }
+    },
+    "Sign in with GitHub": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 GitHub 登录"
+          }
+        }
+      }
+    },
+    "Signed in": {
+      "extractionState": "stale",
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已登录"
+          }
+        }
+      }
+    },
+    "Skip": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳过"
+          }
+        }
+      }
+    },
+    "Success (2wf)": {},
+    "Switch": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换"
+          }
+        }
+      }
+    },
+    "Switch to GitHub OAuth": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换到 GitHub OAuth"
+          }
+        }
+      }
+    },
+    "Switch to Personal Access Token": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换到 Personal Access Token"
+          }
+        }
+      }
+    },
+    "The token is invalid or expired": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "令牌无效或已过期"
+          }
+        }
+      }
+    },
+    "This is the total unresolved comments you received.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里是你收到的未解决评论总数。"
+          }
+        }
+      }
+    },
+    "This shows how many approvals this PR has received.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里显示此 PR 收到的 approval 数量。"
+          }
+        }
+      }
+    },
+    "This shows your review state: ⏳ waiting, 🟥 changes requested, 🟨 changes resolved, ✅ approved.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里是你 review 后的状态：⏳ 等待、🟥 要求修改、🟨 修改已解决、✅ 已批准。"
+          }
+        }
+      }
+    },
+    "This will sign you out and use a new token for authentication.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这将使你退出登录，并使用新的令牌进行认证。"
+          }
+        }
+      }
+    },
+    "Token missing required scopes: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "令牌缺少所需权限：%1$@"
+          }
+        }
+      }
+    },
+    "Too many PRs? Search here, or filter by repo in Settings.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PR 太多？在这里搜索，或在设置中按仓库过滤。"
+          }
+        }
+      }
+    },
+    "Track your GitHub pull requests\nand unresolved comments": {},
+    "Unknown error": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未知错误"
+          }
+        }
+      }
+    },
+    "Unpin": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消置顶"
+          }
+        }
+      }
+    },
+    "Updated %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新于 %1$@"
+          }
+        }
+      }
+    },
+    "Updating...": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在更新..."
+          }
+        }
+      }
+    },
+    "Use PAT (classic) if your org requires separate SSO authorization": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "若组织要求对 OAuth App 单独进行 SSO 授权，请使用 PAT（classic）。"
+          }
+        }
+      }
+    },
+    "Use Personal Access Token": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Personal Access Token"
+          }
+        }
+      }
+    },
+    "Waiting for authorization...": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待授权中..."
+          }
+        }
+      }
+    },
+    "You have no open PRs or review requests": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你当前没有打开的 PR 或 review 请求"
+          }
+        }
+      }
+    },
+    "ghp_xxxxxxxxxxxx": {},
+    "or": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "或"
+          }
+        }
+      }
+    },
+    "·": {}
+  },
+  "version": "1.0"
+}
