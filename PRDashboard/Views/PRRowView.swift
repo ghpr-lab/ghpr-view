@@ -226,79 +226,83 @@ struct PRRowView: View {
     }
 }
 
-#Preview {
-    VStack {
-        PRRowView(
-            pr: PullRequest(
-                id: 1,
-                number: 123,
-                title: "Add new feature for user authentication with OAuth 2.0",
-                author: "xiaocang",
-                authorAvatarURL: URL(string: "https://avatars.githubusercontent.com/u/1?v=4"),
-                repositoryOwner: "owner",
-                repositoryName: "repo",
-                url: URL(string: "https://github.com/owner/repo/pull/123")!,
-                state: .open,
-                isDraft: true,
-                createdAt: Date(),
-                updatedAt: Date(),
-                mergedAt: nil,
-                lastCommitAt: Date(),
-                headCommitOid: nil,
-                reviewThreads: [
-                    ReviewThread(id: "1", isResolved: false, isOutdated: false, path: nil, line: nil, comments: [])
-                ],
-                category: .authored,
-                ciStatus: .failure,
-                checkSuccessCount: 3,
-                checkFailureCount: 2,
-                checkPendingCount: 0,
-                myLastReviewState: nil,
-                myLastReviewAt: nil,
-                reviewRequestedAt: nil,
-                myThreadsAllResolved: false,
-                approvalCount: 2,
-                changesRequestedCount: 0,
-                jiraTicket: "AG-1234"
-            ),
-            onOpen: {},
-            onCopyURL: {}
-        )
-        PRRowView(
-            pr: PullRequest(
-                id: 2,
-                number: 456,
-                title: "Review requested: Fix bug in payment processing",
-                author: "otherdev",
-                authorAvatarURL: nil,
-                repositoryOwner: "owner",
-                repositoryName: "repo",
-                url: URL(string: "https://github.com/owner/repo/pull/456")!,
-                state: .open,
-                isDraft: false,
-                createdAt: Date(),
-                updatedAt: Date(),
-                mergedAt: nil,
-                lastCommitAt: Date(),
-                headCommitOid: nil,
-                reviewThreads: [],
-                category: .reviewRequest,
-                ciStatus: .success,
-                checkSuccessCount: 5,
-                checkFailureCount: 0,
-                checkPendingCount: 0,
-                myLastReviewState: .changesRequested,
-                myLastReviewAt: Date().addingTimeInterval(-3600),
-                reviewRequestedAt: nil,
-                myThreadsAllResolved: false,
-                approvalCount: 0,
-                changesRequestedCount: 0
-            ),
-            onOpen: {},
-            onCopyURL: {},
-            showMyReviewStatus: true
-        )
+#if DEBUG
+struct PRRowView_Previews: PreviewProvider {
+    static var previews: some View {
+        VStack {
+            PRRowView(
+                pr: PullRequest(
+                    id: 1,
+                    number: 123,
+                    title: "Add new feature for user authentication with OAuth 2.0",
+                    author: "xiaocang",
+                    authorAvatarURL: URL(string: "https://avatars.githubusercontent.com/u/1?v=4"),
+                    repositoryOwner: "owner",
+                    repositoryName: "repo",
+                    url: URL(string: "https://github.com/owner/repo/pull/123")!,
+                    state: .open,
+                    isDraft: true,
+                    createdAt: Date(),
+                    updatedAt: Date(),
+                    mergedAt: nil,
+                    lastCommitAt: Date(),
+                    headCommitOid: nil,
+                    reviewThreads: [
+                        ReviewThread(id: "1", isResolved: false, isOutdated: false, path: nil, line: nil, comments: [])
+                    ],
+                    category: .authored,
+                    ciStatus: .failure,
+                    checkSuccessCount: 3,
+                    checkFailureCount: 2,
+                    checkPendingCount: 0,
+                    myLastReviewState: nil,
+                    myLastReviewAt: nil,
+                    reviewRequestedAt: nil,
+                    myThreadsAllResolved: false,
+                    approvalCount: 2,
+                    changesRequestedCount: 0,
+                    jiraTicket: "AG-1234"
+                ),
+                onOpen: {},
+                onCopyURL: {}
+            )
+            PRRowView(
+                pr: PullRequest(
+                    id: 2,
+                    number: 456,
+                    title: "Review requested: Fix bug in payment processing",
+                    author: "otherdev",
+                    authorAvatarURL: nil,
+                    repositoryOwner: "owner",
+                    repositoryName: "repo",
+                    url: URL(string: "https://github.com/owner/repo/pull/456")!,
+                    state: .open,
+                    isDraft: false,
+                    createdAt: Date(),
+                    updatedAt: Date(),
+                    mergedAt: nil,
+                    lastCommitAt: Date(),
+                    headCommitOid: nil,
+                    reviewThreads: [],
+                    category: .reviewRequest,
+                    ciStatus: .success,
+                    checkSuccessCount: 5,
+                    checkFailureCount: 0,
+                    checkPendingCount: 0,
+                    myLastReviewState: .changesRequested,
+                    myLastReviewAt: Date().addingTimeInterval(-3600),
+                    reviewRequestedAt: nil,
+                    myThreadsAllResolved: false,
+                    approvalCount: 0,
+                    changesRequestedCount: 0
+                ),
+                onOpen: {},
+                onCopyURL: {},
+                showMyReviewStatus: true
+            )
+        }
+        .frame(width: 350)
+        .padding()
     }
-    .frame(width: 350)
-    .padding()
 }
+#endif

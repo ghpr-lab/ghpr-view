@@ -149,41 +149,45 @@ struct CIStatusIcon: View {
 
 }
 
-#Preview {
-    VStack(spacing: 10) {
-        HStack {
-            CIStatusIcon(status: .success, successCount: 5, failureCount: 0, pendingCount: 0,
-                          workflows: [
-                              CIWorkflowInfo(name: "test", isWorkflow: true, successCount: 3, failureCount: 0, pendingCount: 0),
-                              CIWorkflowInfo(name: "build", isWorkflow: true, successCount: 2, failureCount: 0, pendingCount: 0)
-                          ])
-            Text("Success (2wf)")
+#if DEBUG
+struct CIStatusIcon_Previews: PreviewProvider {
+    static var previews: some View {
+        VStack(spacing: 10) {
+            HStack {
+                CIStatusIcon(status: .success, successCount: 5, failureCount: 0, pendingCount: 0,
+                              workflows: [
+                                  CIWorkflowInfo(name: "test", isWorkflow: true, successCount: 3, failureCount: 0, pendingCount: 0),
+                                  CIWorkflowInfo(name: "build", isWorkflow: true, successCount: 2, failureCount: 0, pendingCount: 0)
+                              ])
+                Text("Success (2wf)")
+            }
+            HStack {
+                CIStatusIcon(status: .failure, successCount: 3, failureCount: 5, pendingCount: 0, isRunning: true,
+                              workflows: [
+                                  CIWorkflowInfo(name: "lint", isWorkflow: true, successCount: 1, failureCount: 2, pendingCount: 0),
+                                  CIWorkflowInfo(name: "build", isWorkflow: true, successCount: 0, failureCount: 3, pendingCount: 0),
+                                  CIWorkflowInfo(name: "test", isWorkflow: true, successCount: 2, failureCount: 0, pendingCount: 0)
+                              ])
+                Text("Failure running (2/3wf·5)")
+            }
+            HStack {
+                CIStatusIcon(status: .pending, successCount: 2, failureCount: 0, pendingCount: 3, isRunning: true,
+                              workflows: [
+                                  CIWorkflowInfo(name: "test", isWorkflow: true, successCount: 2, failureCount: 0, pendingCount: 0),
+                                  CIWorkflowInfo(name: "deploy", isWorkflow: true, successCount: 0, failureCount: 0, pendingCount: 3)
+                              ])
+                Text("Pending running (1/2wf)")
+            }
+            HStack {
+                CIStatusIcon(status: .failure, successCount: 3, failureCount: 2, pendingCount: 0)
+                Text("Failure fallback (3/5)")
+            }
+            HStack {
+                CIStatusIcon(status: .expected)
+                Text("Expected")
+            }
         }
-        HStack {
-            CIStatusIcon(status: .failure, successCount: 3, failureCount: 5, pendingCount: 0, isRunning: true,
-                          workflows: [
-                              CIWorkflowInfo(name: "lint", isWorkflow: true, successCount: 1, failureCount: 2, pendingCount: 0),
-                              CIWorkflowInfo(name: "build", isWorkflow: true, successCount: 0, failureCount: 3, pendingCount: 0),
-                              CIWorkflowInfo(name: "test", isWorkflow: true, successCount: 2, failureCount: 0, pendingCount: 0)
-                          ])
-            Text("Failure running (2/3wf·5)")
-        }
-        HStack {
-            CIStatusIcon(status: .pending, successCount: 2, failureCount: 0, pendingCount: 3, isRunning: true,
-                          workflows: [
-                              CIWorkflowInfo(name: "test", isWorkflow: true, successCount: 2, failureCount: 0, pendingCount: 0),
-                              CIWorkflowInfo(name: "deploy", isWorkflow: true, successCount: 0, failureCount: 0, pendingCount: 3)
-                          ])
-            Text("Pending running (1/2wf)")
-        }
-        HStack {
-            CIStatusIcon(status: .failure, successCount: 3, failureCount: 2, pendingCount: 0)
-            Text("Failure fallback (3/5)")
-        }
-        HStack {
-            CIStatusIcon(status: .expected)
-            Text("Expected")
-        }
+        .padding()
     }
-    .padding()
 }
+#endif

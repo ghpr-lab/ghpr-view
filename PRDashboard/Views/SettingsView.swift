@@ -16,6 +16,7 @@ struct SettingsView: View {
     @State private var pausePollingInLowPowerMode: Bool = true
     @State private var pausePollingOnExpensiveNetwork: Bool = true
     @State private var showMyReviewStatus: Bool = false
+    @State private var automaticallyCheckForUpdates: Bool = true
     @State private var showPATSwitchSheet = false
     @State private var newPATToken = ""
 
@@ -155,6 +156,10 @@ struct SettingsView: View {
                     Toggle("Pause background refresh on cellular/hotspot", isOn: $pausePollingOnExpensiveNetwork)
                 }
 
+                Section("Updates") {
+                    Toggle("Automatically check for updates", isOn: $automaticallyCheckForUpdates)
+                }
+
                 Section("Developer Options") {
                     Button("Show onboarding again") {
                         onboardingManager.reset()
@@ -183,7 +188,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 450, height: 480)
+        .frame(width: 450, height: 520)
         .onAppear {
             loadCurrentSettings()
         }
@@ -256,6 +261,7 @@ struct SettingsView: View {
         pausePollingInLowPowerMode = config.pausePollingInLowPowerMode
         pausePollingOnExpensiveNetwork = config.pausePollingOnExpensiveNetwork
         showMyReviewStatus = config.showMyReviewStatus
+        automaticallyCheckForUpdates = config.automaticallyCheckForUpdates
     }
 
     private struct HelpHint: View {
@@ -314,7 +320,8 @@ struct SettingsView: View {
             ciStatusExcludeFilter: ciStatusExcludeFilter,
             pausePollingInLowPowerMode: pausePollingInLowPowerMode,
             pausePollingOnExpensiveNetwork: pausePollingOnExpensiveNetwork,
-            showMyReviewStatus: showMyReviewStatus
+            showMyReviewStatus: showMyReviewStatus,
+            automaticallyCheckForUpdates: automaticallyCheckForUpdates
         )
 
         viewModel.configuration = config
