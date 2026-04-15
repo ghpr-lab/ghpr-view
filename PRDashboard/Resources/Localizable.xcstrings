@@ -89,16 +89,7 @@
         }
       }
     },
-    "%lld wf": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$lld流"
-          }
-        }
-      }
-    },
+    "%lld wf": {},
     "%lld workflows passed": {
       "localizations": {
         "zh-Hans": {
@@ -217,38 +208,8 @@
         }
       }
     },
-    "%lld/%lld wf": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "new",
-            "value": "%1$lld/%2$lld wf"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$lld/%2$lld流"
-          }
-        }
-      }
-    },
-    "%lld/%lld wf · %lld": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "new",
-            "value": "%1$lld/%2$lld wf · %3$lld"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%1$lld/%2$lld流·%3$lld"
-          }
-        }
-      }
-    },
+    "%lld/%lld wf": {},
+    "%lld/%lld wf · %lld": {},
     "%lld/%lld workflows done": {
       "localizations": {
         "en": {
