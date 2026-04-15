@@ -132,9 +132,7 @@ struct SettingsView: View {
                     HStack {
                         TextField("Repositories (comma-separated, leave empty for all)", text: $repositories)
                             .textFieldStyle(.roundedBorder)
-                        Image(systemName: "questionmark.circle")
-                            .foregroundColor(.secondary)
-                            .help("Filter PRs to specific repos. Format: owner/repo, comma-separated (e.g., owner/repo1, owner/repo2). Leave empty to show PRs from all repos.")
+                        HelpHint("Filter PRs to specific repos. Format: owner/repo, comma-separated (e.g., owner/repo1, owner/repo2). Leave empty to show PRs from all repos.")
                     }
 
                     Toggle("Show draft PRs", isOn: $showDrafts)
@@ -144,9 +142,7 @@ struct SettingsView: View {
                     HStack {
                         TextField("CI status exclude filter", text: $ciStatusExcludeFilter)
                             .textFieldStyle(.roundedBorder)
-                        Image(systemName: "questionmark.circle")
-                            .foregroundColor(.secondary)
-                            .help("Exclude CI status checks whose name contains this keyword (e.g., \"review\" hides checks like \"code-review\"). Leave empty to include all checks.")
+                        HelpHint("Exclude CI status checks whose name contains this keyword (e.g., \"review\" hides checks like \"code-review\"). Leave empty to include all checks.")
                     }
                 }
 
@@ -260,6 +256,41 @@ struct SettingsView: View {
         pausePollingInLowPowerMode = config.pausePollingInLowPowerMode
         pausePollingOnExpensiveNetwork = config.pausePollingOnExpensiveNetwork
         showMyReviewStatus = config.showMyReviewStatus
+    }
+
+    private struct HelpHint: View {
+        let text: LocalizedStringKey
+        @State private var isShown = false
+        @State private var hoverTask: Task<Void, Never>?
+
+        init(_ text: LocalizedStringKey) {
+            self.text = text
+        }
+
+        var body: some View {
+            Image(systemName: "questionmark.circle")
+                .foregroundColor(.secondary)
+                .onHover { hovering in
+                    hoverTask?.cancel()
+                    if hovering {
+                        hoverTask = Task {
+                            try? await Task.sleep(nanoseconds: 500_000_000)
+                            if !Task.isCancelled {
+                                isShown = true
+                            }
+                        }
+                    } else {
+                        isShown = false
+                    }
+                }
+                .popover(isPresented: $isShown, arrowEdge: .top) {
+                    Text(text)
+                        .font(.system(size: 12))
+                        .padding(10)
+                        .frame(maxWidth: 280)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+        }
     }
 
     private func save() {
