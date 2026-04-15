@@ -49,7 +49,7 @@ struct UpdateView: View {
             VStack(alignment: .leading, spacing: 4) {
                 Text("Software Update")
                     .font(.headline)
-                Text("Checks the latest stable GitHub release for PR Dashboard.")
+                Text("Checks the latest GitHub release for PR Dashboard.")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }

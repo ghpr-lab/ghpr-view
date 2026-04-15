@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 import os
 
 private let updateLogger = Logger(subsystem: "com.prdashboard", category: "UpdateManager")
@@ -43,6 +44,7 @@ final class UpdateManager: ObservableObject {
         case stagedVersionOlderThanRelease(String)
         case extractionFailed(Int32)
         case helperLaunchFailed
+        case codeSignatureInvalid(OSStatus)
 
         var errorDescription: String? {
             switch self {
@@ -66,6 +68,8 @@ final class UpdateManager: ObservableObject {
                 return "Failed to extract the update archive (ditto exited with status \(status))."
             case .helperLaunchFailed:
                 return "The installer helper could not be launched."
+            case let .codeSignatureInvalid(status):
+                return "The downloaded update failed code signature verification (OSStatus \(status))."
             }
         }
     }
@@ -76,6 +80,7 @@ final class UpdateManager: ObservableObject {
     private let session: URLSession
     private let latestReleaseURL = URL(string: "https://github.com/xiaocang/ghpr-view/releases.atom")!
     private let repositoryReleasesURL = URL(string: "https://github.com/xiaocang/ghpr-view/releases")!
+    private let apiReleasesURL = URL(string: "https://api.github.com/repos/xiaocang/ghpr-view/releases")!
     private let autoCheckInterval: TimeInterval = 24 * 60 * 60
     private let initialAutoCheckDelay: TimeInterval = 10
     private let lastAutoCheckKey = "PRDashboard.LastAutoUpdateCheckAt"
@@ -255,16 +260,26 @@ final class UpdateManager: ObservableObject {
         }
 
         do {
-            let release = try await fetchLatestRelease()
+            let atomRelease = try await fetchLatestRelease()
             let currentVersion = try currentAppVersion()
 
-            guard release.version > currentVersion else {
-                updateLogger.info("Latest release \(release.displayVersion) is not newer than current version \(self.currentVersionString)")
+            guard atomRelease.version > currentVersion else {
+                updateLogger.info("Latest release \(atomRelease.displayVersion) is not newer than current version \(self.currentVersionString)")
                 if userInitiated {
-                    state = .upToDate(release: release)
+                    state = .upToDate(release: atomRelease)
                 }
                 return
             }
+
+            let assets = try await fetchReleaseAssets(tag: atomRelease.tagName)
+            let release = ReleaseInfo(
+                tagName: atomRelease.tagName,
+                name: atomRelease.name,
+                body: atomRelease.body,
+                publishedAt: atomRelease.publishedAt,
+                htmlURL: atomRelease.htmlURL,
+                assets: assets
+            )
 
             do {
                 _ = try release.preferredZipAsset()
@@ -322,21 +337,35 @@ final class UpdateManager: ObservableObject {
             throw UpdateManagerError.latestReleaseNotFound
         }
 
-        let assetName = "\(appName)-\(entry.version.description).zip"
-        let assetURL = repositoryReleasesURL
-            .appendingPathComponent("download")
-            .appendingPathComponent(entry.tagName)
-            .appendingPathComponent(assetName)
-        let asset = ReleaseAsset(name: assetName, browserDownloadURL: assetURL, size: nil)
-
         return ReleaseInfo(
             tagName: entry.tagName,
             name: entry.title,
             body: entry.body,
             publishedAt: entry.updated,
             htmlURL: entry.htmlURL,
-            assets: [asset]
+            assets: []
         )
+    }
+
+    private func fetchReleaseAssets(tag: String) async throws -> [ReleaseAsset] {
+        let tagURL = apiReleasesURL
+            .appendingPathComponent("tags")
+            .appendingPathComponent(tag)
+        var request = URLRequest(url: tagURL)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+        request.setValue("PRDashboard/\(currentVersionString)", forHTTPHeaderField: "User-Agent")
+
+        let (data, response) = try await session.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse,
+              200..<300 ~= httpResponse.statusCode else {
+            throw latestReleaseRequestError(from: response as? HTTPURLResponse, data: data)
+        }
+
+        struct ReleaseAssetsResponse: Decodable {
+            let assets: [ReleaseAsset]
+        }
+        return try JSONDecoder().decode(ReleaseAssetsResponse.self, from: data).assets
     }
 
     private func beginDownload(for release: ReleaseInfo, asset: ReleaseAsset) {
@@ -473,6 +502,33 @@ final class UpdateManager: ObservableObject {
         let downloadedVersion = AppVersion(versionString)
         guard downloadedVersion >= release.version else {
             throw UpdateManagerError.stagedVersionOlderThanRelease(versionString)
+        }
+
+        try verifyCodeSignature(at: appURL)
+    }
+
+    private func verifyCodeSignature(at stagedAppURL: URL) throws {
+        var selfStaticCode: SecStaticCode?
+        let selfStatus = SecStaticCodeCreateWithPath(bundle.bundleURL as CFURL, [], &selfStaticCode)
+        guard selfStatus == errSecSuccess, let selfStaticCode else {
+            throw UpdateManagerError.codeSignatureInvalid(selfStatus)
+        }
+
+        var requirement: SecRequirement?
+        let reqStatus = SecCodeCopyDesignatedRequirement(selfStaticCode, [], &requirement)
+        guard reqStatus == errSecSuccess, let requirement else {
+            throw UpdateManagerError.codeSignatureInvalid(reqStatus)
+        }
+
+        var stagedStaticCode: SecStaticCode?
+        let stagedStatus = SecStaticCodeCreateWithPath(stagedAppURL as CFURL, [], &stagedStaticCode)
+        guard stagedStatus == errSecSuccess, let stagedStaticCode else {
+            throw UpdateManagerError.codeSignatureInvalid(stagedStatus)
+        }
+
+        let validity = SecStaticCodeCheckValidity(stagedStaticCode, [], requirement)
+        guard validity == errSecSuccess else {
+            throw UpdateManagerError.codeSignatureInvalid(validity)
         }
     }
 
@@ -683,19 +739,19 @@ final class UpdateManager: ObservableObject {
 
         if let retryAfterSeconds {
             let retryDate = Date().addingTimeInterval(retryAfterSeconds)
-            return "GitHub API rate limit exceeded. Try again after \(Self.rateLimitDateFormatter.string(from: retryDate))."
+            return "GitHub rate limit exceeded. Try again after \(Self.rateLimitDateFormatter.string(from: retryDate))."
         }
 
         if let resetEpoch {
             let resetDate = Date(timeIntervalSince1970: resetEpoch)
-            return "GitHub API rate limit exceeded. Try again after \(Self.rateLimitDateFormatter.string(from: resetDate))."
+            return "GitHub rate limit exceeded. Try again after \(Self.rateLimitDateFormatter.string(from: resetDate))."
         }
 
         if let apiMessage, !apiMessage.isEmpty {
             return apiMessage
         }
 
-        return "GitHub API rate limit exceeded. Try again later."
+        return "GitHub rate limit exceeded. Try again later."
     }
 
     private static let rateLimitDateFormatter: DateFormatter = {
