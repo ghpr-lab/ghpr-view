@@ -270,6 +270,8 @@ struct SettingsView: View {
         var body: some View {
             Image(systemName: "questionmark.circle")
                 .foregroundColor(.secondary)
+                .accessibilityLabel(Text("Help"))
+                .accessibilityHint(Text(text))
                 .onHover { hovering in
                     hoverTask?.cancel()
                     if hovering {
@@ -289,6 +291,10 @@ struct SettingsView: View {
                         .padding(10)
                         .frame(maxWidth: 280)
                         .fixedSize(horizontal: false, vertical: true)
+                }
+                .onDisappear {
+                    hoverTask?.cancel()
+                    hoverTask = nil
                 }
         }
     }

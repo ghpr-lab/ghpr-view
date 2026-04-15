@@ -38,7 +38,7 @@ private struct OnboardingBubbleModifier: ViewModifier {
                     .font(.system(size: 13, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(step.progressText)
+                Text(manager.progressText(for: step))
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
 

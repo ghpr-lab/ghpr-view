@@ -35,9 +35,6 @@ final class OnboardingManager: ObservableObject {
             }
         }
 
-        var progressText: String {
-            "\(rawValue + 1)/\(Self.allCases.count)"
-        }
     }
 
     @Published private(set) var current: Step?
@@ -82,6 +79,12 @@ final class OnboardingManager: ObservableObject {
 
     func isLastAvailableStep(_ step: Step) -> Bool {
         nextAvailableStep(after: step) == nil
+    }
+
+    func progressText(for step: Step) -> String {
+        let ordered = Step.allCases.filter { availableSteps.contains($0) }
+        guard let idx = ordered.firstIndex(of: step) else { return "" }
+        return "\(idx + 1)/\(ordered.count)"
     }
 
     private var hasSeen: Bool {

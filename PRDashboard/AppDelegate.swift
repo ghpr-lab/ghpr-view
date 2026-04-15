@@ -92,7 +92,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: hostingController)
             window.title = String(localized: "Settings")
             window.styleMask = [.titled, .closable]
-            window.setContentSize(NSSize(width: 450, height: 450))
+            window.setContentSize(NSSize(width: 450, height: 480))
             window.center()
             settingsWindow = window
         }
