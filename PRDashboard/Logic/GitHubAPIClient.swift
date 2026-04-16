@@ -146,7 +146,7 @@ final class GitHubAPIClient: ObservableObject {
         if resolved == Self.defaultGraphQLURL {
             logger.info("GraphQL endpoint set to default (\(Self.defaultGraphQLURL.absoluteString, privacy: .public))")
         } else {
-            logger.info("GraphQL endpoint overridden to \(resolved.absoluteString, privacy: .public)")
+            logger.info("GraphQL endpoint overridden to \(resolved.absoluteString, privacy: .private)")
         }
     }
 
@@ -158,7 +158,7 @@ final class GitHubAPIClient: ObservableObject {
            scheme == "http" || scheme == "https", url.host != nil {
             return url
         }
-        logger.error("Invalid GraphQL endpoint override '\(raw, privacy: .public)'; falling back to default")
+        logger.error("Invalid GraphQL endpoint override '\(raw, privacy: .private)'; falling back to default")
         return defaultGraphQLURL
     }
 

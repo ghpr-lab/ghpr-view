@@ -176,15 +176,14 @@ struct SettingsView: View {
                         TextField(
                             "",
                             text: $graphQLEndpoint,
-                            prompt: Text("https://example.com/graphql"),
-                            axis: .vertical
+                            prompt: Text("https://example.com/graphql")
                         )
                         .labelsHidden()
+                        .accessibilityLabel("GraphQL endpoint override")
                         .textFieldStyle(.roundedBorder)
                         .autocorrectionDisabled(true)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .lineLimit(1...5)
                         .onChange(of: graphQLEndpoint) { newValue in
                             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
                             if trimmed != newValue {
