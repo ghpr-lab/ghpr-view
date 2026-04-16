@@ -1431,14 +1431,28 @@ final class GitHubAPIClient: ObservableObject {
                 switch httpResponse.statusCode {
                 case 200:
                     if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let errors = json["errors"] as? [[String: Any]],
-                       let firstError = errors.first,
-                       let message = firstError["message"] as? String {
-                        if Self.isRateLimitMessage(message) {
+                       let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
+                        let messages = errors.compactMap { $0["message"] as? String }
+                        if messages.contains(where: Self.isRateLimitMessage) {
                             let resetDate = rateLimitResetDate(from: httpResponse) ?? Date().addingTimeInterval(60)
                             throw APIError.rateLimited(resetDate: resetDate)
                         }
-                        throw APIError.unknown(message)
+                        // GraphQL partial success: `data` and `errors` can coexist.
+                        // One bad aliased sub-query (e.g. a mentioned `#NNN` that
+                        // is really an Issue or a deleted PR) used to fail the
+                        // whole batch; instead, warn and let the per-alias
+                        // decoders skip nulls. Only hard-fail when data is empty.
+                        let hasUsablePayload: Bool = {
+                            guard let dict = json["data"] as? [String: Any] else { return false }
+                            return dict.values.contains { !($0 is NSNull) }
+                        }()
+                        if hasUsablePayload {
+                            logger.warning(
+                                "GraphQL partial errors: operation=\(operation, privacy: .public) count=\(errors.count, privacy: .public) first=\(messages.first ?? "", privacy: .public)"
+                            )
+                        } else {
+                            throw APIError.unknown(messages.first ?? String(localized: "GraphQL request failed"))
+                        }
                     }
 
                     if attempt > 1 {
