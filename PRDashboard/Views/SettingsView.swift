@@ -17,6 +17,7 @@ struct SettingsView: View {
     @State private var pausePollingOnExpensiveNetwork: Bool = true
     @State private var showMyReviewStatus: Bool = false
     @State private var automaticallyCheckForUpdates: Bool = true
+    @State private var graphQLEndpoint: String = ""
     @State private var showPATSwitchSheet = false
     @State private var newPATToken = ""
 
@@ -165,6 +166,32 @@ struct SettingsView: View {
                         onboardingManager.reset()
                         dismiss()
                     }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("GraphQL endpoint override")
+                            HelpHint("Route GitHub GraphQL requests through a proxy URL. Leave empty to use https://api.github.com/graphql. OAuth endpoints are not affected.")
+                            Spacer()
+                        }
+                        TextField(
+                            "",
+                            text: $graphQLEndpoint,
+                            prompt: Text("https://example.com/graphql")
+                        )
+                        .labelsHidden()
+                        .accessibilityLabel("GraphQL endpoint override")
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled(true)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onChange(of: graphQLEndpoint) { newValue in
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if trimmed != newValue {
+                                graphQLEndpoint = trimmed
+                            }
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .formStyle(.grouped)
@@ -262,6 +289,7 @@ struct SettingsView: View {
         pausePollingOnExpensiveNetwork = config.pausePollingOnExpensiveNetwork
         showMyReviewStatus = config.showMyReviewStatus
         automaticallyCheckForUpdates = config.automaticallyCheckForUpdates
+        graphQLEndpoint = config.graphQLEndpoint
     }
 
     private struct HelpHint: View {
@@ -321,7 +349,8 @@ struct SettingsView: View {
             pausePollingInLowPowerMode: pausePollingInLowPowerMode,
             pausePollingOnExpensiveNetwork: pausePollingOnExpensiveNetwork,
             showMyReviewStatus: showMyReviewStatus,
-            automaticallyCheckForUpdates: automaticallyCheckForUpdates
+            automaticallyCheckForUpdates: automaticallyCheckForUpdates,
+            graphQLEndpoint: graphQLEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
         )
 
         viewModel.configuration = config
