@@ -66,7 +66,7 @@ struct IssueCommentSummary: Identifiable, Codable, Equatable {
     let createdAt: Date
 }
 
-struct PullRequestReference: Hashable {
+struct PullRequestReference: Hashable, Codable {
     let owner: String
     let repo: String
     let number: Int
