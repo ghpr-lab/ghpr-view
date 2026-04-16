@@ -16,6 +16,7 @@ final class Keychain {
 
     private let service = "com.xiaocang.PRDashboard"
     private let authStateKey = "github_auth_state"
+    private let proxyPasswordKey = "http_proxy_password"
 
     // Legacy keys for migration
     private let legacyTokenKey = "github_token"
@@ -71,6 +72,24 @@ final class Keychain {
         try? shared.delete(key: shared.legacyTokenKey)
         try? shared.delete(key: shared.legacyUsernameKey)
         try? shared.delete(key: shared.legacyAuthMethodKey)
+    }
+
+    // MARK: - HTTP Proxy Password
+
+    static func saveProxyPassword(_ password: String) {
+        if password.isEmpty {
+            try? shared.delete(key: shared.proxyPasswordKey)
+            return
+        }
+        try? shared.save(value: password, key: shared.proxyPasswordKey)
+    }
+
+    static func loadProxyPassword() -> String {
+        (try? shared.load(key: shared.proxyPasswordKey)) ?? ""
+    }
+
+    static func deleteProxyPassword() {
+        try? shared.delete(key: shared.proxyPasswordKey)
     }
 
     // MARK: - Private

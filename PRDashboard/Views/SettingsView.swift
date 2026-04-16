@@ -18,6 +18,9 @@ struct SettingsView: View {
     @State private var showMyReviewStatus: Bool = false
     @State private var automaticallyCheckForUpdates: Bool = true
     @State private var graphQLEndpoint: String = ""
+    @State private var httpProxyURL: String = ""
+    @State private var httpProxyUsername: String = ""
+    @State private var httpProxyPassword: String = ""
     @State private var showPATSwitchSheet = false
     @State private var newPATToken = ""
 
@@ -192,6 +195,49 @@ struct SettingsView: View {
                         }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("HTTP proxy")
+                            HelpHint("Route GitHub API requests through an HTTP proxy. Format: http://host:port. Leave empty to connect directly. Username and password are optional.")
+                            Spacer()
+                        }
+                        TextField(
+                            "",
+                            text: $httpProxyURL,
+                            prompt: Text("http://proxy.example.com:8080")
+                        )
+                        .labelsHidden()
+                        .accessibilityLabel("HTTP proxy URL")
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled(true)
+                        .onChange(of: httpProxyURL) { newValue in
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if trimmed != newValue {
+                                httpProxyURL = trimmed
+                            }
+                        }
+
+                        TextField(
+                            "",
+                            text: $httpProxyUsername,
+                            prompt: Text("Proxy username (optional)")
+                        )
+                        .labelsHidden()
+                        .accessibilityLabel("HTTP proxy username")
+                        .textFieldStyle(.roundedBorder)
+                        .autocorrectionDisabled(true)
+
+                        SecureField(
+                            "",
+                            text: $httpProxyPassword,
+                            prompt: Text("Proxy password (optional)")
+                        )
+                        .labelsHidden()
+                        .accessibilityLabel("HTTP proxy password")
+                        .textFieldStyle(.roundedBorder)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .formStyle(.grouped)
@@ -290,6 +336,9 @@ struct SettingsView: View {
         showMyReviewStatus = config.showMyReviewStatus
         automaticallyCheckForUpdates = config.automaticallyCheckForUpdates
         graphQLEndpoint = config.graphQLEndpoint
+        httpProxyURL = config.httpProxyURL
+        httpProxyUsername = config.httpProxyUsername
+        httpProxyPassword = Keychain.loadProxyPassword()
     }
 
     private struct HelpHint: View {
@@ -339,6 +388,9 @@ struct SettingsView: View {
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
 
+        let trimmedProxyURL = httpProxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedProxyUsername = httpProxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
+
         let config = Configuration(
             refreshInterval: refreshInterval,
             repositories: repos,
@@ -350,8 +402,16 @@ struct SettingsView: View {
             pausePollingOnExpensiveNetwork: pausePollingOnExpensiveNetwork,
             showMyReviewStatus: showMyReviewStatus,
             automaticallyCheckForUpdates: automaticallyCheckForUpdates,
-            graphQLEndpoint: graphQLEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+            graphQLEndpoint: graphQLEndpoint.trimmingCharacters(in: .whitespacesAndNewlines),
+            httpProxyURL: trimmedProxyURL,
+            httpProxyUsername: trimmedProxyUsername
         )
+
+        if trimmedProxyURL.isEmpty {
+            Keychain.deleteProxyPassword()
+        } else {
+            Keychain.saveProxyPassword(httpProxyPassword)
+        }
 
         viewModel.configuration = config
         dismiss()
