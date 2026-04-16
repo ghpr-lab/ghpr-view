@@ -28,6 +28,7 @@ struct PRRowView: View {
     var isPinned: Bool = false
     var ciAutoRetryRound: Int?  // nil = not active, 0-3 = current round
     var showCIStatus: Bool = true
+    var showConflictStatus: Bool = true
     var showMyReviewStatus: Bool = false
     var onboardingManager: OnboardingManager? = nil
     var approvalOnboardingPRID: Int? = nil
@@ -110,9 +111,13 @@ struct PRRowView: View {
                         approvalBadge
                     }
 
+                    if showConflictStatus, pr.hasBaseConflicts {
+                        ConflictBadge()
+                    }
+
                     Spacer()
 
-                    if pr.category == .authored {
+                    if pr.category == .authored || pr.category == .mentioned {
                         if showCIStatus, let ciStatus = pr.ciStatus {
                             CIStatusIcon(
                                 status: ciStatus,
@@ -245,12 +250,15 @@ struct PRRowView_Previews: PreviewProvider {
                     createdAt: Date(),
                     updatedAt: Date(),
                     mergedAt: nil,
+                    body: "Mentions #456",
+                    conversationComments: [],
                     lastCommitAt: Date(),
                     headCommitOid: nil,
                     reviewThreads: [
                         ReviewThread(id: "1", isResolved: false, isOutdated: false, path: nil, line: nil, comments: [])
                     ],
                     category: .authored,
+                    hasBaseConflicts: true,
                     ciStatus: .failure,
                     checkSuccessCount: 3,
                     checkFailureCount: 2,
@@ -281,10 +289,13 @@ struct PRRowView_Previews: PreviewProvider {
                     createdAt: Date(),
                     updatedAt: Date(),
                     mergedAt: nil,
+                    body: nil,
+                    conversationComments: [],
                     lastCommitAt: Date(),
                     headCommitOid: nil,
                     reviewThreads: [],
                     category: .reviewRequest,
+                    hasBaseConflicts: false,
                     ciStatus: .success,
                     checkSuccessCount: 5,
                     checkFailureCount: 0,

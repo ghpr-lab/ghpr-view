@@ -3,6 +3,7 @@ import Foundation
 enum PRCategory: String, Codable {
     case authored       // PRs created by user
     case reviewRequest  // PRs where user is requested reviewer
+    case mentioned      // PRs related via body/comments/cross references
 }
 
 enum PRState: String, Codable {
@@ -58,6 +59,23 @@ struct CIExtendedInfo: Codable, Equatable {
     var workflows: [CIWorkflowInfo]
 }
 
+struct IssueCommentSummary: Identifiable, Codable, Equatable {
+    let id: String
+    let author: String
+    let body: String
+    let createdAt: Date
+}
+
+struct PullRequestReference: Hashable {
+    let owner: String
+    let repo: String
+    let number: Int
+
+    var repoFullName: String {
+        "\(owner)/\(repo)"
+    }
+}
+
 struct PullRequest: Identifiable, Codable, Equatable {
     let id: Int
     let number: Int
@@ -72,10 +90,13 @@ struct PullRequest: Identifiable, Codable, Equatable {
     let createdAt: Date
     let updatedAt: Date
     let mergedAt: Date?
+    let body: String?
+    let conversationComments: [IssueCommentSummary]
     let lastCommitAt: Date?
     let headCommitOid: String?
     var reviewThreads: [ReviewThread]
     let category: PRCategory
+    let hasBaseConflicts: Bool
     var ciStatus: CIStatus?
     var checkSuccessCount: Int
     var checkFailureCount: Int

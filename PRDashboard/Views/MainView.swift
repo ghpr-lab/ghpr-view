@@ -154,12 +154,22 @@ struct MainView: View {
                     }
                 }
 
+                // Mentioned PRs section
+                if !viewModel.mentionedPRs.isEmpty {
+                    sectionHeader("Mentioned PRs", count: viewModel.mentionedPRs.count)
+
+                    ForEach(viewModel.groupedMentionedPRs, id: \.0) { repo, prs in
+                        repoSection(repo: repo, prs: prs)
+                            .id("mentioned-\(repo)")
+                    }
+                }
+
                 // Merged Today section
                 if !viewModel.mergedLast24hPRs.isEmpty {
                     sectionHeader("Merged Today", count: viewModel.mergedLast24hPRs.count, onboardingStep: .mergedToday)
 
                     ForEach(viewModel.groupedMergedLast24hPRs, id: \.0) { repo, prs in
-                        repoSection(repo: repo, prs: prs, showCIStatus: false)
+                        repoSection(repo: repo, prs: prs, showCIStatus: false, showConflictStatus: false)
                             .id("merged-\(repo)")
                     }
                 }
@@ -198,7 +208,13 @@ struct MainView: View {
     }
 
     @ViewBuilder
-    private func repoSection(repo: String, prs: [PullRequest], showCIStatus: Bool = true, showPin: Bool = false) -> some View {
+    private func repoSection(
+        repo: String,
+        prs: [PullRequest],
+        showCIStatus: Bool = true,
+        showPin: Bool = false,
+        showConflictStatus: Bool = true
+    ) -> some View {
         ForEach(prs) { pr in
             PRRowView(
                 pr: pr,
@@ -208,6 +224,7 @@ struct MainView: View {
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
                 isPinned: showPin && viewModel.isPinned(pr),
                 showCIStatus: showCIStatus,
+                showConflictStatus: showConflictStatus,
                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                 onboardingManager: onboardingManager,
                 approvalOnboardingPRID: firstVisibleApprovalPRID,
@@ -377,6 +394,7 @@ struct MainView: View {
         viewModel.pinnedAuthoredPRs
             + viewModel.groupedAuthoredPRs.flatMap(\.1)
             + viewModel.groupedReviewPRs.flatMap(\.1)
+            + viewModel.groupedMentionedPRs.flatMap(\.1)
             + viewModel.groupedMergedLast24hPRs.flatMap(\.1)
     }
 

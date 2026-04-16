@@ -102,6 +102,18 @@ struct ApprovalBadge: View {
     }
 }
 
+struct ConflictBadge: View {
+    var body: some View {
+        Text("Conflict")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(.red)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Color.red.opacity(0.15))
+            .clipShape(Capsule())
+    }
+}
+
 #if DEBUG
 struct Badge_Previews: PreviewProvider {
     static var previews: some View {
@@ -115,6 +127,7 @@ struct Badge_Previews: PreviewProvider {
             MyReviewStatusBadge(status: .changesResolved)
             MyReviewStatusBadge(status: .approved)
             ApprovalBadge(count: 2)
+            ConflictBadge()
         }
         .padding()
     }
