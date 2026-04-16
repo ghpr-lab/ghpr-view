@@ -75,6 +75,11 @@ final class PRManager: PRManagerType, ObservableObject {
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
 
         apiClient.updateGraphQLEndpoint(self.configuration.graphQLEndpoint)
+        apiClient.updateProxy(
+            urlString: self.configuration.httpProxyURL,
+            username: self.configuration.httpProxyUsername,
+            password: Keychain.loadProxyPassword()
+        )
 
         setupBindings()
     }
@@ -168,6 +173,7 @@ final class PRManager: PRManagerType, ObservableObject {
             previousPRs = [:]
             // Clear caches on sign-out
             PRCache.shared.clear()
+            PRDetailCache.shared.clear()
             MentionCache.shared.clear()
             AvatarCache.shared.clear()
         }
@@ -257,6 +263,15 @@ final class PRManager: PRManagerType, ObservableObject {
             return
         }
 
+        if trigger != .manual, isRateLimitCritical {
+            let resetDate = rateLimitInfo.resetDate
+            logger.warning(
+                "Skipping refresh due to low rate limit: trigger=\(trigger.rawValue, privacy: .public) remaining=\(self.rateLimitInfo.remaining, privacy: .public)/\(self.rateLimitInfo.limit, privacy: .public) threshold=\(Self.criticalRateLimitThresholdPercent, privacy: .public)% resumeAt=\(resetDate.ISO8601Format(), privacy: .public)"
+            )
+            scheduleRateLimitResume(at: resetDate)
+            return
+        }
+
         guard activeRefreshTask == nil else {
             if !queuedRefresh {
                 logger.info("Coalescing refresh request: trigger=\(trigger.rawValue, privacy: .public)")
@@ -289,40 +304,15 @@ final class PRManager: PRManagerType, ObservableObject {
             }
 
             do {
-                let result = try await self.apiClient.fetchAllPullRequests(username: username)
-                var prs = result.openPRs
-                var mentionedPRs = result.mentionedPRs
-                var mergedPRs = result.mergedPRs
-
-                logger.info("API returned: \(prs.count) open PRs, \(mentionedPRs.count) mentioned PRs, \(mergedPRs.count) merged PRs")
-
-                // Filter by configured repositories if any (case-insensitive, supports "org/" prefix match)
-                if !configuration.repositories.isEmpty {
-                    let repoFilter: (PullRequest) -> Bool = { pr in
-                        let repoName = pr.repoFullName.lowercased()
-                        return self.configuration.repositories.contains { filter in
-                            let filterLower = filter.lowercased()
-                            if filterLower.hasSuffix("/") {
-                                // Org/author prefix match (e.g., "xiaocang/" matches all repos under xiaocang)
-                                return repoName.hasPrefix(filterLower)
-                            } else {
-                                // Full "owner/repo" match
-                                return repoName == filterLower
-                            }
-                        }
-                    }
-                    prs = prs.filter(repoFilter)
-                    mentionedPRs = mentionedPRs.filter(repoFilter)
-                    mergedPRs = mergedPRs.filter(repoFilter)
+                let onProgress: @Sendable ([PullRequest], [PullRequest], GitHubAPIClient.IncrementalStage) async -> Void = { [weak self] openPRs, mergedPRs, stage in
+                    guard let self else { return }
+                    await self.applyIncrementalProgress(openPRs: openPRs, mergedPRs: mergedPRs, stage: stage)
                 }
 
-                // Filter drafts if disabled
-                if !configuration.showDrafts {
-                    prs = prs.filter { !$0.isDraft }
-                    mentionedPRs = mentionedPRs.filter { !$0.isDraft }
-                    // Note: merged PRs are never drafts, but filter anyway for consistency
-                    mergedPRs = mergedPRs.filter { !$0.isDraft }
-                }
+                let result = try await self.apiClient.fetchIncremental(username: username, onProgress: onProgress)
+                var prs = self.filterByConfiguration(result.openPRs)
+                var mentionedPRs = self.filterByConfiguration(result.mentionedPRs)
+                var mergedPRs = self.filterByConfiguration(result.mergedPRs)
 
                 logger.info("After filters: \(prs.count) open PRs, \(mentionedPRs.count) mentioned PRs, \(mergedPRs.count) merged PRs")
 
@@ -404,6 +394,51 @@ final class PRManager: PRManagerType, ObservableObject {
         }
     }
 
+    /// Apply `fetchIncremental` progress frame to the published `prList`. Runs on
+    /// MainActor. Filters (repositories, drafts) are applied here so the partial
+    /// view is consistent with user settings. The full notification / Jira / CI
+    /// auto-retry pipeline only runs on the final (returned) result; intermediate
+    /// frames only refresh the UI.
+    private func applyIncrementalProgress(
+        openPRs: [PullRequest],
+        mergedPRs: [PullRequest],
+        stage: GitHubAPIClient.IncrementalStage
+    ) {
+        let filteredOpen = filterByConfiguration(openPRs)
+        let filteredMerged = filterByConfiguration(mergedPRs)
+
+        var updated = prList
+        updated.pullRequests = filteredOpen
+        updated.mergedPullRequests = filteredMerged
+        updated.isLoading = true
+        updated.error = nil
+        prList = updated
+        logger.debug(
+            "Incremental progress: stage=\(stage.rawValue, privacy: .public) open=\(filteredOpen.count, privacy: .public) merged=\(filteredMerged.count, privacy: .public)"
+        )
+    }
+
+    private func filterByConfiguration(_ prs: [PullRequest]) -> [PullRequest] {
+        var result = prs
+        if !configuration.repositories.isEmpty {
+            result = result.filter { pr in
+                let repoName = pr.repoFullName.lowercased()
+                return configuration.repositories.contains { filter in
+                    let filterLower = filter.lowercased()
+                    if filterLower.hasSuffix("/") {
+                        return repoName.hasPrefix(filterLower)
+                    } else {
+                        return repoName == filterLower
+                    }
+                }
+            }
+        }
+        if !configuration.showDrafts {
+            result = result.filter { !$0.isDraft }
+        }
+        return result
+    }
+
     private func cancelRefreshWork(reason: String) {
         activeRefreshTask?.cancel()
         activeRefreshTask = nil
@@ -462,6 +497,14 @@ final class PRManager: PRManagerType, ObservableObject {
             return nil
         }
 
+        // When rate limit is critical, wait for reset regardless of the transient error kind.
+        // Otherwise a 502-storm keeps burning remaining quota.
+        if isRateLimitCritical {
+            consecutiveTransientFailures = 0
+            let delay = max(0, rateLimitInfo.resetDate.timeIntervalSinceNow) + Double.random(in: 1...3)
+            return RecoveryRetryPlan(delay: delay, reason: "rate_limit_critical")
+        }
+
         switch apiError {
         case .rateLimited(let resetDate):
             consecutiveTransientFailures = 0
@@ -486,6 +529,30 @@ final class PRManager: PRManagerType, ObservableObject {
         default:
             consecutiveTransientFailures = 0
             return nil
+        }
+    }
+
+    private static let criticalRateLimitThresholdPercent: Int = 15
+
+    private var isRateLimitCritical: Bool {
+        guard rateLimitInfo.limit > 0 else { return false }
+        let threshold = max(1, rateLimitInfo.limit * Self.criticalRateLimitThresholdPercent / 100)
+        return rateLimitInfo.remaining < threshold && rateLimitInfo.resetDate > Date()
+    }
+
+    private func scheduleRateLimitResume(at resetDate: Date) {
+        cancelRecoveryRetry()
+        consecutiveTransientFailures = 0
+        let delay = max(0, resetDate.timeIntervalSinceNow) + Double.random(in: 1...3)
+        recoveryRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: delay.nanoseconds)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.recoveryRetryTask = nil
+            self.requestRefresh(trigger: .recovery)
         }
     }
 
@@ -534,6 +601,11 @@ final class PRManager: PRManagerType, ObservableObject {
         Self.saveConfiguration(config)
 
         apiClient.updateGraphQLEndpoint(config.graphQLEndpoint)
+        apiClient.updateProxy(
+            urlString: config.httpProxyURL,
+            username: config.httpProxyUsername,
+            password: Keychain.loadProxyPassword()
+        )
 
         // Restart polling with new interval if currently polling
         if timer != nil {

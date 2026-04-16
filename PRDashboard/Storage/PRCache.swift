@@ -74,6 +74,134 @@ struct MentionCacheEntry: Codable, Equatable {
     }
 }
 
+struct IndexSnapshot: Codable, Equatable {
+    let updatedAt: Date
+    let headOid: String?
+    let reviewThreadTotal: Int
+    let commentTotal: Int
+    let reviewTotal: Int
+}
+
+struct CachedPRDetail: Codable {
+    let prId: Int
+    let indexSnapshot: IndexSnapshot
+    let detail: PullRequest
+    let detailFetchedAt: Date
+
+    /// Cache hit when index scalars match AND within TTL.
+    /// updatedAt bumps whenever anything material changes on GitHub's side
+    /// (new comment, thread resolved, review added, CI updated), so it's the
+    /// primary signal. The TTL is a 24h sanity net against undetected drift.
+    func isUsable(against snapshot: IndexSnapshot, now: Date, ttl: TimeInterval) -> Bool {
+        guard indexSnapshot == snapshot else { return false }
+        return now.timeIntervalSince(detailFetchedAt) < ttl
+    }
+}
+
+final class PRDetailCache {
+    static let shared = PRDetailCache()
+
+    static let ttl: TimeInterval = 24 * 60 * 60
+
+    private let logger = Logger(subsystem: "com.prdashboard", category: "PRDetailCache")
+    private let cacheURL: URL
+    private let maxEntries = 500
+    private let lock = NSLock()
+    private var entries: [Int: CachedPRDetail]?
+    private var lastPersistedEntries: [Int: CachedPRDetail] = [:]
+
+    private init() {
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("com.prdashboard", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        cacheURL = cacheDir.appendingPathComponent("pr_detail_cache.json")
+    }
+
+    func loadEntries() -> [Int: CachedPRDetail] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let cached = entries { return cached }
+
+        let loaded = readFromDisk()
+        entries = loaded
+        lastPersistedEntries = loaded
+        return loaded
+    }
+
+    /// Merge updates into the cache and persist. Returns the trimmed, persisted set.
+    @discardableResult
+    func upsert(_ updates: [CachedPRDetail]) -> [Int: CachedPRDetail] {
+        lock.lock()
+        var merged = entries ?? readFromDisk()
+        for entry in updates {
+            merged[entry.prId] = entry
+        }
+        let trimmed = trim(merged)
+        entries = trimmed
+        let shouldPersist = trimmed != lastPersistedEntries
+        if shouldPersist {
+            lastPersistedEntries = trimmed
+        }
+        lock.unlock()
+
+        if shouldPersist {
+            persist(trimmed)
+        }
+        return trimmed
+    }
+
+    func clear() {
+        lock.lock()
+        entries = [:]
+        lastPersistedEntries = [:]
+        lock.unlock()
+
+        try? FileManager.default.removeItem(at: cacheURL)
+        logger.debug("PR detail cache cleared")
+    }
+
+    private func persist(_ snapshot: [Int: CachedPRDetail]) {
+        do {
+            let data = try JSONEncoder().encode(Array(snapshot.values))
+            try data.write(to: cacheURL, options: .atomic)
+        } catch {
+            logger.error("Failed to save PR detail cache: \(error.localizedDescription)")
+        }
+    }
+
+    private func trim(_ input: [Int: CachedPRDetail]) -> [Int: CachedPRDetail] {
+        guard input.count > maxEntries else { return input }
+        let retained = input.values
+            .sorted { $0.detailFetchedAt > $1.detailFetchedAt }
+            .prefix(maxEntries)
+        return Dictionary(uniqueKeysWithValues: retained.map { ($0.prId, $0) })
+    }
+
+    private func readFromDisk() -> [Int: CachedPRDetail] {
+        guard FileManager.default.fileExists(atPath: cacheURL.path) else { return [:] }
+
+        do {
+            let data = try Data(contentsOf: cacheURL)
+            let decoded = try JSONDecoder().decode([CachedPRDetail].self, from: data)
+            return Dictionary(uniqueKeysWithValues: decoded.map { ($0.prId, $0) })
+        } catch {
+            logger.error("Failed to load PR detail cache: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: cacheURL)
+            return [:]
+        }
+    }
+}
+
+extension CachedPRDetail: Equatable {
+    static func == (lhs: CachedPRDetail, rhs: CachedPRDetail) -> Bool {
+        lhs.prId == rhs.prId
+            && lhs.indexSnapshot == rhs.indexSnapshot
+            && lhs.detailFetchedAt == rhs.detailFetchedAt
+            && lhs.detail.id == rhs.detail.id
+    }
+}
+
 final class MentionCache {
     static let shared = MentionCache()
 

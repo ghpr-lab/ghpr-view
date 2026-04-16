@@ -12,6 +12,8 @@ struct Configuration: Codable, Equatable {
     var showMyReviewStatus: Bool  // show my review status badges on review-requested PRs
     var automaticallyCheckForUpdates: Bool
     var graphQLEndpoint: String  // developer override for GitHub GraphQL URL; empty = default
+    var httpProxyURL: String     // e.g. "http://host:port"; empty = no proxy
+    var httpProxyUsername: String  // empty = no auth; password stored in Keychain
 
     static var `default`: Configuration {
         Configuration(
@@ -25,7 +27,9 @@ struct Configuration: Codable, Equatable {
             pausePollingOnExpensiveNetwork: true,
             showMyReviewStatus: false,
             automaticallyCheckForUpdates: true,
-            graphQLEndpoint: ""
+            graphQLEndpoint: "",
+            httpProxyURL: "",
+            httpProxyUsername: ""
         )
     }
 
@@ -40,7 +44,9 @@ struct Configuration: Codable, Equatable {
         pausePollingOnExpensiveNetwork: Bool,
         showMyReviewStatus: Bool,
         automaticallyCheckForUpdates: Bool,
-        graphQLEndpoint: String
+        graphQLEndpoint: String,
+        httpProxyURL: String,
+        httpProxyUsername: String
     ) {
         self.refreshInterval = refreshInterval
         self.repositories = repositories
@@ -53,6 +59,8 @@ struct Configuration: Codable, Equatable {
         self.showMyReviewStatus = showMyReviewStatus
         self.automaticallyCheckForUpdates = automaticallyCheckForUpdates
         self.graphQLEndpoint = graphQLEndpoint
+        self.httpProxyURL = httpProxyURL
+        self.httpProxyUsername = httpProxyUsername
     }
 
     enum CodingKeys: String, CodingKey {
@@ -67,6 +75,8 @@ struct Configuration: Codable, Equatable {
         case showMyReviewStatus
         case automaticallyCheckForUpdates
         case graphQLEndpoint
+        case httpProxyURL
+        case httpProxyUsername
     }
 
     init(from decoder: Decoder) throws {
@@ -84,6 +94,8 @@ struct Configuration: Codable, Equatable {
         showMyReviewStatus = try container.decodeIfPresent(Bool.self, forKey: .showMyReviewStatus) ?? defaults.showMyReviewStatus
         automaticallyCheckForUpdates = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCheckForUpdates) ?? defaults.automaticallyCheckForUpdates
         graphQLEndpoint = try container.decodeIfPresent(String.self, forKey: .graphQLEndpoint) ?? defaults.graphQLEndpoint
+        httpProxyURL = try container.decodeIfPresent(String.self, forKey: .httpProxyURL) ?? defaults.httpProxyURL
+        httpProxyUsername = try container.decodeIfPresent(String.self, forKey: .httpProxyUsername) ?? defaults.httpProxyUsername
     }
 
     var isValid: Bool {

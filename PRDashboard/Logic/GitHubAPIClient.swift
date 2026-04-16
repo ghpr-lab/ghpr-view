@@ -16,8 +16,79 @@ struct RateLimitInfo: Equatable {
         remaining >= 500
     }
 
+    var hasHeadroomForDetails: Bool {
+        remaining >= 200
+    }
+
     static var empty: RateLimitInfo {
         RateLimitInfo(limit: 5000, remaining: 5000, resetDate: Date())
+    }
+}
+
+/// Lightweight snapshot produced by the index query. Holds only the scalars
+/// we need to decide whether a cached detail can be reused.
+struct IndexedPR {
+    let databaseId: Int
+    let number: Int
+    let title: String
+    let url: URL
+    let state: PRState
+    let isDraft: Bool
+    let createdAt: Date
+    let updatedAt: Date
+    let mergedAt: Date?
+    let author: String
+    let authorAvatarURL: URL?
+    let repositoryOwner: String
+    let repositoryName: String
+    let hasBaseConflicts: Bool
+    let category: PRCategory
+    let isMerged: Bool
+    let snapshot: IndexSnapshot
+
+    var reference: PullRequestReference {
+        PullRequestReference(owner: repositoryOwner, repo: repositoryName, number: number)
+    }
+
+    /// Produce a `PullRequest` suitable for optimistic UI rendering. When a cached
+    /// detail is supplied we keep its heavy fields (reviewThreads, CI contexts,
+    /// comments) and patch only the header fields from the fresh index scalars.
+    func placeholderPullRequest(using existing: PullRequest? = nil) -> PullRequest {
+        return PullRequest(
+            id: databaseId,
+            number: number,
+            title: title,
+            author: author,
+            authorAvatarURL: authorAvatarURL,
+            repositoryOwner: repositoryOwner,
+            repositoryName: repositoryName,
+            url: url,
+            state: state,
+            isDraft: isDraft,
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            mergedAt: mergedAt,
+            body: existing?.body,
+            conversationComments: existing?.conversationComments ?? [],
+            lastCommitAt: existing?.lastCommitAt,
+            headCommitOid: snapshot.headOid ?? existing?.headCommitOid,
+            reviewThreads: existing?.reviewThreads ?? [],
+            category: category,
+            hasBaseConflicts: hasBaseConflicts,
+            ciStatus: existing?.ciStatus,
+            checkSuccessCount: existing?.checkSuccessCount ?? 0,
+            checkFailureCount: existing?.checkFailureCount ?? 0,
+            checkPendingCount: existing?.checkPendingCount ?? 0,
+            githubCIState: existing?.githubCIState,
+            myLastReviewState: existing?.myLastReviewState,
+            myLastReviewAt: existing?.myLastReviewAt,
+            reviewRequestedAt: existing?.reviewRequestedAt,
+            myThreadsAllResolved: existing?.myThreadsAllResolved ?? false,
+            approvalCount: existing?.approvalCount ?? 0,
+            changesRequestedCount: existing?.changesRequestedCount,
+            ciExtendedInfo: existing?.ciExtendedInfo,
+            jiraTicket: existing?.jiraTicket
+        )
     }
 }
 
@@ -116,13 +187,48 @@ enum APIError: LocalizedError {
     }
 }
 
+struct HTTPProxyConfig: Equatable {
+    let host: String
+    let port: Int
+    let username: String
+    let password: String
+}
+
+private final class ProxyAuthDelegate: NSObject, URLSessionDelegate {
+    var credential: URLCredential?
+
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        let space = challenge.protectionSpace
+        let isProxyBasic = (space.authenticationMethod == NSURLAuthenticationMethodHTTPBasic
+            || space.authenticationMethod == NSURLAuthenticationMethodDefault)
+            && [NSURLProtectionSpaceHTTPProxy, NSURLProtectionSpaceHTTPSProxy].contains(space.proxyType ?? "")
+        if isProxyBasic, let credential = credential {
+            completionHandler(.useCredential, credential)
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+}
+
 final class GitHubAPIClient: ObservableObject {
     private static let maxCIContextsToFetch = 200
     private static let maxGraphQLAttempts = 3
+    /// Aliased-batch size used by detail / mention-source / mentioned-PR batches.
+    private static let batchedPRQuerySize = 20
+    /// Maximum number of aliased-batch queries in flight at once. Applied to
+    /// fetchIncremental, fetchMentionSourceReferences, and fetchMentionedPullRequests
+    /// so a cold start can't burst 10+ concurrent GraphQL requests.
+    private static let batchedPRQueryConcurrency = 3
     static let defaultGraphQLURL = URL(string: "https://api.github.com/graphql")!
     private var graphQLURL: URL = GitHubAPIClient.defaultGraphQLURL
     private var token: String
-    private let session: URLSession
+    private var session: URLSession
+    private let sessionDelegate = ProxyAuthDelegate()
+    private var proxyConfig: HTTPProxyConfig?
     private var lastETag: String?
 
     @Published private(set) var rateLimitInfo: RateLimitInfo = .empty
@@ -134,9 +240,7 @@ final class GitHubAPIClient: ObservableObject {
 
     init(token: String, graphQLEndpoint: String? = nil) {
         self.token = token
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 30
-        self.session = URLSession(configuration: config)
+        self.session = Self.makeSession(proxy: nil, delegate: sessionDelegate)
         self.graphQLURL = Self.resolveGraphQLURL(graphQLEndpoint)
     }
 
@@ -152,6 +256,59 @@ final class GitHubAPIClient: ObservableObject {
         } else {
             logger.info("GraphQL endpoint overridden to \(resolved.absoluteString, privacy: .private)")
         }
+    }
+
+    func updateProxy(urlString: String, username: String, password: String) {
+        let newConfig = Self.resolveProxyConfig(urlString: urlString, username: username, password: password)
+        if newConfig == proxyConfig { return }
+
+        proxyConfig = newConfig
+        sessionDelegate.credential = newConfig.flatMap { cfg in
+            cfg.username.isEmpty ? nil : URLCredential(user: cfg.username, password: cfg.password, persistence: .forSession)
+        }
+        session.invalidateAndCancel()
+        session = Self.makeSession(proxy: newConfig, delegate: sessionDelegate)
+
+        if let cfg = newConfig {
+            logger.info("HTTP proxy set to \(cfg.host, privacy: .private):\(cfg.port, privacy: .public)")
+        } else {
+            logger.info("HTTP proxy disabled")
+        }
+    }
+
+    private static func makeSession(proxy: HTTPProxyConfig?, delegate: URLSessionDelegate) -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 30
+        if let proxy {
+            config.connectionProxyDictionary = [
+                kCFNetworkProxiesHTTPEnable as AnyHashable: 1,
+                kCFNetworkProxiesHTTPProxy as AnyHashable: proxy.host,
+                kCFNetworkProxiesHTTPPort as AnyHashable: proxy.port,
+                "HTTPSEnable" as AnyHashable: 1,
+                "HTTPSProxy" as AnyHashable: proxy.host,
+                "HTTPSPort" as AnyHashable: proxy.port
+            ]
+        }
+        return URLSession(configuration: config, delegate: delegate, delegateQueue: nil)
+    }
+
+    private static func resolveProxyConfig(urlString: String, username: String, password: String) -> HTTPProxyConfig? {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let url = URL(string: trimmed),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else {
+            logger.error("Invalid HTTP proxy URL '\(trimmed, privacy: .private)'; proxy disabled")
+            return nil
+        }
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        return HTTPProxyConfig(
+            host: host,
+            port: port,
+            username: username.trimmingCharacters(in: .whitespacesAndNewlines),
+            password: password
+        )
     }
 
     private static func resolveGraphQLURL(_ endpoint: String?) -> URL {
@@ -178,11 +335,305 @@ final class GitHubAPIClient: ObservableObject {
         let mergedPRs: [PullRequest]
     }
 
-    func fetchAllPullRequests(username: String) async throws -> CombinedPRResult {
-        // Combined query using GraphQL aliases - single API call instead of 4
-        let query = buildCombinedQuery(username: username)
-        let responseData = try await executeGraphQL(query: query, operation: "fetchAllPullRequests")
-        return try await parseCombinedResponse(data: responseData, username: username)
+    /// Stage of an in-flight incremental refresh. PRManager uses this to decide
+    /// whether to apply filters and publish, without running the final
+    /// notification/Jira/change-detection pipeline on intermediate frames.
+    enum IncrementalStage: String {
+        case placeholders
+        case detailProgress
+    }
+
+    /// Index-first, cache-aware refresh. Runs a cheap scalar-only "index" query
+    /// then fetches detail only for PRs whose index snapshot changed. Emits
+    /// intermediate `onProgress` frames so the UI can paint as soon as index
+    /// returns and re-paint after each detail batch.
+    func fetchIncremental(
+        username: String,
+        onProgress: (@Sendable ([PullRequest], [PullRequest], IncrementalStage) async -> Void)? = nil
+    ) async throws -> CombinedPRResult {
+        let indexed = try await fetchIndex(username: username)
+        logger.info("Index returned \(indexed.count, privacy: .public) PRs (authored+reviewed+merged)")
+
+        let cache = PRDetailCache.shared.loadEntries()
+        let now = Date()
+        var snapshotByID: [Int: IndexSnapshot] = [:]
+        var hits: [Int: PullRequest] = [:]
+        var misses: [IndexedPR] = []
+
+        for ip in indexed {
+            snapshotByID[ip.databaseId] = ip.snapshot
+            if let cached = cache[ip.databaseId],
+               cached.isUsable(against: ip.snapshot, now: now, ttl: PRDetailCache.ttl) {
+                hits[ip.databaseId] = ip.placeholderPullRequest(using: cached.detail)
+            } else {
+                misses.append(ip)
+            }
+        }
+        logger.info("Cache diff: \(hits.count, privacy: .public) hits, \(misses.count, privacy: .public) misses")
+
+        func splitOpenMerged(byID: [Int: PullRequest]) -> (open: [PullRequest], merged: [PullRequest]) {
+            var open: [PullRequest] = []
+            var merged: [PullRequest] = []
+            var seenOpen = Set<Int>()
+            var seenMerged = Set<Int>()
+            let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+            for ip in indexed {
+                guard let pr = byID[ip.databaseId] else { continue }
+                if ip.isMerged {
+                    if let mergedAt = pr.mergedAt, mergedAt >= cutoff, seenMerged.insert(pr.id).inserted {
+                        merged.append(pr)
+                    }
+                } else if seenOpen.insert(pr.id).inserted {
+                    open.append(pr)
+                }
+            }
+            open.sort { $0.updatedAt > $1.updatedAt }
+            merged.sort { ($0.mergedAt ?? $0.updatedAt) > ($1.mergedAt ?? $1.updatedAt) }
+            return (open, merged)
+        }
+
+        // Initial progress frame: hits + placeholders for pending misses so the UI
+        // can paint titles/CI colors immediately on cold start.
+        if let onProgress {
+            var optimistic: [Int: PullRequest] = hits
+            for ip in misses {
+                optimistic[ip.databaseId] = ip.placeholderPullRequest(using: cache[ip.databaseId]?.detail)
+            }
+            let split = splitOpenMerged(byID: optimistic)
+            await onProgress(split.open, split.merged, .placeholders)
+        }
+
+        // Rate-limit guard: if we don't have headroom, serve stale cached details
+        // for misses rather than firing 50+ batch queries.
+        let rateLimitSnapshot = await MainActor.run { self.rateLimitInfo }
+        var fetched: [Int: PullRequest] = [:]
+        if !misses.isEmpty && !rateLimitSnapshot.hasHeadroomForDetails {
+            logger.warning(
+                "Detail fetch skipped due to rate-limit floor: remaining=\(rateLimitSnapshot.remaining, privacy: .public)/\(rateLimitSnapshot.limit, privacy: .public)"
+            )
+            for ip in misses {
+                if let cached = cache[ip.databaseId] {
+                    fetched[ip.databaseId] = ip.placeholderPullRequest(using: cached.detail)
+                } else {
+                    fetched[ip.databaseId] = ip.placeholderPullRequest()
+                }
+            }
+        } else if !misses.isEmpty {
+            // Run detail batches with a bounded concurrency cap. After each batch
+            // completes we (a) merge its results into the running accumulator,
+            // (b) emit a full-list snapshot for the UI, and (c) re-check rate
+            // limit headroom — if we dropped below the floor mid-refresh, stop
+            // dispatching new batches and serve placeholders for the rest.
+            let categoryByID = Dictionary(uniqueKeysWithValues: misses.map { ($0.databaseId, $0.category) })
+
+            // Ordering: authored PRs first (user's own work paints first on cold
+            // start), then reviewRequest, then merged. Within each bucket sort
+            // by owner/repo/number for batch stability.
+            func orderKey(_ ip: IndexedPR) -> Int {
+                if ip.category == .authored && !ip.isMerged { return 0 }
+                if ip.category == .reviewRequest && !ip.isMerged { return 1 }
+                return 2
+            }
+            let sorted = misses.sorted { a, b in
+                let ka = orderKey(a), kb = orderKey(b)
+                if ka != kb { return ka < kb }
+                if a.repositoryOwner != b.repositoryOwner { return a.repositoryOwner < b.repositoryOwner }
+                if a.repositoryName != b.repositoryName { return a.repositoryName < b.repositoryName }
+                return a.number < b.number
+            }
+            let batches: [[IndexedPR]] = stride(from: 0, to: sorted.count, by: Self.batchedPRQuerySize).map {
+                Array(sorted[$0..<min($0 + Self.batchedPRQuerySize, sorted.count)])
+            }
+            let fieldSelection = buildPRFieldSelection(
+                username: username,
+                includeReviewMetadata: true,
+                includeCrossReferences: false,
+                includeMentionBodies: true
+            )
+            let excludeFilter = Self.loadCIStatusExcludeFilter()
+
+            // freshlyFetched holds only PRs that actually went over the wire this
+            // refresh. Used for cache persistence. `fetched` will also pick up
+            // placeholder fills for rate-limited-unfetched PRs so the UI sees a
+            // complete list.
+            var freshlyFetched: [Int: PullRequest] = [:]
+
+            try await withThrowingTaskGroup(of: [Int: PullRequest].self) { group in
+                var iter = batches.makeIterator()
+                var inflight = 0
+                var rateLimitExhausted = false
+
+                while inflight < Self.batchedPRQueryConcurrency, let batch = iter.next() {
+                    group.addTask { [fieldSelection] in
+                        try await self.fetchDetailBatch(
+                            batch,
+                            categoryByID: categoryByID,
+                            username: username,
+                            fieldSelection: fieldSelection,
+                            excludeFilter: excludeFilter
+                        )
+                    }
+                    inflight += 1
+                }
+                while let partial = try await group.next() {
+                    freshlyFetched.merge(partial) { _, new in new }
+                    fetched.merge(partial) { _, new in new }
+                    inflight -= 1
+
+                    if let onProgress {
+                        var byID: [Int: PullRequest] = hits
+                        byID.merge(fetched) { _, new in new }
+                        for ip in misses where byID[ip.databaseId] == nil {
+                            byID[ip.databaseId] = ip.placeholderPullRequest(using: cache[ip.databaseId]?.detail)
+                        }
+                        let split = splitOpenMerged(byID: byID)
+                        await onProgress(split.open, split.merged, .detailProgress)
+                    }
+
+                    if !rateLimitExhausted {
+                        let currentRateLimit = await MainActor.run { self.rateLimitInfo }
+                        if !currentRateLimit.hasHeadroomForDetails {
+                            rateLimitExhausted = true
+                            logger.warning(
+                                "Detail fetch stopping mid-flight: remaining=\(currentRateLimit.remaining, privacy: .public)/\(currentRateLimit.limit, privacy: .public) fell below headroom; remaining misses served as placeholders"
+                            )
+                        }
+                    }
+
+                    if !rateLimitExhausted, let next = iter.next() {
+                        group.addTask { [fieldSelection] in
+                            try await self.fetchDetailBatch(
+                                next,
+                                categoryByID: categoryByID,
+                                username: username,
+                                fieldSelection: fieldSelection,
+                                excludeFilter: excludeFilter
+                            )
+                        }
+                        inflight += 1
+                    }
+                }
+            }
+
+            // Fill in placeholders for any miss that wasn't fetched (either
+            // rate-limited mid-flight or never dispatched at all).
+            for ip in misses where fetched[ip.databaseId] == nil {
+                fetched[ip.databaseId] = ip.placeholderPullRequest(using: cache[ip.databaseId]?.detail)
+            }
+
+            // Only persist entries we actually fetched fresh; placeholders would
+            // pollute the cache with partial data and break the updatedAt diff.
+            let cacheEntries: [CachedPRDetail] = freshlyFetched.compactMap { id, pr in
+                guard let snapshot = snapshotByID[id] else { return nil }
+                return CachedPRDetail(
+                    prId: id,
+                    indexSnapshot: snapshot,
+                    detail: pr,
+                    detailFetchedAt: now
+                )
+            }
+            PRDetailCache.shared.upsert(cacheEntries)
+        }
+
+        var combinedByID: [Int: PullRequest] = hits
+        combinedByID.merge(fetched) { _, new in new }
+
+        let split = splitOpenMerged(byID: combinedByID)
+        let openPRs = split.open
+        let mergedPRs = split.merged
+
+        let mentionedPRs = try await enrichWithMentions(openPRs: openPRs, mergedPRs: mergedPRs)
+
+        return CombinedPRResult(
+            openPRs: openPRs,
+            mentionedPRs: mentionedPRs,
+            mergedPRs: mergedPRs
+        )
+    }
+
+    /// Run the mention-discovery pipeline for the given seed PRs. Uses MentionCache
+    /// (TTL+cooldown) to avoid re-scanning unchanged source PRs.
+    private func enrichWithMentions(
+        openPRs: [PullRequest],
+        mergedPRs: [PullRequest]
+    ) async throws -> [PullRequest] {
+        let seedPRs = openPRs + mergedPRs
+        guard !seedPRs.isEmpty else { return [] }
+
+        let existingReferences = Set(
+            seedPRs.map {
+                PullRequestReference(
+                    owner: $0.repositoryOwner,
+                    repo: $0.repositoryName,
+                    number: $0.number
+                )
+            }
+        )
+
+        var mentionCandidates = Set<PullRequestReference>()
+        var mentionCacheEntries = MentionCache.shared.loadEntries()
+        var mentionSourcesToRefresh: [PullRequest] = []
+        let refreshTimestamp = Date()
+
+        for pr in seedPRs {
+            if let cacheEntry = mentionCacheEntries[pr.id],
+               cacheEntry.isUsable(
+                   currentUpdatedAt: pr.updatedAt,
+                   now: refreshTimestamp,
+                   ttl: MentionCache.ttl,
+                   cooldown: MentionCache.cooldown
+               ) {
+                mentionCandidates.formUnion(cacheEntry.pullRequestReferences)
+            } else {
+                mentionSourcesToRefresh.append(pr)
+            }
+        }
+
+        let rateLimitSnapshot = await MainActor.run { self.rateLimitInfo }
+        if !mentionSourcesToRefresh.isEmpty, !rateLimitSnapshot.hasHeadroomForMentions {
+            logger.info(
+                "Skipping mention refresh: rate limit remaining \(rateLimitSnapshot.remaining) below headroom threshold"
+            )
+            for pr in mentionSourcesToRefresh {
+                if let stale = mentionCacheEntries[pr.id] {
+                    mentionCandidates.formUnion(stale.pullRequestReferences)
+                }
+            }
+            mentionSourcesToRefresh.removeAll()
+        }
+
+        if !mentionSourcesToRefresh.isEmpty {
+            logger.info("Refreshing mention sources for \(mentionSourcesToRefresh.count) PRs")
+            let refreshedReferences = try await fetchMentionSourceReferences(for: mentionSourcesToRefresh)
+
+            for pr in mentionSourcesToRefresh {
+                let references = refreshedReferences[pr.id] ?? []
+                mentionCandidates.formUnion(references)
+                let sortedReferences = references.sorted {
+                    if $0.owner != $1.owner { return $0.owner < $1.owner }
+                    if $0.repo != $1.repo { return $0.repo < $1.repo }
+                    return $0.number < $1.number
+                }
+                mentionCacheEntries[pr.id] = MentionCacheEntry(
+                    sourcePRID: pr.id,
+                    sourceUpdatedAt: pr.updatedAt,
+                    references: sortedReferences,
+                    cachedAt: refreshTimestamp
+                )
+            }
+
+            MentionCache.shared.saveEntries(mentionCacheEntries)
+        }
+
+        mentionCandidates.subtract(existingReferences)
+        guard !mentionCandidates.isEmpty else { return [] }
+
+        var mentionedPRs = try await fetchMentionedPullRequests(references: Array(mentionCandidates))
+        var seenMentionedIDs = Set<Int>()
+        mentionedPRs = mentionedPRs
+            .filter { $0.state == .open && seenMentionedIDs.insert($0.id).inserted }
+            .sorted { $0.updatedAt > $1.updatedAt }
+        return mentionedPRs
     }
 
     func validateToken() async throws -> Bool {
@@ -522,45 +973,11 @@ final class GitHubAPIClient: ObservableObject {
         databaseId
         number
         updatedAt
-        body
         repository {
             owner {
                 login
             }
             name
-        }
-        comments(last: 20) {
-            nodes {
-                id
-                author {
-                    login
-                }
-                body
-                createdAt
-            }
-        }
-        reviewThreads(last: 20) {
-            nodes {
-                id
-                isResolved
-                isOutdated
-                path
-                line
-                comments(first: 5) {
-                    nodes {
-                        id
-                        author {
-                            login
-                        }
-                        body
-                        createdAt
-                    }
-                }
-            }
-            pageInfo {
-                hasPreviousPage
-                startCursor
-            }
         }
         crossReferences: timelineItems(last: 50, itemTypes: [CROSS_REFERENCED_EVENT]) {
             nodes {
@@ -784,21 +1201,59 @@ final class GitHubAPIClient: ObservableObject {
 
     // MARK: - Private
 
-    private func buildCombinedQuery(username: String) -> String {
+    private func buildPRIndexFieldSelection() -> String {
+        """
+        databaseId
+        number
+        title
+        url
+        state
+        isDraft
+        createdAt
+        updatedAt
+        mergedAt
+        mergeable
+        mergeStateStatus
+        author {
+            login
+            avatarUrl
+        }
+        repository {
+            owner {
+                login
+            }
+            name
+        }
+        reviewThreads {
+            totalCount
+        }
+        comments {
+            totalCount
+        }
+        reviews {
+            totalCount
+        }
+        commits(last: 1) {
+            nodes {
+                commit {
+                    oid
+                    committedDate
+                }
+            }
+        }
+        """
+    }
+
+    private func buildIndexQuery(username: String) -> String {
+        let fragment = buildPRIndexFieldSelection()
+        let mergedSince = Self.dateStringForSearch(daysBack: 2)
         let prFragment = """
                 nodes {
                     ... on PullRequest {
-                        \(buildPRFieldSelection(
-                            username: username,
-                            includeReviewMetadata: true,
-                            includeCrossReferences: false,
-                            includeMentionBodies: false
-                        ))
+                        \(fragment)
                     }
                 }
         """
-
-        let mergedSince = Self.dateStringForSearch(daysBack: 2)
 
         return """
         query {
@@ -814,8 +1269,106 @@ final class GitHubAPIClient: ObservableObject {
             mergedInvolved: search(query: "is:pr is:merged involves:\(username) merged:>=\(mergedSince)", type: ISSUE, first: 50) {
                 \(prFragment)
             }
+            rateLimit {
+                cost
+                remaining
+                resetAt
+            }
         }
         """
+    }
+
+    func fetchIndex(username: String) async throws -> [IndexedPR] {
+        let query = buildIndexQuery(username: username)
+        let data = try await executeGraphQL(query: query, operation: "fetchIndex")
+        return try parseIndexResponse(data: data, username: username)
+    }
+
+    private func parseIndexResponse(data: Data, username: String) throws -> [IndexedPR] {
+        let decoder = JSONDecoder.githubDecoder
+        let response: IndexGraphQLResponse
+        do {
+            response = try decoder.decode(IndexGraphQLResponse.self, from: data)
+        } catch {
+            throw APIError.decoding(error)
+        }
+
+        if let rl = response.data.rateLimit {
+            logger.info("Index query cost=\(rl.cost, privacy: .public) remaining=\(rl.remaining, privacy: .public)")
+        }
+
+        let usernameLower = username.lowercased()
+        // Dedupe by databaseId: the 4 aliased searches overlap (e.g. a PR can be
+        // both `review-requested:me` and `reviewed-by:me`). First write wins,
+        // matching iteration order: authored → reviewRequested → reviewedBy → mergedInvolved.
+        var result: [IndexedPR] = []
+        var seen: Set<Int> = []
+
+        func appendIfNew(_ ip: IndexedPR) {
+            guard seen.insert(ip.databaseId).inserted else { return }
+            result.append(ip)
+        }
+
+        func indexedFromNode(
+            _ node: IndexGraphQLResponse.PRNode,
+            category: PRCategory,
+            isMerged: Bool
+        ) -> IndexedPR? {
+            guard let databaseId = node.databaseId else { return nil }
+            let lastCommit = node.commits?.nodes.first?.commit
+            let snapshot = IndexSnapshot(
+                updatedAt: node.updatedAt,
+                headOid: lastCommit?.oid,
+                reviewThreadTotal: node.reviewThreads?.totalCount ?? 0,
+                commentTotal: node.comments?.totalCount ?? 0,
+                reviewTotal: node.reviews?.totalCount ?? 0
+            )
+            return IndexedPR(
+                databaseId: databaseId,
+                number: node.number,
+                title: node.title,
+                url: node.url,
+                state: PRState(rawValue: node.state) ?? .open,
+                isDraft: node.isDraft,
+                createdAt: node.createdAt,
+                updatedAt: node.updatedAt,
+                mergedAt: node.mergedAt,
+                author: node.author?.login ?? "unknown",
+                authorAvatarURL: node.author?.avatarUrl,
+                repositoryOwner: node.repository.owner.login,
+                repositoryName: node.repository.name,
+                hasBaseConflicts: Self.deriveBaseConflicts(
+                    mergeable: node.mergeable,
+                    mergeStateStatus: node.mergeStateStatus
+                ),
+                category: category,
+                isMerged: isMerged,
+                snapshot: snapshot
+            )
+        }
+
+        for node in response.data.authored.nodes {
+            if let ip = indexedFromNode(node, category: .authored, isMerged: false) {
+                appendIfNew(ip)
+            }
+        }
+        for node in response.data.reviewRequested.nodes {
+            if let ip = indexedFromNode(node, category: .reviewRequest, isMerged: false) {
+                appendIfNew(ip)
+            }
+        }
+        for node in response.data.reviewedBy.nodes {
+            if let ip = indexedFromNode(node, category: .reviewRequest, isMerged: false) {
+                appendIfNew(ip)
+            }
+        }
+        for node in response.data.mergedInvolved.nodes {
+            let resolved: PRCategory = (node.author?.login.lowercased() == usernameLower) ? .authored : .reviewRequest
+            if let ip = indexedFromNode(node, category: resolved, isMerged: true) {
+                appendIfNew(ip)
+            }
+        }
+        return result
     }
 
     private static func dateStringForSearch(daysBack: Int) -> String {
@@ -864,8 +1417,10 @@ final class GitHubAPIClient: ObservableObject {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         for attempt in 1...Self.maxGraphQLAttempts {
+            let attemptStart = Date()
             do {
                 let (data, response) = try await session.data(for: request)
+                let elapsed = Date().timeIntervalSince(attemptStart)
 
                 guard let httpResponse = response as? HTTPURLResponse else {
                     throw APIError.invalidResponse
@@ -887,7 +1442,7 @@ final class GitHubAPIClient: ObservableObject {
                     }
 
                     if attempt > 1 {
-                        logger.info("GraphQL request recovered: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts)")
+                        logger.info("GraphQL request recovered: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) elapsed=\(elapsed.formattedSeconds, privacy: .public)s")
                     }
                     return data
                 case 401:
@@ -903,22 +1458,26 @@ final class GitHubAPIClient: ObservableObject {
                     }
                     throw APIError.http(statusCode: httpResponse.statusCode)
                 default:
+                    logger.warning(
+                        "GraphQL upstream error: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) status=\(httpResponse.statusCode, privacy: .public) elapsed=\(elapsed.formattedSeconds, privacy: .public)s bytes=\(data.count, privacy: .public)"
+                    )
                     throw APIError.http(statusCode: httpResponse.statusCode)
                 }
             } catch {
+                let elapsed = Date().timeIntervalSince(attemptStart)
                 let apiError = normalizeGraphQLError(error)
                 let decision = retryDecision(for: apiError, attempt: attempt)
 
                 if let delay = decision.delay, attempt < Self.maxGraphQLAttempts {
                     logger.warning(
-                        "GraphQL request retry scheduled: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) classification=\(decision.classification, privacy: .public) retryIn=\(delay.formattedSeconds, privacy: .public)s"
+                        "GraphQL request retry scheduled: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) classification=\(decision.classification, privacy: .public) elapsed=\(elapsed.formattedSeconds, privacy: .public)s retryIn=\(delay.formattedSeconds, privacy: .public)s"
                     )
                     try await Task.sleep(nanoseconds: delay.nanoseconds)
                     continue
                 }
 
                 logger.error(
-                    "GraphQL request failed: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) classification=\(decision.classification, privacy: .public) error=\(apiError.localizedDescription, privacy: .public)"
+                    "GraphQL request failed: operation=\(operation, privacy: .public) attempt=\(attempt)/\(Self.maxGraphQLAttempts) classification=\(decision.classification, privacy: .public) elapsed=\(elapsed.formattedSeconds, privacy: .public)s error=\(apiError.localizedDescription, privacy: .public)"
                 )
                 throw apiError
             }
@@ -1248,25 +1807,36 @@ final class GitHubAPIClient: ObservableObject {
             return $0.number < $1.number
         }
 
-        let batchSize = 20
-        let batches: [[PullRequest]] = stride(from: 0, to: sortedPRs.count, by: batchSize).map {
-            Array(sortedPRs[$0..<min($0 + batchSize, sortedPRs.count)])
+        let batches: [[PullRequest]] = stride(from: 0, to: sortedPRs.count, by: Self.batchedPRQuerySize).map {
+            Array(sortedPRs[$0..<min($0 + Self.batchedPRQuerySize, sortedPRs.count)])
         }
 
+        // Bounded-concurrency task group — mirrors fetchIncremental so mention
+        // scanning can't fan out 7-8 concurrent requests on cold start.
         return try await withThrowingTaskGroup(of: [Int: Set<PullRequestReference>].self) { group in
-            for batch in batches {
-                group.addTask {
-                    try await self.fetchMentionSourceBatch(batch)
-                }
+            var iter = batches.makeIterator()
+            var inflight = 0
+            while inflight < Self.batchedPRQueryConcurrency, let batch = iter.next() {
+                group.addTask { try await self.fetchMentionSourceBatch(batch) }
+                inflight += 1
             }
             var result: [Int: Set<PullRequestReference>] = [:]
-            for try await batchResult in group {
-                result.merge(batchResult) { _, new in new }
+            while let partial = try await group.next() {
+                result.merge(partial) { _, new in new }
+                inflight -= 1
+                if let next = iter.next() {
+                    group.addTask { try await self.fetchMentionSourceBatch(next) }
+                    inflight += 1
+                }
             }
             return result
         }
     }
 
+    /// Fetch only `crossReferences` (inbound mentions) for a batch of PRs. We no
+    /// longer re-fetch body/comments/reviewThreads — those are already present on
+    /// each `PullRequest` (populated by fetchIncremental from PRDetailCache or the
+    /// detail batch), so outbound mentions can be extracted locally.
     private func fetchMentionSourceBatch(_ batch: [PullRequest]) async throws -> [Int: Set<PullRequestReference>] {
         var queryParts: [String] = []
         for (index, pr) in batch.enumerated() {
@@ -1293,301 +1863,146 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         let sourcePRsById = Dictionary(uniqueKeysWithValues: batch.map { ($0.id, $0) })
-        let enrichmentInfos = response.data.nodes.compactMap { node -> ReviewThreadEnrichmentInfo? in
-            guard
-                let databaseId = node.databaseId,
-                let pageInfo = node.reviewThreads?.pageInfo,
-                pageInfo.hasPreviousPage,
-                let startCursor = pageInfo.startCursor
-            else {
-                return nil
-            }
+        var result: [Int: Set<PullRequestReference>] = [:]
 
-            return ReviewThreadEnrichmentInfo(
-                prId: databaseId,
-                owner: node.repository.owner.login,
-                repo: node.repository.name,
-                number: node.number,
-                startCursor: startCursor
+        // Outbound: extract from local fields on the PullRequest we already have.
+        for pr in batch {
+            let outbound = Self.extractOutboundMentionReferences(
+                body: pr.body,
+                conversationComments: pr.conversationComments,
+                reviewThreads: pr.reviewThreads,
+                repositoryOwner: pr.repositoryOwner,
+                repositoryName: pr.repositoryName,
+                sourcePRNumber: pr.number
             )
+            result[pr.id] = outbound
         }
-        let additionalThreads = await fetchAllAdditionalReviewThreads(enrichmentInfos: enrichmentInfos)
 
-        return response.data.nodes.reduce(into: [:]) { result, node in
+        // Inbound: derive from the fresh crossReferences we just fetched.
+        for node in response.data.nodes {
             guard let databaseId = node.databaseId,
-                  let sourcePR = sourcePRsById[databaseId] else { return }
-
-            let conversationComments = node.comments?.nodes.map { comment in
-                IssueCommentSummary(
-                    id: comment.id,
-                    author: comment.author?.login ?? "unknown",
-                    body: comment.body ?? "",
-                    createdAt: comment.createdAt
-                )
-            } ?? []
-
-            let reviewThreads = node.reviewThreads?.nodes.map { thread -> ReviewThread in
-                let comments = thread.comments.nodes.map { comment in
-                    ReviewComment(
-                        id: comment.id,
-                        author: comment.author?.login ?? "unknown",
-                        body: comment.body ?? "",
-                        createdAt: comment.createdAt
-                    )
-                }
-                return ReviewThread(
-                    id: thread.id,
-                    isResolved: thread.isResolved,
-                    isOutdated: thread.isOutdated,
-                    path: thread.path,
-                    line: thread.line,
-                    comments: comments
-                )
-            } ?? []
-
-            let allReviewThreads = (additionalThreads[databaseId] ?? []) + reviewThreads
+                  let sourcePR = sourcePRsById[databaseId] else { continue }
             let currentPR = PullRequestReference(
                 owner: sourcePR.repositoryOwner,
                 repo: sourcePR.repositoryName,
                 number: sourcePR.number
             )
-
-            var references = Self.extractOutboundMentionReferences(
-                body: node.body,
-                conversationComments: conversationComments,
-                reviewThreads: allReviewThreads,
-                repositoryOwner: sourcePR.repositoryOwner,
-                repositoryName: sourcePR.repositoryName,
-                sourcePRNumber: sourcePR.number
-            )
-            references.formUnion(Self.inboundMentionReferences(from: node, currentPR: currentPR))
-            result[databaseId] = references
+            let inbound = Self.inboundMentionReferences(from: node, currentPR: currentPR)
+            result[databaseId, default: []].formUnion(inbound)
         }
+
+        return result
     }
 
-    private func parseCombinedResponse(data: Data, username: String) async throws -> CombinedPRResult {
+    private func fetchDetailBatch(
+        _ batch: [IndexedPR],
+        categoryByID: [Int: PRCategory],
+        username: String,
+        fieldSelection: String,
+        excludeFilter: String
+    ) async throws -> [Int: PullRequest] {
+        var queryParts: [String] = []
+        for (index, ip) in batch.enumerated() {
+            queryParts.append(
+                """
+                pr_\(index): repository(owner: "\(ip.repositoryOwner)", name: "\(ip.repositoryName)") {
+                    pullRequest(number: \(ip.number)) {
+                        \(fieldSelection)
+                    }
+                }
+                """
+            )
+        }
+        queryParts.append("rateLimit { cost remaining resetAt }")
+        let query = "query {\n" + queryParts.joined(separator: "\n") + "\n}"
+        let responseData = try await executeGraphQL(query: query, operation: "fetchPRDetailBatch")
+
         let decoder = JSONDecoder.githubDecoder
-
+        let response: DetailBatchResponse
         do {
-            let response = try decoder.decode(CombinedGraphQLResponse.self, from: data)
-
-            logger.info("Raw response node counts - authored: \(response.data.authored.nodes.count), reviewRequested: \(response.data.reviewRequested.nodes.count), reviewedBy: \(response.data.reviewedBy.nodes.count), mergedInvolved: \(response.data.mergedInvolved.nodes.count)")
-
-            // Log first few merged nodes for debugging
-            for (idx, node) in response.data.mergedInvolved.nodes.prefix(3).enumerated() {
-                logger.debug("mergedInvolved[\(idx)]: #\(node.number) databaseId=\(node.databaseId.map { String($0) } ?? "nil") state=\(node.state) mergedAt=\(node.mergedAt.map { String(describing: $0) } ?? "nil")")
-            }
-
-            // Collect enrichment info from all nodes
-            var enrichmentInfos: [CIEnrichmentInfo] = []
-            var reviewThreadEnrichmentInfos: [ReviewThreadEnrichmentInfo] = []
-
-            // Parse authored PRs
-            var authoredPRs = parseNodes(response.data.authored.nodes, category: .authored, enrichmentInfos: &enrichmentInfos, reviewThreadEnrichmentInfos: &reviewThreadEnrichmentInfos)
-
-            // Parse review requested PRs
-            var reviewRequestedPRs = parseNodes(response.data.reviewRequested.nodes, category: .reviewRequest, enrichmentInfos: &enrichmentInfos, reviewThreadEnrichmentInfos: &reviewThreadEnrichmentInfos)
-
-            // Parse reviewed-by PRs (PRs user has already reviewed)
-            var reviewedByPRs = parseNodes(response.data.reviewedBy.nodes, category: .reviewRequest, enrichmentInfos: &enrichmentInfos, reviewThreadEnrichmentInfos: &reviewThreadEnrichmentInfos)
-
-            // Parse merged PRs where user is involved (author or reviewer)
-            // Determine category based on whether user is author
-            var mergedInvolvedPRs = parseNodes(
-                response.data.mergedInvolved.nodes,
-                category: .reviewRequest,
-                usernameForAuthoredCheck: username,
-                enrichmentInfos: &enrichmentInfos,
-                reviewThreadEnrichmentInfos: &reviewThreadEnrichmentInfos
-            )
-            logger.info("Parsed mergedInvolvedPRs count: \(mergedInvolvedPRs.count)")
-
-            // Enrich PRs where rollup state disagrees with first-page counts (e.g. FAILURE/PENDING not found in first 20 contexts)
-            if !enrichmentInfos.isEmpty {
-                logger.info("Need to fetch additional CI contexts for \(enrichmentInfos.count) PRs")
-                let enrichedCounts = await fetchAllAdditionalCIContexts(enrichmentInfos: enrichmentInfos)
-
-                // Update PR counts with enriched data (add to existing counts from first page)
-                func updatePRs(_ prs: inout [PullRequest]) {
-                    prs = prs.map { pr in
-                        guard let counts = enrichedCounts[pr.id] else { return pr }
-                        var updated = pr
-                        updated.checkSuccessCount += counts.success
-                        updated.checkFailureCount += counts.failure
-                        updated.checkPendingCount += counts.pending
-                        // Re-derive CI status based on total counts
-                        if updated.checkFailureCount > 0 {
-                            updated.ciStatus = .failure
-                        } else if updated.checkPendingCount > 0 {
-                            updated.ciStatus = .pending
-                        } else if updated.checkSuccessCount > 0 {
-                            updated.ciStatus = .success
-                        } else if counts.limitReached && updated.githubCIState?.uppercased() == "FAILURE" {
-                            // GitHub says FAILURE but we hit limit without finding failures
-                            updated.ciStatus = .unknown
-                            logger.info("PR \(updated.id) set to unknown: GitHub says FAILURE but limit reached without finding failures")
-                        }
-                        // Merge workflow data from enrichment into existing ciExtendedInfo
-                        if !counts.workflows.isEmpty {
-                            var mergedWorkflows = updated.ciExtendedInfo?.workflows.reduce(into: [String: CIWorkflowInfo]()) {
-                                $0[$1.name] = $1
-                            } ?? [:]
-                            for (key, wf) in counts.workflows {
-                                if var existing = mergedWorkflows[key] {
-                                    existing.successCount += wf.successCount
-                                    existing.failureCount += wf.failureCount
-                                    existing.pendingCount += wf.pendingCount
-                                    mergedWorkflows[key] = existing
-                                } else {
-                                    mergedWorkflows[key] = wf
-                                }
-                            }
-                            let isRunning = (updated.ciExtendedInfo?.isRunning ?? false) || counts.isRunning
-                            updated.ciExtendedInfo = CIExtendedInfo(
-                                isRunning: isRunning,
-                                workflows: Array(mergedWorkflows.values)
-                            )
-                        }
-                        return updated
-                    }
-                }
-
-                updatePRs(&authoredPRs)
-                updatePRs(&reviewRequestedPRs)
-                updatePRs(&reviewedByPRs)
-                updatePRs(&mergedInvolvedPRs)
-            }
-
-            // Enrich PRs that have more review threads beyond the first page
-            if !reviewThreadEnrichmentInfos.isEmpty {
-                logger.info("Need to fetch additional review threads for \(reviewThreadEnrichmentInfos.count) PRs")
-                let additionalThreads = await fetchAllAdditionalReviewThreads(enrichmentInfos: reviewThreadEnrichmentInfos)
-
-                func enrichReviewThreads(_ prs: inout [PullRequest]) {
-                    prs = prs.map { pr in
-                        guard let extra = additionalThreads[pr.id] else { return pr }
-                        var updated = pr
-                        updated.reviewThreads = extra + pr.reviewThreads
-                        return updated
-                    }
-                }
-
-                enrichReviewThreads(&authoredPRs)
-                enrichReviewThreads(&reviewRequestedPRs)
-                enrichReviewThreads(&reviewedByPRs)
-                enrichReviewThreads(&mergedInvolvedPRs)
-            }
-
-            // Combine review requested and reviewed-by, deduplicating by ID
-            var reviewPRsById: [Int: PullRequest] = [:]
-            for pr in reviewRequestedPRs {
-                reviewPRsById[pr.id] = pr
-            }
-            for pr in reviewedByPRs {
-                if reviewPRsById[pr.id] == nil {
-                    reviewPRsById[pr.id] = pr
-                }
-            }
-
-            // Combine open PRs and sort by updatedAt (most recent first)
-            let openPRs = authoredPRs + Array(reviewPRsById.values)
-
-            // Deduplicate merged results, keep only last 24h by mergedAt, and sort by mergedAt/updatedAt
-            let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
-            var mergedById: [Int: PullRequest] = [:]
-            for pr in mergedInvolvedPRs {
-                guard let mergedAt = pr.mergedAt, mergedAt >= cutoff else { continue }
-                mergedById[pr.id] = pr
-            }
-            let mergedPRs = Array(mergedById.values).sorted { ($0.mergedAt ?? $0.updatedAt) > ($1.mergedAt ?? $1.updatedAt) }
-
-            let seedPRs = openPRs + mergedPRs
-            let existingReferences = Set(
-                seedPRs.map {
-                    PullRequestReference(
-                        owner: $0.repositoryOwner,
-                        repo: $0.repositoryName,
-                        number: $0.number
-                    )
-                }
-            )
-
-            var mentionCandidates = Set<PullRequestReference>()
-            var mentionCacheEntries = MentionCache.shared.loadEntries()
-            var mentionSourcesToRefresh: [PullRequest] = []
-            let refreshTimestamp = Date()
-
-            for pr in seedPRs {
-                if let cacheEntry = mentionCacheEntries[pr.id],
-                   cacheEntry.isUsable(
-                       currentUpdatedAt: pr.updatedAt,
-                       now: refreshTimestamp,
-                       ttl: MentionCache.ttl,
-                       cooldown: MentionCache.cooldown
-                   ) {
-                    mentionCandidates.formUnion(cacheEntry.pullRequestReferences)
-                } else {
-                    mentionSourcesToRefresh.append(pr)
-                }
-            }
-
-            let rateLimitSnapshot = await MainActor.run { self.rateLimitInfo }
-            if !mentionSourcesToRefresh.isEmpty, !rateLimitSnapshot.hasHeadroomForMentions {
-                logger.info(
-                    "Skipping mention refresh: rate limit remaining \(rateLimitSnapshot.remaining) below headroom threshold"
-                )
-                for pr in mentionSourcesToRefresh {
-                    if let stale = mentionCacheEntries[pr.id] {
-                        mentionCandidates.formUnion(stale.pullRequestReferences)
-                    }
-                }
-                mentionSourcesToRefresh.removeAll()
-            }
-
-            if !mentionSourcesToRefresh.isEmpty {
-                logger.info("Refreshing mention sources for \(mentionSourcesToRefresh.count) PRs")
-                let refreshedReferences = try await fetchMentionSourceReferences(for: mentionSourcesToRefresh)
-
-                for pr in mentionSourcesToRefresh {
-                    let references = refreshedReferences[pr.id] ?? []
-                    mentionCandidates.formUnion(references)
-                    let sortedReferences = references.sorted {
-                        if $0.owner != $1.owner { return $0.owner < $1.owner }
-                        if $0.repo != $1.repo { return $0.repo < $1.repo }
-                        return $0.number < $1.number
-                    }
-                    mentionCacheEntries[pr.id] = MentionCacheEntry(
-                        sourcePRID: pr.id,
-                        sourceUpdatedAt: pr.updatedAt,
-                        references: sortedReferences,
-                        cachedAt: refreshTimestamp
-                    )
-                }
-
-                MentionCache.shared.saveEntries(mentionCacheEntries)
-            }
-
-            mentionCandidates.subtract(existingReferences)
-
-            var mentionedPRs: [PullRequest] = []
-            if !mentionCandidates.isEmpty {
-                mentionedPRs = try await fetchMentionedPullRequests(references: Array(mentionCandidates))
-
-                var seenMentionedIDs = Set<Int>()
-                mentionedPRs = mentionedPRs
-                    .filter { $0.state == .open && seenMentionedIDs.insert($0.id).inserted }
-                    .sorted { $0.updatedAt > $1.updatedAt }
-            }
-
-            return CombinedPRResult(
-                openPRs: openPRs.sorted { $0.updatedAt > $1.updatedAt },
-                mentionedPRs: mentionedPRs,
-                mergedPRs: mergedPRs
-            )
-        } catch let error as APIError {
-            throw error
+            response = try decoder.decode(DetailBatchResponse.self, from: responseData)
         } catch {
             throw APIError.decoding(error)
+        }
+
+        if let rl = response.data.rateLimit {
+            logger.info("Detail batch cost=\(rl.cost, privacy: .public) remaining=\(rl.remaining, privacy: .public) size=\(batch.count, privacy: .public)")
+        } else if let decodeError = response.data.rateLimitDecodeError {
+            logger.warning("Detail batch rateLimit field failed to decode: \(decodeError, privacy: .public)")
+        } else {
+            logger.warning("Detail batch response missing rateLimit field (size=\(batch.count, privacy: .public))")
+        }
+
+        var ciEnrichment: [CIEnrichmentInfo] = []
+        var reviewThreadEnrichment: [ReviewThreadEnrichmentInfo] = []
+        var parsed: [Int: PullRequest] = [:]
+
+        for node in response.data.nodes {
+            guard let dbId = node.databaseId,
+                  let resolvedCategory = categoryByID[dbId] else { continue }
+            if let pr = makeFullPullRequest(
+                from: node,
+                category: resolvedCategory,
+                username: username,
+                excludeFilter: excludeFilter,
+                enrichmentInfos: &ciEnrichment,
+                reviewThreadEnrichmentInfos: &reviewThreadEnrichment
+            ) {
+                parsed[dbId] = pr
+            }
+        }
+
+        if !ciEnrichment.isEmpty {
+            let enriched = await fetchAllAdditionalCIContexts(enrichmentInfos: ciEnrichment)
+            Self.applyCIEnrichments(to: &parsed, counts: enriched)
+        }
+        if !reviewThreadEnrichment.isEmpty {
+            let additional = await fetchAllAdditionalReviewThreads(enrichmentInfos: reviewThreadEnrichment)
+            for (id, threads) in additional {
+                guard var pr = parsed[id] else { continue }
+                pr.reviewThreads = threads + pr.reviewThreads
+                parsed[id] = pr
+            }
+        }
+
+        return parsed
+    }
+
+    /// Apply paginated CI-context counts back into the parsed PR map. Shared between
+    /// combined-response enrichment (via a temporary dict) and detail-batch enrichment.
+    private static func applyCIEnrichments(to prs: inout [Int: PullRequest], counts: [Int: CICounts]) {
+        for (id, c) in counts {
+            guard var pr = prs[id] else { continue }
+            pr.checkSuccessCount += c.success
+            pr.checkFailureCount += c.failure
+            pr.checkPendingCount += c.pending
+            if pr.checkFailureCount > 0 {
+                pr.ciStatus = .failure
+            } else if pr.checkPendingCount > 0 {
+                pr.ciStatus = .pending
+            } else if pr.checkSuccessCount > 0 {
+                pr.ciStatus = .success
+            } else if c.limitReached && pr.githubCIState?.uppercased() == "FAILURE" {
+                pr.ciStatus = .unknown
+            }
+            if !c.workflows.isEmpty {
+                var merged = pr.ciExtendedInfo?.workflows.reduce(into: [String: CIWorkflowInfo]()) {
+                    $0[$1.name] = $1
+                } ?? [:]
+                for (key, wf) in c.workflows {
+                    if var existing = merged[key] {
+                        existing.successCount += wf.successCount
+                        existing.failureCount += wf.failureCount
+                        existing.pendingCount += wf.pendingCount
+                        merged[key] = existing
+                    } else {
+                        merged[key] = wf
+                    }
+                }
+                let isRunning = (pr.ciExtendedInfo?.isRunning ?? false) || c.isRunning
+                pr.ciExtendedInfo = CIExtendedInfo(isRunning: isRunning, workflows: Array(merged.values))
+            }
+            prs[id] = pr
         }
     }
 
@@ -1598,25 +2013,36 @@ final class GitHubAPIClient: ObservableObject {
             return $0.number < $1.number
         }
 
-        let batchSize = 20
         let fieldSelection = buildPRFieldSelection(
             includeReviewMetadata: false,
             includeCrossReferences: false,
             includeMentionBodies: false
         )
-        let batches: [[PullRequestReference]] = stride(from: 0, to: sortedReferences.count, by: batchSize).map {
-            Array(sortedReferences[$0..<min($0 + batchSize, sortedReferences.count)])
+        let batches: [[PullRequestReference]] = stride(from: 0, to: sortedReferences.count, by: Self.batchedPRQuerySize).map {
+            Array(sortedReferences[$0..<min($0 + Self.batchedPRQuerySize, sortedReferences.count)])
         }
 
+        // Bounded-concurrency task group — keeps mentioned-PR detail fetching
+        // within the same burst budget as the rest of the refresh path.
         return try await withThrowingTaskGroup(of: [PullRequest].self) { group in
-            for batch in batches {
-                group.addTask {
+            var iter = batches.makeIterator()
+            var inflight = 0
+            while inflight < Self.batchedPRQueryConcurrency, let batch = iter.next() {
+                group.addTask { [fieldSelection] in
                     try await self.fetchMentionedBatch(batch, fieldSelection: fieldSelection)
                 }
+                inflight += 1
             }
             var result: [PullRequest] = []
-            for try await batchResult in group {
-                result.append(contentsOf: batchResult)
+            while let partial = try await group.next() {
+                result.append(contentsOf: partial)
+                inflight -= 1
+                if let next = iter.next() {
+                    group.addTask { [fieldSelection] in
+                        try await self.fetchMentionedBatch(next, fieldSelection: fieldSelection)
+                    }
+                    inflight += 1
+                }
             }
             return result
         }
@@ -1884,205 +2310,206 @@ final class GitHubAPIClient: ObservableObject {
         enrichmentInfos: inout [CIEnrichmentInfo],
         reviewThreadEnrichmentInfos: inout [ReviewThreadEnrichmentInfo]
     ) -> [PullRequest] {
+        let excludeFilter = Self.loadCIStatusExcludeFilter()
         let usernameLower = usernameForAuthoredCheck?.lowercased()
         return nodes.compactMap { node in
-            guard let databaseId = node.databaseId else { return nil }
+            let resolved: PRCategory
+            if let usernameLower, node.author?.login.lowercased() == usernameLower {
+                resolved = .authored
+            } else {
+                resolved = category
+            }
+            return makeFullPullRequest(
+                from: node,
+                category: resolved,
+                username: usernameForAuthoredCheck,
+                excludeFilter: excludeFilter,
+                enrichmentInfos: &enrichmentInfos,
+                reviewThreadEnrichmentInfos: &reviewThreadEnrichmentInfos
+            )
+        }
+    }
 
-            let conversationComments = node.comments?.nodes.map { comment in
-                IssueCommentSummary(
+    /// Shared single-node parser for combined search results and detail-batch results.
+    /// Callers supply the already-resolved `category`; username is used only for
+    /// review-metadata and `myThreadsAllResolved` derivation.
+    private func makeFullPullRequest(
+        from node: CombinedGraphQLResponse.PRNode,
+        category: PRCategory,
+        username: String?,
+        excludeFilter: String,
+        enrichmentInfos: inout [CIEnrichmentInfo],
+        reviewThreadEnrichmentInfos: inout [ReviewThreadEnrichmentInfo]
+    ) -> PullRequest? {
+        guard let databaseId = node.databaseId else { return nil }
+        let usernameLower = username?.lowercased()
+
+        let conversationComments = node.comments?.nodes.map { comment in
+            IssueCommentSummary(
+                id: comment.id,
+                author: comment.author?.login ?? "unknown",
+                body: comment.body ?? "",
+                createdAt: comment.createdAt
+            )
+        } ?? []
+
+        let reviewThreads = node.reviewThreads?.nodes.map { thread -> ReviewThread in
+            let comments = thread.comments.nodes.map { comment -> ReviewComment in
+                ReviewComment(
                     id: comment.id,
                     author: comment.author?.login ?? "unknown",
                     body: comment.body ?? "",
                     createdAt: comment.createdAt
                 )
-            } ?? []
-
-            let reviewThreads = node.reviewThreads?.nodes.map { thread -> ReviewThread in
-                let comments = thread.comments.nodes.map { comment -> ReviewComment in
-                    ReviewComment(
-                        id: comment.id,
-                        author: comment.author?.login ?? "unknown",
-                        body: comment.body ?? "",
-                        createdAt: comment.createdAt
-                    )
-                }
-                return ReviewThread(
-                    id: thread.id,
-                    isResolved: thread.isResolved,
-                    isOutdated: thread.isOutdated,
-                    path: thread.path,
-                    line: thread.line,
-                    comments: comments
-                )
-            } ?? []
-
-            // Check if we need to fetch more review threads
-            if let pageInfo = node.reviewThreads?.pageInfo,
-               pageInfo.hasPreviousPage,
-               let startCursor = pageInfo.startCursor {
-                reviewThreadEnrichmentInfos.append(ReviewThreadEnrichmentInfo(
-                    prId: databaseId,
-                    owner: node.repository.owner.login,
-                    repo: node.repository.name,
-                    number: node.number,
-                    startCursor: startCursor
-                ))
             }
-
-            // Extract CI status and counts from the last commit
-            let lastCommit = node.commits?.nodes.first?.commit
-            let statusCheckRollup = lastCommit?.statusCheckRollup
-            let lastCommitAt = lastCommit?.committedDate
-
-            // Parse CI contexts using shared helper
-            let ciContexts = (statusCheckRollup?.contexts?.nodes ?? []).map { ctx in
-                CIContextNode(
-                    name: ctx.name,
-                    conclusion: ctx.conclusion,
-                    state: ctx.state,
-                    context: ctx.context,
-                    workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
-                    completedAt: ctx.completedAt
-                )
-            }
-            let excludeFilter = Self.loadCIStatusExcludeFilter()
-            let ciResult = Self.parseCIContexts(ciContexts, excludeFilter: excludeFilter)
-
-            // Check if we need to fetch more CI contexts:
-            // - Rollup state disagrees with first-page counts (FAILURE with no failures, or PENDING with no pending)
-            // - And there are more pages to fetch
-            let rollupState = statusCheckRollup?.state ?? ""
-            let upperRollup = rollupState.uppercased()
-            let initialContextCount = statusCheckRollup?.contexts?.nodes.count ?? 0
-            if ((upperRollup == "FAILURE" && ciResult.failureCount == 0) ||
-                (upperRollup == "PENDING" && ciResult.pendingCount == 0)),
-               let pageInfo = statusCheckRollup?.contexts?.pageInfo,
-               pageInfo.hasNextPage,
-               let endCursor = pageInfo.endCursor,
-               let commitOid = lastCommit?.oid {
-                enrichmentInfos.append(CIEnrichmentInfo(
-                    prId: databaseId,
-                    owner: node.repository.owner.login,
-                    repo: node.repository.name,
-                    commitOid: commitOid,
-                    endCursor: endCursor,
-                    rollupState: rollupState,
-                    initialContextCount: initialContextCount
-                ))
-            }
-
-            // Derive CI status from our counts (not GitHub's rollup which may include excluded checks)
-            var ciStatus: CIStatus?
-            if ciResult.failureCount > 0 {
-                ciStatus = .failure
-            } else if ciResult.pendingCount > 0 {
-                ciStatus = .pending
-            } else if ciResult.successCount > 0 {
-                ciStatus = .success
-            } else if statusCheckRollup != nil {
-                ciStatus = .expected
-            } else {
-                ciStatus = nil
-            }
-
-            // Trust GitHub's rollup state when it says PENDING but we derived success.
-            // This handles QUEUED checks not yet visible in individual contexts.
-            var effectivePendingCount = ciResult.pendingCount
-            var effectiveIsRunning = ciResult.isRunning
-            if ciStatus == .success, upperRollup == "PENDING" {
-                ciStatus = .pending
-                effectivePendingCount = max(effectivePendingCount, 1)
-                effectiveIsRunning = true
-            }
-
-            let ciExtendedInfo: CIExtendedInfo? = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
-                isRunning: effectiveIsRunning,
-                workflows: Array(ciResult.workflows.values)
+            return ReviewThread(
+                id: thread.id,
+                isResolved: thread.isResolved,
+                isOutdated: thread.isOutdated,
+                path: thread.path,
+                line: thread.line,
+                comments: comments
             )
+        } ?? []
 
-            let hasBaseConflicts = Self.deriveBaseConflicts(
-                mergeable: node.mergeable,
-                mergeStateStatus: node.mergeStateStatus
-            )
-
-            // Determine category - if username provided, check if user is author
-            let resolvedCategory: PRCategory
-            if let usernameLower {
-                if node.author?.login.lowercased() == usernameLower {
-                    resolvedCategory = .authored
-                } else {
-                    resolvedCategory = category
-                }
-            } else {
-                resolvedCategory = category
-            }
-
-            // Extract my review data
-            let lastReview = node.reviews?.nodes.first
-            let myLastReviewState: ReviewState? = lastReview.flatMap { ReviewState(rawValue: $0.state) }
-            let myLastReviewAt: Date? = lastReview?.submittedAt
-
-            // Extract the most recent review request for the current user
-            let reviewRequestedAt: Date? = node.reviewRequestEvents?.nodes
-                .filter { $0.requestedReviewer?.login?.lowercased() == usernameLower }
-                .compactMap { $0.createdAt }
-                .max()
-
-            // Count approvals from latestReviews
-            let approvalCount = node.latestReviews?.nodes
-                .filter { $0.state == "APPROVED" }
-                .count ?? 0
-
-            let changesRequestedCount = node.latestReviews?.nodes
-                .filter { $0.state == "CHANGES_REQUESTED" }
-                .count ?? 0
-
-            // Check if all threads started by user are resolved
-            let myThreadsAllResolved: Bool = {
-                guard let usernameLower else { return false }
-                let myThreads = reviewThreads.filter { thread in
-                    thread.comments.first?.author.lowercased() == usernameLower
-                }
-                // If no threads started by user, don't consider it "resolved" (vacuously true would be misleading)
-                // Only return true if user has threads AND all are resolved
-                return !myThreads.isEmpty && myThreads.allSatisfy { $0.isResolved }
-            }()
-
-            return PullRequest(
-                id: databaseId,
+        if let pageInfo = node.reviewThreads?.pageInfo,
+           pageInfo.hasPreviousPage,
+           let startCursor = pageInfo.startCursor {
+            reviewThreadEnrichmentInfos.append(ReviewThreadEnrichmentInfo(
+                prId: databaseId,
+                owner: node.repository.owner.login,
+                repo: node.repository.name,
                 number: node.number,
-                title: node.title,
-                author: node.author?.login ?? "unknown",
-                authorAvatarURL: node.author?.avatarUrl,
-                repositoryOwner: node.repository.owner.login,
-                repositoryName: node.repository.name,
-                url: node.url,
-                state: PRState(rawValue: node.state) ?? .open,
-                isDraft: node.isDraft,
-                createdAt: node.createdAt,
-                updatedAt: node.updatedAt,
-                mergedAt: node.mergedAt,
-                body: node.body,
-                conversationComments: conversationComments,
-                lastCommitAt: lastCommitAt,
-                headCommitOid: lastCommit?.oid,
-                reviewThreads: reviewThreads,
-                category: resolvedCategory,
-                hasBaseConflicts: hasBaseConflicts,
-                ciStatus: ciStatus,
-                checkSuccessCount: ciResult.successCount,
-                checkFailureCount: ciResult.failureCount,
-                checkPendingCount: effectivePendingCount,
-                githubCIState: rollupState.isEmpty ? nil : rollupState,
-                myLastReviewState: myLastReviewState,
-                myLastReviewAt: myLastReviewAt,
-                reviewRequestedAt: reviewRequestedAt,
-                myThreadsAllResolved: myThreadsAllResolved,
-                approvalCount: approvalCount,
-                changesRequestedCount: changesRequestedCount,
-                ciExtendedInfo: ciExtendedInfo
+                startCursor: startCursor
+            ))
+        }
+
+        let lastCommit = node.commits?.nodes.first?.commit
+        let statusCheckRollup = lastCommit?.statusCheckRollup
+        let lastCommitAt = lastCommit?.committedDate
+
+        let ciContexts = (statusCheckRollup?.contexts?.nodes ?? []).map { ctx in
+            CIContextNode(
+                name: ctx.name,
+                conclusion: ctx.conclusion,
+                state: ctx.state,
+                context: ctx.context,
+                workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
+                completedAt: ctx.completedAt
             )
         }
+        let ciResult = Self.parseCIContexts(ciContexts, excludeFilter: excludeFilter)
+
+        let rollupState = statusCheckRollup?.state ?? ""
+        let upperRollup = rollupState.uppercased()
+        let initialContextCount = statusCheckRollup?.contexts?.nodes.count ?? 0
+        if ((upperRollup == "FAILURE" && ciResult.failureCount == 0) ||
+            (upperRollup == "PENDING" && ciResult.pendingCount == 0)),
+           let pageInfo = statusCheckRollup?.contexts?.pageInfo,
+           pageInfo.hasNextPage,
+           let endCursor = pageInfo.endCursor,
+           let commitOid = lastCommit?.oid {
+            enrichmentInfos.append(CIEnrichmentInfo(
+                prId: databaseId,
+                owner: node.repository.owner.login,
+                repo: node.repository.name,
+                commitOid: commitOid,
+                endCursor: endCursor,
+                rollupState: rollupState,
+                initialContextCount: initialContextCount
+            ))
+        }
+
+        var ciStatus: CIStatus?
+        if ciResult.failureCount > 0 {
+            ciStatus = .failure
+        } else if ciResult.pendingCount > 0 {
+            ciStatus = .pending
+        } else if ciResult.successCount > 0 {
+            ciStatus = .success
+        } else if statusCheckRollup != nil {
+            ciStatus = .expected
+        } else {
+            ciStatus = nil
+        }
+
+        var effectivePendingCount = ciResult.pendingCount
+        var effectiveIsRunning = ciResult.isRunning
+        if ciStatus == .success, upperRollup == "PENDING" {
+            ciStatus = .pending
+            effectivePendingCount = max(effectivePendingCount, 1)
+            effectiveIsRunning = true
+        }
+
+        let ciExtendedInfo: CIExtendedInfo? = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
+            isRunning: effectiveIsRunning,
+            workflows: Array(ciResult.workflows.values)
+        )
+
+        let hasBaseConflicts = Self.deriveBaseConflicts(
+            mergeable: node.mergeable,
+            mergeStateStatus: node.mergeStateStatus
+        )
+
+        let lastReview = node.reviews?.nodes.first
+        let myLastReviewState: ReviewState? = lastReview.flatMap { ReviewState(rawValue: $0.state) }
+        let myLastReviewAt: Date? = lastReview?.submittedAt
+
+        let reviewRequestedAt: Date? = node.reviewRequestEvents?.nodes
+            .filter { $0.requestedReviewer?.login?.lowercased() == usernameLower }
+            .compactMap { $0.createdAt }
+            .max()
+
+        let approvalCount = node.latestReviews?.nodes
+            .filter { $0.state == "APPROVED" }
+            .count ?? 0
+
+        let changesRequestedCount = node.latestReviews?.nodes
+            .filter { $0.state == "CHANGES_REQUESTED" }
+            .count ?? 0
+
+        let myThreadsAllResolved: Bool = {
+            guard let usernameLower else { return false }
+            let myThreads = reviewThreads.filter { thread in
+                thread.comments.first?.author.lowercased() == usernameLower
+            }
+            return !myThreads.isEmpty && myThreads.allSatisfy { $0.isResolved }
+        }()
+
+        return PullRequest(
+            id: databaseId,
+            number: node.number,
+            title: node.title,
+            author: node.author?.login ?? "unknown",
+            authorAvatarURL: node.author?.avatarUrl,
+            repositoryOwner: node.repository.owner.login,
+            repositoryName: node.repository.name,
+            url: node.url,
+            state: PRState(rawValue: node.state) ?? .open,
+            isDraft: node.isDraft,
+            createdAt: node.createdAt,
+            updatedAt: node.updatedAt,
+            mergedAt: node.mergedAt,
+            body: node.body,
+            conversationComments: conversationComments,
+            lastCommitAt: lastCommitAt,
+            headCommitOid: lastCommit?.oid,
+            reviewThreads: reviewThreads,
+            category: category,
+            hasBaseConflicts: hasBaseConflicts,
+            ciStatus: ciStatus,
+            checkSuccessCount: ciResult.successCount,
+            checkFailureCount: ciResult.failureCount,
+            checkPendingCount: effectivePendingCount,
+            githubCIState: rollupState.isEmpty ? nil : rollupState,
+            myLastReviewState: myLastReviewState,
+            myLastReviewAt: myLastReviewAt,
+            reviewRequestedAt: reviewRequestedAt,
+            myThreadsAllResolved: myThreadsAllResolved,
+            approvalCount: approvalCount,
+            changesRequestedCount: changesRequestedCount,
+            ciExtendedInfo: ciExtendedInfo
+        )
     }
 
     // MARK: - Single PR CI Status
@@ -2622,6 +3049,62 @@ private struct MentionSourceBatchResponse: Decodable {
     }
 }
 
+/// Decodes aliased `pr_0`, `pr_1`, ... results from `fetchDetailBatch`. Unlike
+/// `MentionedBatchResponse` (which uses the search-shaped `GraphQLResponse.PRNode`),
+/// this wraps the richer `CombinedGraphQLResponse.PRNode` so we can reuse review
+/// metadata and review-request timeline parsing.
+private struct DetailBatchResponse: Decodable {
+    let data: BatchData
+
+    struct BatchData: Decodable {
+        let nodes: [CombinedGraphQLResponse.PRNode]
+        let rateLimit: RateLimit?
+        let rateLimitDecodeError: String?
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            var collected: [CombinedGraphQLResponse.PRNode] = []
+            var foundRateLimit: RateLimit?
+            var foundDecodeError: String?
+            for key in container.allKeys {
+                if key.stringValue == "rateLimit" {
+                    do {
+                        foundRateLimit = try container.decode(RateLimit.self, forKey: key)
+                    } catch {
+                        foundDecodeError = error.localizedDescription
+                    }
+                    continue
+                }
+                if try container.decodeNil(forKey: key) { continue }
+                if let wrapper = try? container.decode(RepositoryWrapper.self, forKey: key),
+                   let pr = wrapper.pullRequest {
+                    collected.append(pr)
+                }
+            }
+            self.nodes = collected
+            self.rateLimit = foundRateLimit
+            self.rateLimitDecodeError = foundDecodeError
+        }
+    }
+
+    struct RateLimit: Decodable {
+        let cost: Int
+        let remaining: Int
+        let resetAt: String?
+    }
+
+    private struct RepositoryWrapper: Decodable {
+        let pullRequest: CombinedGraphQLResponse.PRNode?
+    }
+
+    private struct DynamicKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+}
+
 /// Decodes the dynamic-aliased `pr_0`, `pr_1`, ... response from `fetchMentionedBatch`,
 /// flattening successful repository.pullRequest results into a single node list.
 private struct MentionedBatchResponse: Decodable {
@@ -2653,6 +3136,84 @@ private struct MentionedBatchResponse: Decodable {
         var intValue: Int? { nil }
         init?(stringValue: String) { self.stringValue = stringValue }
         init?(intValue: Int) { nil }
+    }
+}
+
+private struct IndexGraphQLResponse: Decodable {
+    let data: DataContainer
+
+    struct DataContainer: Decodable {
+        let authored: SearchResult
+        let reviewRequested: SearchResult
+        let reviewedBy: SearchResult
+        let mergedInvolved: SearchResult
+        let rateLimit: RateLimit?
+    }
+
+    struct SearchResult: Decodable {
+        let nodes: [PRNode]
+    }
+
+    struct RateLimit: Decodable {
+        let cost: Int
+        let remaining: Int
+        let resetAt: String?
+    }
+
+    struct PRNode: Decodable {
+        let databaseId: Int?
+        let number: Int
+        let title: String
+        let url: URL
+        let state: String
+        let isDraft: Bool
+        let createdAt: Date
+        let updatedAt: Date
+        let mergedAt: Date?
+        let mergeable: String?
+        let mergeStateStatus: String?
+        let author: Author?
+        let repository: Repository
+        let reviewThreads: TotalCountContainer?
+        let comments: TotalCountContainer?
+        let reviews: TotalCountContainer?
+        let commits: CommitsContainer?
+    }
+
+    struct Author: Decodable {
+        let login: String
+        let avatarUrl: URL?
+    }
+
+    struct Repository: Decodable {
+        let owner: Owner
+        let name: String
+    }
+
+    struct Owner: Decodable {
+        let login: String
+    }
+
+    struct TotalCountContainer: Decodable {
+        let totalCount: Int
+    }
+
+    struct CommitsContainer: Decodable {
+        let nodes: [CommitNode]
+    }
+
+    struct CommitNode: Decodable {
+        let commit: CommitInfo
+    }
+
+    struct CommitInfo: Decodable {
+        let oid: String?
+        let committedDate: Date?
+        let statusCheckRollup: StatusCheckRollup?
+    }
+
+    struct StatusCheckRollup: Decodable {
+        let state: String
     }
 }
 

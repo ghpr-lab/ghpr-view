@@ -798,6 +798,76 @@
         }
       }
     },
+    "HTTP proxy": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTP 代理"
+          }
+        }
+      }
+    },
+    "HTTP proxy URL": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTP 代理 URL"
+          }
+        }
+      }
+    },
+    "HTTP proxy password": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTP 代理密码"
+          }
+        }
+      }
+    },
+    "HTTP proxy username": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HTTP 代理用户名"
+          }
+        }
+      }
+    },
+    "Proxy password (optional)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "代理密码（可选）"
+          }
+        }
+      }
+    },
+    "Proxy username (optional)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "代理用户名（可选）"
+          }
+        }
+      }
+    },
+    "Route GitHub API requests through an HTTP proxy. Format: http://host:port. Leave empty to connect directly. Username and password are optional.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将 GitHub API 请求通过 HTTP 代理转发。格式：http://host:port。留空则直接连接。用户名与密码可选。"
+          }
+        }
+      }
+    },
     "Here are PRs merged in the last 24 hours.": {
       "localizations": {
         "zh-Hans": {
