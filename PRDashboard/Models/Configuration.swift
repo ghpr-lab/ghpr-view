@@ -11,6 +11,7 @@ struct Configuration: Codable, Equatable {
     var pausePollingOnExpensiveNetwork: Bool  // pause background polling on cellular/hotspot
     var showMyReviewStatus: Bool  // show my review status badges on review-requested PRs
     var automaticallyCheckForUpdates: Bool
+    var graphQLEndpoint: String  // developer override for GitHub GraphQL URL; empty = default
 
     static var `default`: Configuration {
         Configuration(
@@ -23,7 +24,8 @@ struct Configuration: Codable, Equatable {
             pausePollingInLowPowerMode: true,
             pausePollingOnExpensiveNetwork: true,
             showMyReviewStatus: false,
-            automaticallyCheckForUpdates: true
+            automaticallyCheckForUpdates: true,
+            graphQLEndpoint: ""
         )
     }
 
@@ -37,7 +39,8 @@ struct Configuration: Codable, Equatable {
         pausePollingInLowPowerMode: Bool,
         pausePollingOnExpensiveNetwork: Bool,
         showMyReviewStatus: Bool,
-        automaticallyCheckForUpdates: Bool
+        automaticallyCheckForUpdates: Bool,
+        graphQLEndpoint: String
     ) {
         self.refreshInterval = refreshInterval
         self.repositories = repositories
@@ -49,6 +52,7 @@ struct Configuration: Codable, Equatable {
         self.pausePollingOnExpensiveNetwork = pausePollingOnExpensiveNetwork
         self.showMyReviewStatus = showMyReviewStatus
         self.automaticallyCheckForUpdates = automaticallyCheckForUpdates
+        self.graphQLEndpoint = graphQLEndpoint
     }
 
     enum CodingKeys: String, CodingKey {
@@ -62,6 +66,7 @@ struct Configuration: Codable, Equatable {
         case pausePollingOnExpensiveNetwork
         case showMyReviewStatus
         case automaticallyCheckForUpdates
+        case graphQLEndpoint
     }
 
     init(from decoder: Decoder) throws {
@@ -78,6 +83,7 @@ struct Configuration: Codable, Equatable {
         pausePollingOnExpensiveNetwork = try container.decodeIfPresent(Bool.self, forKey: .pausePollingOnExpensiveNetwork) ?? defaults.pausePollingOnExpensiveNetwork
         showMyReviewStatus = try container.decodeIfPresent(Bool.self, forKey: .showMyReviewStatus) ?? defaults.showMyReviewStatus
         automaticallyCheckForUpdates = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCheckForUpdates) ?? defaults.automaticallyCheckForUpdates
+        graphQLEndpoint = try container.decodeIfPresent(String.self, forKey: .graphQLEndpoint) ?? defaults.graphQLEndpoint
     }
 
     var isValid: Bool {

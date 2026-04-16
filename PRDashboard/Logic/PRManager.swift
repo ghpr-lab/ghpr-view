@@ -74,6 +74,8 @@ final class PRManager: PRManagerType, ObservableObject {
         self.configuration = Self.loadConfiguration()
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
 
+        apiClient.updateGraphQLEndpoint(self.configuration.graphQLEndpoint)
+
         setupBindings()
     }
 
@@ -557,6 +559,8 @@ final class PRManager: PRManagerType, ObservableObject {
     func updateConfiguration(_ config: Configuration) {
         configuration = config
         Self.saveConfiguration(config)
+
+        apiClient.updateGraphQLEndpoint(config.graphQLEndpoint)
 
         // Restart polling with new interval if currently polling
         if timer != nil {

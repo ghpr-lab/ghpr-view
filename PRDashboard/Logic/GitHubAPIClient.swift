@@ -115,7 +115,8 @@ enum APIError: LocalizedError {
 final class GitHubAPIClient: ObservableObject {
     private static let maxCIContextsToFetch = 200
     private static let maxGraphQLAttempts = 3
-    private let graphQLURL = URL(string: "https://api.github.com/graphql")!
+    static let defaultGraphQLURL = URL(string: "https://api.github.com/graphql")!
+    private var graphQLURL: URL = GitHubAPIClient.defaultGraphQLURL
     private var token: String
     private let session: URLSession
     private var lastETag: String?
@@ -127,15 +128,38 @@ final class GitHubAPIClient: ObservableObject {
         let delay: TimeInterval?
     }
 
-    init(token: String) {
+    init(token: String, graphQLEndpoint: String? = nil) {
         self.token = token
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 30
         self.session = URLSession(configuration: config)
+        self.graphQLURL = Self.resolveGraphQLURL(graphQLEndpoint)
     }
 
     func updateToken(_ newToken: String) {
         self.token = newToken
+    }
+
+    func updateGraphQLEndpoint(_ endpoint: String?) {
+        let resolved = Self.resolveGraphQLURL(endpoint)
+        graphQLURL = resolved
+        if resolved == Self.defaultGraphQLURL {
+            logger.info("GraphQL endpoint set to default (\(Self.defaultGraphQLURL.absoluteString, privacy: .public))")
+        } else {
+            logger.info("GraphQL endpoint overridden to \(resolved.absoluteString, privacy: .public)")
+        }
+    }
+
+    private static func resolveGraphQLURL(_ endpoint: String?) -> URL {
+        guard let raw = endpoint?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return defaultGraphQLURL
+        }
+        if let url = URL(string: raw), let scheme = url.scheme?.lowercased(),
+           scheme == "http" || scheme == "https", url.host != nil {
+            return url
+        }
+        logger.error("Invalid GraphQL endpoint override '\(raw, privacy: .public)'; falling back to default")
+        return defaultGraphQLURL
     }
 
     func fetchPullRequests(username: String, searchQuery: String, category: PRCategory) async throws -> [PullRequest] {
