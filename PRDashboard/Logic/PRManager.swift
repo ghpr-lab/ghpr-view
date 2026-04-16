@@ -168,6 +168,7 @@ final class PRManager: PRManagerType, ObservableObject {
             previousPRs = [:]
             // Clear caches on sign-out
             PRCache.shared.clear()
+            MentionCache.shared.clear()
             AvatarCache.shared.clear()
         }
     }

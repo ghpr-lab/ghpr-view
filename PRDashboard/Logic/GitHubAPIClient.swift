@@ -12,6 +12,10 @@ struct RateLimitInfo: Equatable {
         remaining < 100
     }
 
+    var hasHeadroomForMentions: Bool {
+        remaining >= 500
+    }
+
     static var empty: RateLimitInfo {
         RateLimitInfo(limit: 5000, remaining: 5000, resetDate: Date())
     }
@@ -339,14 +343,29 @@ final class GitHubAPIClient: ObservableObject {
     private func buildPRFieldSelection(
         username: String? = nil,
         includeReviewMetadata: Bool,
-        includeCrossReferences: Bool
+        includeCrossReferences: Bool,
+        includeMentionBodies: Bool
     ) -> String {
+        let reviewCommentBodyField = includeMentionBodies ? "\n                            body" : ""
+        let bodySection = includeMentionBodies ? """
+            body
+            comments(last: 20) {
+                nodes {
+                    id
+                    author {
+                        login
+                    }
+                    body
+                    createdAt
+                }
+            }
+        """ : ""
+
         var sections: [String] = [
             """
             databaseId
             number
             title
-            body
             url
             state
             isDraft
@@ -365,16 +384,7 @@ final class GitHubAPIClient: ObservableObject {
                 }
                 name
             }
-            comments(last: 20) {
-                nodes {
-                    id
-                    author {
-                        login
-                    }
-                    body
-                    createdAt
-                }
-            }
+            \(bodySection)
             reviewThreads(last: 20) {
                 nodes {
                     id
@@ -388,8 +398,7 @@ final class GitHubAPIClient: ObservableObject {
                             author {
                                 login
                             }
-                            body
-                            createdAt
+                            createdAt\(reviewCommentBodyField)
                         }
                     }
                 }
@@ -506,6 +515,86 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         return sections.joined(separator: "\n")
+    }
+
+    private func buildMentionSourceFieldSelection() -> String {
+        """
+        databaseId
+        number
+        updatedAt
+        body
+        repository {
+            owner {
+                login
+            }
+            name
+        }
+        comments(last: 20) {
+            nodes {
+                id
+                author {
+                    login
+                }
+                body
+                createdAt
+            }
+        }
+        reviewThreads(last: 20) {
+            nodes {
+                id
+                isResolved
+                isOutdated
+                path
+                line
+                comments(first: 5) {
+                    nodes {
+                        id
+                        author {
+                            login
+                        }
+                        body
+                        createdAt
+                    }
+                }
+            }
+            pageInfo {
+                hasPreviousPage
+                startCursor
+            }
+        }
+        crossReferences: timelineItems(last: 50, itemTypes: [CROSS_REFERENCED_EVENT]) {
+            nodes {
+                ... on CrossReferencedEvent {
+                    source {
+                        ... on PullRequest {
+                            databaseId
+                            number
+                            state
+                            repository {
+                                owner {
+                                    login
+                                }
+                                name
+                            }
+                        }
+                    }
+                    target {
+                        ... on PullRequest {
+                            databaseId
+                            number
+                            state
+                            repository {
+                                owner {
+                                    login
+                                }
+                                name
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        """
     }
 
     private func parseCIContextsResponse(data: Data) throws -> CIContextsResult {
@@ -699,7 +788,12 @@ final class GitHubAPIClient: ObservableObject {
         let prFragment = """
                 nodes {
                     ... on PullRequest {
-                        \(buildPRFieldSelection(username: username, includeReviewMetadata: true, includeCrossReferences: true))
+                        \(buildPRFieldSelection(
+                            username: username,
+                            includeReviewMetadata: true,
+                            includeCrossReferences: false,
+                            includeMentionBodies: false
+                        ))
                     }
                 }
         """
@@ -743,7 +837,11 @@ final class GitHubAPIClient: ObservableObject {
             search(query: "\(searchQuery)", type: ISSUE, first: 50) {
                 nodes {
                     ... on PullRequest {
-                        \(buildPRFieldSelection(includeReviewMetadata: false, includeCrossReferences: false))
+                        \(buildPRFieldSelection(
+                            includeReviewMetadata: false,
+                            includeCrossReferences: false,
+                            includeMentionBodies: false
+                        ))
                     }
                 }
                 pageInfo {
@@ -919,7 +1017,7 @@ final class GitHubAPIClient: ObservableObject {
             IssueCommentSummary(
                 id: comment.id,
                 author: comment.author?.login ?? "unknown",
-                body: comment.body,
+                body: comment.body ?? "",
                 createdAt: comment.createdAt
             )
         } ?? []
@@ -929,7 +1027,7 @@ final class GitHubAPIClient: ObservableObject {
                 ReviewComment(
                     id: comment.id,
                     author: comment.author?.login ?? "unknown",
-                    body: comment.body,
+                    body: comment.body ?? "",
                     createdAt: comment.createdAt
                 )
             }
@@ -1057,39 +1155,46 @@ final class GitHubAPIClient: ObservableObject {
         let initialContextCount: Int  // Number of contexts already fetched in first page
     }
 
-    private static func outboundMentionReferences(from pr: PullRequest) -> Set<PullRequestReference> {
+    private static func extractOutboundMentionReferences(
+        body: String?,
+        conversationComments: [IssueCommentSummary],
+        reviewThreads: [ReviewThread],
+        repositoryOwner: String,
+        repositoryName: String,
+        sourcePRNumber: Int
+    ) -> Set<PullRequestReference> {
         var result = Set<PullRequestReference>()
 
-        if let body = pr.body, !body.isEmpty {
+        if let body, !body.isEmpty {
             result.formUnion(
                 extractMentionedPRReferences(
                     from: body,
-                    repositoryOwner: pr.repositoryOwner,
-                    repositoryName: pr.repositoryName,
-                    sourcePRNumber: pr.number
+                    repositoryOwner: repositoryOwner,
+                    repositoryName: repositoryName,
+                    sourcePRNumber: sourcePRNumber
                 )
             )
         }
 
-        for comment in pr.conversationComments {
+        for comment in conversationComments {
             result.formUnion(
                 extractMentionedPRReferences(
                     from: comment.body,
-                    repositoryOwner: pr.repositoryOwner,
-                    repositoryName: pr.repositoryName,
-                    sourcePRNumber: pr.number
+                    repositoryOwner: repositoryOwner,
+                    repositoryName: repositoryName,
+                    sourcePRNumber: sourcePRNumber
                 )
             )
         }
 
-        for thread in pr.reviewThreads {
+        for thread in reviewThreads {
             for comment in thread.comments {
                 result.formUnion(
                     extractMentionedPRReferences(
                         from: comment.body,
-                        repositoryOwner: pr.repositoryOwner,
-                        repositoryName: pr.repositoryName,
-                        sourcePRNumber: pr.number
+                        repositoryOwner: repositoryOwner,
+                        repositoryName: repositoryName,
+                        sourcePRNumber: sourcePRNumber
                     )
                 )
             }
@@ -1099,13 +1204,12 @@ final class GitHubAPIClient: ObservableObject {
     }
 
     private static func inboundMentionReferences(
-        from node: CombinedGraphQLResponse.PRNode,
+        from node: MentionSourceBatchResponse.PRNode,
         currentPR: PullRequestReference
     ) -> Set<PullRequestReference> {
         let currentRepoLower = currentPR.repoFullName.lowercased()
         var result = Set<PullRequestReference>()
 
-        // Skip closed/merged sides — fetching them later would just be filtered out as non-OPEN.
         for event in node.crossReferences?.nodes ?? [] {
             if let source = event.source,
                source.state == "OPEN",
@@ -1135,6 +1239,130 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         return result
+    }
+
+    private func fetchMentionSourceReferences(for prs: [PullRequest]) async throws -> [Int: Set<PullRequestReference>] {
+        let sortedPRs = prs.sorted {
+            if $0.repositoryOwner != $1.repositoryOwner { return $0.repositoryOwner < $1.repositoryOwner }
+            if $0.repositoryName != $1.repositoryName { return $0.repositoryName < $1.repositoryName }
+            return $0.number < $1.number
+        }
+
+        let batchSize = 20
+        let batches: [[PullRequest]] = stride(from: 0, to: sortedPRs.count, by: batchSize).map {
+            Array(sortedPRs[$0..<min($0 + batchSize, sortedPRs.count)])
+        }
+
+        return try await withThrowingTaskGroup(of: [Int: Set<PullRequestReference>].self) { group in
+            for batch in batches {
+                group.addTask {
+                    try await self.fetchMentionSourceBatch(batch)
+                }
+            }
+            var result: [Int: Set<PullRequestReference>] = [:]
+            for try await batchResult in group {
+                result.merge(batchResult) { _, new in new }
+            }
+            return result
+        }
+    }
+
+    private func fetchMentionSourceBatch(_ batch: [PullRequest]) async throws -> [Int: Set<PullRequestReference>] {
+        var queryParts: [String] = []
+        for (index, pr) in batch.enumerated() {
+            queryParts.append(
+                """
+                pr_\(index): repository(owner: "\(pr.repositoryOwner)", name: "\(pr.repositoryName)") {
+                    pullRequest(number: \(pr.number)) {
+                        \(buildMentionSourceFieldSelection())
+                    }
+                }
+                """
+            )
+        }
+
+        let query = "query {\n" + queryParts.joined(separator: "\n") + "\n}"
+        let responseData = try await executeGraphQL(query: query, operation: "fetchMentionSourceBatch")
+
+        let decoder = JSONDecoder.githubDecoder
+        let response: MentionSourceBatchResponse
+        do {
+            response = try decoder.decode(MentionSourceBatchResponse.self, from: responseData)
+        } catch {
+            throw APIError.decoding(error)
+        }
+
+        let sourcePRsById = Dictionary(uniqueKeysWithValues: batch.map { ($0.id, $0) })
+        let enrichmentInfos = response.data.nodes.compactMap { node -> ReviewThreadEnrichmentInfo? in
+            guard
+                let databaseId = node.databaseId,
+                let pageInfo = node.reviewThreads?.pageInfo,
+                pageInfo.hasPreviousPage,
+                let startCursor = pageInfo.startCursor
+            else {
+                return nil
+            }
+
+            return ReviewThreadEnrichmentInfo(
+                prId: databaseId,
+                owner: node.repository.owner.login,
+                repo: node.repository.name,
+                number: node.number,
+                startCursor: startCursor
+            )
+        }
+        let additionalThreads = await fetchAllAdditionalReviewThreads(enrichmentInfos: enrichmentInfos)
+
+        return response.data.nodes.reduce(into: [:]) { result, node in
+            guard let databaseId = node.databaseId,
+                  let sourcePR = sourcePRsById[databaseId] else { return }
+
+            let conversationComments = node.comments?.nodes.map { comment in
+                IssueCommentSummary(
+                    id: comment.id,
+                    author: comment.author?.login ?? "unknown",
+                    body: comment.body ?? "",
+                    createdAt: comment.createdAt
+                )
+            } ?? []
+
+            let reviewThreads = node.reviewThreads?.nodes.map { thread -> ReviewThread in
+                let comments = thread.comments.nodes.map { comment in
+                    ReviewComment(
+                        id: comment.id,
+                        author: comment.author?.login ?? "unknown",
+                        body: comment.body ?? "",
+                        createdAt: comment.createdAt
+                    )
+                }
+                return ReviewThread(
+                    id: thread.id,
+                    isResolved: thread.isResolved,
+                    isOutdated: thread.isOutdated,
+                    path: thread.path,
+                    line: thread.line,
+                    comments: comments
+                )
+            } ?? []
+
+            let allReviewThreads = (additionalThreads[databaseId] ?? []) + reviewThreads
+            let currentPR = PullRequestReference(
+                owner: sourcePR.repositoryOwner,
+                repo: sourcePR.repositoryName,
+                number: sourcePR.number
+            )
+
+            var references = Self.extractOutboundMentionReferences(
+                body: node.body,
+                conversationComments: conversationComments,
+                reviewThreads: allReviewThreads,
+                repositoryOwner: sourcePR.repositoryOwner,
+                repositoryName: sourcePR.repositoryName,
+                sourcePRNumber: sourcePR.number
+            )
+            references.formUnion(Self.inboundMentionReferences(from: node, currentPR: currentPR))
+            result[databaseId] = references
+        }
     }
 
     private func parseCombinedResponse(data: Data, username: String) async throws -> CombinedPRResult {
@@ -1274,7 +1502,6 @@ final class GitHubAPIClient: ObservableObject {
             let mergedPRs = Array(mergedById.values).sorted { ($0.mergedAt ?? $0.updatedAt) > ($1.mergedAt ?? $1.updatedAt) }
 
             let seedPRs = openPRs + mergedPRs
-            let existingIDs = Set(seedPRs.map(\.id))
             let existingReferences = Set(
                 seedPRs.map {
                     PullRequestReference(
@@ -1285,37 +1512,61 @@ final class GitHubAPIClient: ObservableObject {
                 }
             )
 
-            var rawNodesById: [Int: CombinedGraphQLResponse.PRNode] = [:]
-            rawNodesById.reserveCapacity(existingIDs.count)
-            let allNodeGroups = [
-                response.data.authored.nodes,
-                response.data.reviewRequested.nodes,
-                response.data.reviewedBy.nodes,
-                response.data.mergedInvolved.nodes
-            ]
-            for group in allNodeGroups {
-                for node in group {
-                    guard let databaseId = node.databaseId, existingIDs.contains(databaseId) else { continue }
-                    rawNodesById[databaseId] = node
+            var mentionCandidates = Set<PullRequestReference>()
+            var mentionCacheEntries = MentionCache.shared.loadEntries()
+            var mentionSourcesToRefresh: [PullRequest] = []
+            let refreshTimestamp = Date()
+
+            for pr in seedPRs {
+                if let cacheEntry = mentionCacheEntries[pr.id],
+                   cacheEntry.isUsable(
+                       currentUpdatedAt: pr.updatedAt,
+                       now: refreshTimestamp,
+                       ttl: MentionCache.ttl,
+                       cooldown: MentionCache.cooldown
+                   ) {
+                    mentionCandidates.formUnion(cacheEntry.pullRequestReferences)
+                } else {
+                    mentionSourcesToRefresh.append(pr)
                 }
             }
 
-            var mentionCandidates = Set<PullRequestReference>()
-            for pr in seedPRs {
-                mentionCandidates.formUnion(Self.outboundMentionReferences(from: pr))
-
-                guard let node = rawNodesById[pr.id] else { continue }
-                mentionCandidates.formUnion(
-                    Self.inboundMentionReferences(
-                        from: node,
-                        currentPR: PullRequestReference(
-                            owner: pr.repositoryOwner,
-                            repo: pr.repositoryName,
-                            number: pr.number
-                        )
-                    )
+            let rateLimitSnapshot = await MainActor.run { self.rateLimitInfo }
+            if !mentionSourcesToRefresh.isEmpty, !rateLimitSnapshot.hasHeadroomForMentions {
+                logger.info(
+                    "Skipping mention refresh: rate limit remaining \(rateLimitSnapshot.remaining) below headroom threshold"
                 )
+                for pr in mentionSourcesToRefresh {
+                    if let stale = mentionCacheEntries[pr.id] {
+                        mentionCandidates.formUnion(stale.pullRequestReferences)
+                    }
+                }
+                mentionSourcesToRefresh.removeAll()
             }
+
+            if !mentionSourcesToRefresh.isEmpty {
+                logger.info("Refreshing mention sources for \(mentionSourcesToRefresh.count) PRs")
+                let refreshedReferences = try await fetchMentionSourceReferences(for: mentionSourcesToRefresh)
+
+                for pr in mentionSourcesToRefresh {
+                    let references = refreshedReferences[pr.id] ?? []
+                    mentionCandidates.formUnion(references)
+                    let sortedReferences = references.sorted {
+                        if $0.owner != $1.owner { return $0.owner < $1.owner }
+                        if $0.repo != $1.repo { return $0.repo < $1.repo }
+                        return $0.number < $1.number
+                    }
+                    mentionCacheEntries[pr.id] = MentionCacheEntry(
+                        sourcePRID: pr.id,
+                        sourceUpdatedAt: pr.updatedAt,
+                        references: sortedReferences,
+                        cachedAt: refreshTimestamp
+                    )
+                }
+
+                MentionCache.shared.saveEntries(mentionCacheEntries)
+            }
+
             mentionCandidates.subtract(existingReferences)
 
             var mentionedPRs: [PullRequest] = []
@@ -1348,7 +1599,11 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         let batchSize = 20
-        let fieldSelection = buildPRFieldSelection(includeReviewMetadata: false, includeCrossReferences: false)
+        let fieldSelection = buildPRFieldSelection(
+            includeReviewMetadata: false,
+            includeCrossReferences: false,
+            includeMentionBodies: false
+        )
         let batches: [[PullRequestReference]] = stride(from: 0, to: sortedReferences.count, by: batchSize).map {
             Array(sortedReferences[$0..<min($0 + batchSize, sortedReferences.count)])
         }
@@ -1637,7 +1892,7 @@ final class GitHubAPIClient: ObservableObject {
                 IssueCommentSummary(
                     id: comment.id,
                     author: comment.author?.login ?? "unknown",
-                    body: comment.body,
+                    body: comment.body ?? "",
                     createdAt: comment.createdAt
                 )
             } ?? []
@@ -1647,7 +1902,7 @@ final class GitHubAPIClient: ObservableObject {
                     ReviewComment(
                         id: comment.id,
                         author: comment.author?.login ?? "unknown",
-                        body: comment.body,
+                        body: comment.body ?? "",
                         createdAt: comment.createdAt
                     )
                 }
@@ -2257,6 +2512,116 @@ final class GitHubAPIClient: ObservableObject {
 
 // MARK: - GraphQL Response Models
 
+private struct MentionSourceBatchResponse: Decodable {
+    let data: BatchData
+
+    struct BatchData: Decodable {
+        let nodes: [PRNode]
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            var collected: [PRNode] = []
+            for key in container.allKeys {
+                if try container.decodeNil(forKey: key) { continue }
+                if let wrapper = try? container.decode(RepositoryWrapper.self, forKey: key),
+                   let pr = wrapper.pullRequest {
+                    collected.append(pr)
+                }
+            }
+            self.nodes = collected
+        }
+    }
+
+    private struct RepositoryWrapper: Decodable {
+        let pullRequest: PRNode?
+    }
+
+    private struct DynamicKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
+    struct PRNode: Decodable {
+        let databaseId: Int?
+        let number: Int
+        let updatedAt: Date
+        let body: String?
+        let repository: Repository
+        let comments: IssueCommentsContainer?
+        let reviewThreads: ReviewThreadsContainer?
+        let crossReferences: CrossReferencesContainer?
+    }
+
+    struct Repository: Decodable {
+        let owner: Owner
+        let name: String
+    }
+
+    struct Owner: Decodable {
+        let login: String
+    }
+
+    struct IssueCommentsContainer: Decodable {
+        let nodes: [CommentNode]
+    }
+
+    struct ReviewThreadsContainer: Decodable {
+        let nodes: [ReviewThreadNode]
+        let pageInfo: ReviewThreadPageInfo?
+    }
+
+    struct ReviewThreadPageInfo: Decodable {
+        let hasPreviousPage: Bool
+        let startCursor: String?
+    }
+
+    struct ReviewThreadNode: Decodable {
+        let id: String
+        let isResolved: Bool
+        let isOutdated: Bool
+        let path: String?
+        let line: Int?
+        let comments: CommentsContainer
+    }
+
+    struct CommentsContainer: Decodable {
+        let nodes: [CommentNode]
+    }
+
+    struct CommentNode: Decodable {
+        let id: String
+        let author: Author?
+        let body: String?
+        let createdAt: Date
+    }
+
+    struct Author: Decodable {
+        let login: String
+    }
+
+    struct CrossReferencesContainer: Decodable {
+        let nodes: [CrossReferenceEventNode]
+    }
+
+    struct CrossReferenceEventNode: Decodable {
+        let source: RelatedPR?
+        let target: RelatedPR?
+    }
+
+    struct RelatedPR: Decodable {
+        let databaseId: Int?
+        let number: Int
+        let state: String
+        let repository: Repository
+
+        var repoFullName: String {
+            "\(repository.owner.login)/\(repository.name)"
+        }
+    }
+}
+
 /// Decodes the dynamic-aliased `pr_0`, `pr_1`, ... response from `fetchMentionedBatch`,
 /// flattening successful repository.pullRequest results into a single node list.
 private struct MentionedBatchResponse: Decodable {
@@ -2381,7 +2746,7 @@ private struct GraphQLResponse: Decodable {
     struct CommentNode: Decodable {
         let id: String
         let author: Author?
-        let body: String
+        let body: String?
         let createdAt: Date
     }
 
@@ -2527,7 +2892,7 @@ private struct CombinedGraphQLResponse: Decodable {
     struct CommentNode: Decodable {
         let id: String
         let author: Author?
-        let body: String
+        let body: String?
         let createdAt: Date
     }
 
