@@ -161,6 +161,84 @@ final class UpdateLogicTests: XCTestCase {
         )
     }
 
+    func testMentionParserRecognizesSameRepositoryReferences() {
+        let references = GitHubAPIClient.extractMentionedPRReferences(
+            from: "See #12, owner/repo#34, and https://github.com/owner/repo/pull/56 for context.",
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            sourcePRNumber: 99
+        )
+
+        XCTAssertEqual(
+            references,
+            Set([
+                PullRequestReference(owner: "owner", repo: "repo", number: 12),
+                PullRequestReference(owner: "owner", repo: "repo", number: 34),
+                PullRequestReference(owner: "owner", repo: "repo", number: 56)
+            ])
+        )
+    }
+
+    func testMentionParserIgnoresCrossRepoAndSelfReferences() {
+        let references = GitHubAPIClient.extractMentionedPRReferences(
+            from: "Cross repo refs like other/repo#12 and https://github.com/other/repo/pull/77 should be ignored. Self refs #99 and owner/repo#99 should also be ignored.",
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            sourcePRNumber: 99
+        )
+
+        XCTAssertTrue(references.isEmpty)
+    }
+
+    func testMentionParserDoesNotTreatCrossRepoQualifiedReferenceAsBareSameRepoReference() {
+        let references = GitHubAPIClient.extractMentionedPRReferences(
+            from: "Do not treat other/repo#12 as repo-local #12.",
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            sourcePRNumber: 88
+        )
+
+        XCTAssertTrue(references.isEmpty)
+    }
+
+    func testPRListKeepsMentionedPRsOutOfAuthoredBadgeCount() {
+        let mentionedPR = makePullRequest(
+            id: 1,
+            number: 123,
+            category: .mentioned,
+            reviewThreads: [
+                ReviewThread(
+                    id: "thread-1",
+                    isResolved: false,
+                    isOutdated: false,
+                    path: nil,
+                    line: nil,
+                    comments: [
+                        ReviewComment(
+                            id: "comment-1",
+                            author: "reviewer",
+                            body: "Needs follow-up",
+                            createdAt: Date()
+                        )
+                    ]
+                )
+            ]
+        )
+
+        let list = PRList(
+            lastUpdated: Date(),
+            pullRequests: [],
+            mentionedPullRequests: [mentionedPR],
+            mergedPullRequests: [],
+            isLoading: false,
+            error: nil
+        )
+
+        XCTAssertTrue(list.hasUsableData)
+        XCTAssertEqual(list.authoredUnresolvedCount, 0)
+        XCTAssertEqual(list.totalUnresolvedCount, 0)
+    }
+
     private func makeRelease(assets: [String]) throws -> ReleaseInfo {
         let json = """
         {
@@ -178,5 +256,48 @@ final class UpdateLogicTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(ReleaseInfo.self, from: Data(json.utf8))
+    }
+
+    private func makePullRequest(
+        id: Int,
+        number: Int,
+        category: PRCategory,
+        reviewThreads: [ReviewThread] = [],
+        hasBaseConflicts: Bool = false
+    ) -> PullRequest {
+        PullRequest(
+            id: id,
+            number: number,
+            title: "PR #\(number)",
+            author: "tester",
+            authorAvatarURL: nil,
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            url: URL(string: "https://github.com/owner/repo/pull/\(number)")!,
+            state: .open,
+            isDraft: false,
+            createdAt: Date(),
+            updatedAt: Date(),
+            mergedAt: nil,
+            body: nil,
+            conversationComments: [],
+            lastCommitAt: Date(),
+            headCommitOid: "abc123",
+            reviewThreads: reviewThreads,
+            category: category,
+            hasBaseConflicts: hasBaseConflicts,
+            ciStatus: .success,
+            checkSuccessCount: 1,
+            checkFailureCount: 0,
+            checkPendingCount: 0,
+            githubCIState: "SUCCESS",
+            myLastReviewState: nil,
+            myLastReviewAt: nil,
+            reviewRequestedAt: nil,
+            myThreadsAllResolved: false,
+            approvalCount: 0,
+            changesRequestedCount: 0,
+            ciExtendedInfo: nil
+        )
     }
 }

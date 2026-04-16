@@ -117,17 +117,7 @@ final class PRListViewModel: ObservableObject {
     // MARK: - Computed Properties
 
     var filteredPRs: [PullRequest] {
-        let prs = prList.pullRequests
-
-        guard !searchText.isEmpty else { return prs }
-
-        let query = searchText.lowercased()
-        return prs.filter { pr in
-            pr.title.lowercased().contains(query) ||
-            pr.repoFullName.lowercased().contains(query) ||
-            pr.author.lowercased().contains(query) ||
-            String(pr.number).contains(query)
-        }
+        filterPRs(prList.pullRequests)
     }
 
     var authoredPRs: [PullRequest] {
@@ -146,6 +136,10 @@ final class PRListViewModel: ObservableObject {
         filteredPRs.filter { $0.category == .reviewRequest }
     }
 
+    var mentionedPRs: [PullRequest] {
+        filterPRs(prList.mentionedPullRequests)
+    }
+
     var groupedAuthoredPRs: [(String, [PullRequest])] {
         groupByRepo(unpinnedAuthoredPRs)
     }
@@ -154,18 +148,12 @@ final class PRListViewModel: ObservableObject {
         groupByRepo(reviewRequestPRs)
     }
 
+    var groupedMentionedPRs: [(String, [PullRequest])] {
+        groupByRepo(mentionedPRs)
+    }
+
     private var filteredMergedPRs: [PullRequest] {
-        let prs = prList.mergedPullRequests
-
-        guard !searchText.isEmpty else { return prs }
-
-        let query = searchText.lowercased()
-        return prs.filter { pr in
-            pr.title.lowercased().contains(query) ||
-            pr.repoFullName.lowercased().contains(query) ||
-            pr.author.lowercased().contains(query) ||
-            String(pr.number).contains(query)
-        }
+        filterPRs(prList.mergedPullRequests)
     }
 
     /// Merged within last 24 hours (rolling window), deduped by PR id.
@@ -325,6 +313,18 @@ final class PRListViewModel: ObservableObject {
     }
 
     // MARK: - Private
+
+    private func filterPRs(_ prs: [PullRequest]) -> [PullRequest] {
+        guard !searchText.isEmpty else { return prs }
+
+        let query = searchText.lowercased()
+        return prs.filter { pr in
+            pr.title.lowercased().contains(query) ||
+            pr.repoFullName.lowercased().contains(query) ||
+            pr.author.lowercased().contains(query) ||
+            String(pr.number).contains(query)
+        }
+    }
 
     private func groupByRepo(_ prs: [PullRequest], sortByMergedDate: Bool = false) -> [(String, [PullRequest])] {
         let grouped = Dictionary(grouping: prs) { $0.repoFullName }

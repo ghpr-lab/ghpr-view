@@ -3,24 +3,27 @@ import Foundation
 struct PRList: Codable {
     var lastUpdated: Date
     var pullRequests: [PullRequest]
+    var mentionedPullRequests: [PullRequest]
     var mergedPullRequests: [PullRequest]
     var isLoading: Bool
     var error: Error?
 
     // Custom Codable - only encode persistent state, not transient (isLoading, error)
     enum CodingKeys: String, CodingKey {
-        case lastUpdated, pullRequests, mergedPullRequests
+        case lastUpdated, pullRequests, mentionedPullRequests, mergedPullRequests
     }
 
     init(
         lastUpdated: Date,
         pullRequests: [PullRequest],
+        mentionedPullRequests: [PullRequest] = [],
         mergedPullRequests: [PullRequest] = [],
         isLoading: Bool,
         error: Error?
     ) {
         self.lastUpdated = lastUpdated
         self.pullRequests = pullRequests
+        self.mentionedPullRequests = mentionedPullRequests
         self.mergedPullRequests = mergedPullRequests
         self.isLoading = isLoading
         self.error = error
@@ -30,6 +33,7 @@ struct PRList: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         lastUpdated = try container.decode(Date.self, forKey: .lastUpdated)
         pullRequests = try container.decode([PullRequest].self, forKey: .pullRequests)
+        mentionedPullRequests = (try? container.decode([PullRequest].self, forKey: .mentionedPullRequests)) ?? []
         mergedPullRequests = (try? container.decode([PullRequest].self, forKey: .mergedPullRequests)) ?? []
         isLoading = false
         error = nil
@@ -39,6 +43,7 @@ struct PRList: Codable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(lastUpdated, forKey: .lastUpdated)
         try container.encode(pullRequests, forKey: .pullRequests)
+        try container.encode(mentionedPullRequests, forKey: .mentionedPullRequests)
         try container.encode(mergedPullRequests, forKey: .mergedPullRequests)
     }
 
@@ -47,7 +52,7 @@ struct PRList: Codable {
     }
 
     var hasUsableData: Bool {
-        !pullRequests.isEmpty || !mergedPullRequests.isEmpty
+        !pullRequests.isEmpty || !mentionedPullRequests.isEmpty || !mergedPullRequests.isEmpty
     }
 
     /// Unresolved comment count for authored PRs only (used for menu bar badge)
@@ -64,7 +69,14 @@ struct PRList: Codable {
     }
 
     static var empty: PRList {
-        PRList(lastUpdated: Date(), pullRequests: [], mergedPullRequests: [], isLoading: false, error: nil)
+        PRList(
+            lastUpdated: Date(),
+            pullRequests: [],
+            mentionedPullRequests: [],
+            mergedPullRequests: [],
+            isLoading: false,
+            error: nil
+        )
     }
 }
 

@@ -170,6 +170,7 @@ final class GitHubAPIClient: ObservableObject {
 
     struct CombinedPRResult {
         let openPRs: [PullRequest]
+        let mentionedPRs: [PullRequest]
         let mergedPRs: [PullRequest]
     }
 
@@ -260,6 +261,251 @@ final class GitHubAPIClient: ObservableObject {
         var ciContext: String? { context }
         var ciWorkflowName: String? { workflowName }
         var ciCompletedAt: Date? { completedAt }
+    }
+
+    private static func compileRegex(_ pattern: String) -> NSRegularExpression {
+        do {
+            return try NSRegularExpression(pattern: pattern)
+        } catch {
+            fatalError("Invalid regex \(pattern): \(error)")
+        }
+    }
+
+    // GraphQL enum values for PR mergeable/mergeStateStatus indicating base-branch conflicts
+    private static let mergeableConflicting = "CONFLICTING"
+    private static let mergeStateDirty = "DIRTY"
+
+    private static func deriveBaseConflicts(mergeable: String?, mergeStateStatus: String?) -> Bool {
+        mergeable == mergeableConflicting || mergeStateStatus == mergeStateDirty
+    }
+
+    private static let explicitPRReferenceRegex = compileRegex(
+        "([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)\\b"
+    )
+    private static let sameRepoPRReferenceRegex = compileRegex(
+        "(?<![A-Za-z0-9_.\\-/])#([0-9]+)\\b"
+    )
+    private static let pullRequestURLRegex = compileRegex(
+        "https?://github\\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)(?:\\b|/)"
+    )
+
+    static func extractMentionedPRReferences(
+        from text: String,
+        repositoryOwner: String,
+        repositoryName: String,
+        sourcePRNumber: Int
+    ) -> Set<PullRequestReference> {
+        guard text.contains("#") || text.contains("github.com/") else { return [] }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let ownerLower = repositoryOwner.lowercased()
+        let repoLower = repositoryName.lowercased()
+        var result = Set<PullRequestReference>()
+
+        func insertIfSameRepository(owner: String, repo: String, number: Int) {
+            guard number > 0, number != sourcePRNumber else { return }
+            guard owner.lowercased() == ownerLower, repo.lowercased() == repoLower else { return }
+            result.insert(
+                PullRequestReference(owner: repositoryOwner, repo: repositoryName, number: number)
+            )
+        }
+
+        for regex in [explicitPRReferenceRegex, pullRequestURLRegex] {
+            for match in regex.matches(in: text, range: fullRange) {
+                guard
+                    let ownerRange = Range(match.range(at: 1), in: text),
+                    let repoRange = Range(match.range(at: 2), in: text),
+                    let numberRange = Range(match.range(at: 3), in: text),
+                    let number = Int(text[numberRange])
+                else { continue }
+                insertIfSameRepository(
+                    owner: String(text[ownerRange]),
+                    repo: String(text[repoRange]),
+                    number: number
+                )
+            }
+        }
+
+        for match in sameRepoPRReferenceRegex.matches(in: text, range: fullRange) {
+            guard let numberRange = Range(match.range(at: 1), in: text),
+                  let number = Int(text[numberRange]) else { continue }
+            insertIfSameRepository(owner: repositoryOwner, repo: repositoryName, number: number)
+        }
+
+        return result
+    }
+
+    private func buildPRFieldSelection(
+        username: String? = nil,
+        includeReviewMetadata: Bool,
+        includeCrossReferences: Bool
+    ) -> String {
+        var sections: [String] = [
+            """
+            databaseId
+            number
+            title
+            body
+            url
+            state
+            isDraft
+            createdAt
+            updatedAt
+            mergedAt
+            mergeable
+            mergeStateStatus
+            author {
+                login
+                avatarUrl
+            }
+            repository {
+                owner {
+                    login
+                }
+                name
+            }
+            comments(last: 20) {
+                nodes {
+                    id
+                    author {
+                        login
+                    }
+                    body
+                    createdAt
+                }
+            }
+            reviewThreads(last: 20) {
+                nodes {
+                    id
+                    isResolved
+                    isOutdated
+                    path
+                    line
+                    comments(first: 5) {
+                        nodes {
+                            id
+                            author {
+                                login
+                            }
+                            body
+                            createdAt
+                        }
+                    }
+                }
+                pageInfo {
+                    hasPreviousPage
+                    startCursor
+                }
+            }
+            commits(last: 1) {
+                nodes {
+                    commit {
+                        oid
+                        committedDate
+                        statusCheckRollup {
+                            state
+                            contexts(first: 20) {
+                                nodes {
+                                    ... on CheckRun {
+                                        name
+                                        conclusion
+                                        completedAt
+                                        checkSuite {
+                                            workflowRun {
+                                                workflow {
+                                                    name
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ... on StatusContext {
+                                        context
+                                        state
+                                    }
+                                }
+                                pageInfo {
+                                    hasNextPage
+                                    endCursor
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            latestReviews(first: 20) {
+                nodes {
+                    state
+                }
+            }
+            """
+        ]
+
+        if includeReviewMetadata, let username {
+            sections.append(
+                """
+                reviews(author: "\(username)", last: 1) {
+                    nodes {
+                        state
+                        submittedAt
+                    }
+                }
+                reviewRequestEvents: timelineItems(last: 10, itemTypes: [REVIEW_REQUESTED_EVENT]) {
+                    nodes {
+                        ... on ReviewRequestedEvent {
+                            createdAt
+                            requestedReviewer {
+                                ... on User {
+                                    login
+                                }
+                            }
+                        }
+                    }
+                }
+                """
+            )
+        }
+
+        if includeCrossReferences {
+            sections.append(
+                """
+                crossReferences: timelineItems(last: 50, itemTypes: [CROSS_REFERENCED_EVENT]) {
+                    nodes {
+                        ... on CrossReferencedEvent {
+                            source {
+                                ... on PullRequest {
+                                    databaseId
+                                    number
+                                    state
+                                    repository {
+                                        owner {
+                                            login
+                                        }
+                                        name
+                                    }
+                                }
+                            }
+                            target {
+                                ... on PullRequest {
+                                    databaseId
+                                    number
+                                    state
+                                    repository {
+                                        owner {
+                                            login
+                                        }
+                                        name
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                """
+            )
+        }
+
+        return sections.joined(separator: "\n")
     }
 
     private func parseCIContextsResponse(data: Data) throws -> CIContextsResult {
@@ -453,106 +699,7 @@ final class GitHubAPIClient: ObservableObject {
         let prFragment = """
                 nodes {
                     ... on PullRequest {
-                        databaseId
-                        number
-                        title
-                        url
-                        state
-                        isDraft
-                        createdAt
-                        updatedAt
-                        mergedAt
-                        author {
-                            login
-                            avatarUrl
-                        }
-                        repository {
-                            owner {
-                                login
-                            }
-                            name
-                        }
-                        reviewThreads(last: 20) {
-                            nodes {
-                                id
-                                isResolved
-                                isOutdated
-                                path
-                                line
-                                comments(first: 5) {
-                                    nodes {
-                                        id
-                                        author {
-                                            login
-                                        }
-                                        body
-                                        createdAt
-                                    }
-                                }
-                            }
-                            pageInfo {
-                                hasPreviousPage
-                                startCursor
-                            }
-                        }
-                        commits(last: 1) {
-                            nodes {
-                                commit {
-                                    oid
-                                    committedDate
-                                    statusCheckRollup {
-                                        state
-                                        contexts(first: 20) {
-                                            nodes {
-                                                ... on CheckRun {
-                                                    name
-                                                    conclusion
-                                                    completedAt
-                                                    checkSuite {
-                                                        workflowRun {
-                                                            workflow {
-                                                                name
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                ... on StatusContext {
-                                                    context
-                                                    state
-                                                }
-                                            }
-                                            pageInfo {
-                                                hasNextPage
-                                                endCursor
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        reviews(author: "\(username)", last: 1) {
-                            nodes {
-                                state
-                                submittedAt
-                            }
-                        }
-                        latestReviews(first: 20) {
-                            nodes {
-                                state
-                            }
-                        }
-                        timelineItems(last: 10, itemTypes: [REVIEW_REQUESTED_EVENT]) {
-                            nodes {
-                                ... on ReviewRequestedEvent {
-                                    createdAt
-                                    requestedReviewer {
-                                        ... on User {
-                                            login
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        \(buildPRFieldSelection(username: username, includeReviewMetadata: true, includeCrossReferences: true))
                     }
                 }
         """
@@ -596,88 +743,7 @@ final class GitHubAPIClient: ObservableObject {
             search(query: "\(searchQuery)", type: ISSUE, first: 50) {
                 nodes {
                     ... on PullRequest {
-                        databaseId
-                        number
-                        title
-                        url
-                        state
-                        isDraft
-                        createdAt
-                        updatedAt
-                        mergedAt
-                        author {
-                            login
-                            avatarUrl
-                        }
-                        repository {
-                            owner {
-                                login
-                            }
-                            name
-                        }
-                        reviewThreads(last: 20) {
-                            nodes {
-                                id
-                                isResolved
-                                isOutdated
-                                path
-                                line
-                                comments(first: 5) {
-                                    nodes {
-                                        id
-                                        author {
-                                            login
-                                        }
-                                        body
-                                        createdAt
-                                    }
-                                }
-                            }
-                            pageInfo {
-                                hasPreviousPage
-                                startCursor
-                            }
-                        }
-                        commits(last: 1) {
-                            nodes {
-                                commit {
-                                    oid
-                                    committedDate
-                                    statusCheckRollup {
-                                        state
-                                        contexts(first: 20) {
-                                            nodes {
-                                                ... on CheckRun {
-                                                    name
-                                                    conclusion
-                                                    completedAt
-                                                    checkSuite {
-                                                        workflowRun {
-                                                            workflow {
-                                                                name
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                                ... on StatusContext {
-                                                    context
-                                                    state
-                                                }
-                                            }
-                                            pageInfo {
-                                                hasNextPage
-                                                endCursor
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        latestReviews(first: 20) {
-                            nodes {
-                                state
-                            }
-                        }
+                        \(buildPRFieldSelection(includeReviewMetadata: false, includeCrossReferences: false))
                     }
                 }
                 pageInfo {
@@ -715,6 +781,10 @@ final class GitHubAPIClient: ObservableObject {
                        let errors = json["errors"] as? [[String: Any]],
                        let firstError = errors.first,
                        let message = firstError["message"] as? String {
+                        if Self.isRateLimitMessage(message) {
+                            let resetDate = rateLimitResetDate(from: httpResponse) ?? Date().addingTimeInterval(60)
+                            throw APIError.rateLimited(resetDate: resetDate)
+                        }
                         throw APIError.unknown(message)
                     }
 
@@ -776,12 +846,23 @@ final class GitHubAPIClient: ObservableObject {
         }
     }
 
-    private func rateLimitError(from response: HTTPURLResponse) -> APIError? {
+    private func rateLimitResetDate(from response: HTTPURLResponse) -> Date? {
         guard let resetTime = response.value(forHTTPHeaderField: "X-RateLimit-Reset"),
               let timestamp = TimeInterval(resetTime) else {
             return nil
         }
-        return APIError.rateLimited(resetDate: Date(timeIntervalSince1970: timestamp))
+        return Date(timeIntervalSince1970: timestamp)
+    }
+
+    private func rateLimitError(from response: HTTPURLResponse) -> APIError? {
+        rateLimitResetDate(from: response).map { APIError.rateLimited(resetDate: $0) }
+    }
+
+    static func isRateLimitMessage(_ message: String) -> Bool {
+        let lowered = message.lowercased()
+        return lowered.contains("rate limit") ||
+               lowered.contains("secondary rate") ||
+               lowered.contains("abuse")
     }
 
     private func normalizeGraphQLError(_ error: Error) -> APIError {
@@ -815,123 +896,145 @@ final class GitHubAPIClient: ObservableObject {
 
     private func parseSearchResponse(data: Data, category: PRCategory) throws -> [PullRequest] {
         let decoder = JSONDecoder.githubDecoder
-
         do {
             let response = try decoder.decode(GraphQLResponse.self, from: data)
-            return response.data.search.nodes.compactMap { node in
-                guard let databaseId = node.databaseId else { return nil }
-
-                let reviewThreads = node.reviewThreads?.nodes.map { thread -> ReviewThread in
-                    let comments = thread.comments.nodes.map { comment -> ReviewComment in
-                        ReviewComment(
-                            id: comment.id,
-                            author: comment.author?.login ?? "unknown",
-                            body: comment.body,
-                            createdAt: comment.createdAt
-                        )
-                    }
-                    return ReviewThread(
-                        id: thread.id,
-                        isResolved: thread.isResolved,
-                        isOutdated: thread.isOutdated,
-                        path: thread.path,
-                        line: thread.line,
-                        comments: comments
-                    )
-                } ?? []
-
-                // Extract CI status and counts from the last commit
-                let lastCommit = node.commits?.nodes.first?.commit
-                let statusCheckRollup = lastCommit?.statusCheckRollup
-                let lastCommitAt = lastCommit?.committedDate
-
-                // Parse CI contexts using shared helper
-                let ciContexts = (statusCheckRollup?.contexts?.nodes ?? []).map { ctx in
-                    CIContextNode(
-                        name: ctx.name,
-                        conclusion: ctx.conclusion,
-                        state: ctx.state,
-                        context: ctx.context,
-                        workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
-                        completedAt: ctx.completedAt
-                    )
-                }
-                let excludeFilter = Self.loadCIStatusExcludeFilter()
-                let ciResult = Self.parseCIContexts(ciContexts, excludeFilter: excludeFilter)
-
-                // Derive CI status from our counts (not GitHub's rollup which may include excluded checks)
-                let rollupState = statusCheckRollup?.state
-                var ciStatus: CIStatus?
-                if ciResult.failureCount > 0 {
-                    ciStatus = .failure
-                } else if ciResult.pendingCount > 0 {
-                    ciStatus = .pending
-                } else if ciResult.successCount > 0 {
-                    ciStatus = .success
-                } else if statusCheckRollup != nil {
-                    ciStatus = .expected
-                } else {
-                    ciStatus = nil
-                }
-
-                // Trust GitHub's rollup state when it says PENDING but we derived success.
-                // This handles QUEUED checks not yet visible in individual contexts.
-                var effectivePendingCount = ciResult.pendingCount
-                var effectiveIsRunning = ciResult.isRunning
-                if ciStatus == .success, rollupState?.uppercased() == "PENDING" {
-                    ciStatus = .pending
-                    effectivePendingCount = max(effectivePendingCount, 1)
-                    effectiveIsRunning = true
-                }
-
-                let approvalCount = node.latestReviews?.nodes
-                    .filter { $0.state == "APPROVED" }
-                    .count ?? 0
-
-                let changesRequestedCount = node.latestReviews?.nodes
-                    .filter { $0.state == "CHANGES_REQUESTED" }
-                    .count ?? 0
-
-                let ciExtendedInfo: CIExtendedInfo? = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
-                    isRunning: effectiveIsRunning,
-                    workflows: Array(ciResult.workflows.values)
-                )
-
-                return PullRequest(
-                    id: databaseId,
-                    number: node.number,
-                    title: node.title,
-                    author: node.author?.login ?? "unknown",
-                    authorAvatarURL: node.author?.avatarUrl,
-                    repositoryOwner: node.repository.owner.login,
-                    repositoryName: node.repository.name,
-                    url: node.url,
-                    state: PRState(rawValue: node.state) ?? .open,
-                    isDraft: node.isDraft,
-                    createdAt: node.createdAt,
-                    updatedAt: node.updatedAt,
-                    mergedAt: node.mergedAt,
-                    lastCommitAt: lastCommitAt,
-                    headCommitOid: lastCommit?.oid,
-                    reviewThreads: reviewThreads,
-                    category: category,
-                    ciStatus: ciStatus,
-                    checkSuccessCount: ciResult.successCount,
-                    checkFailureCount: ciResult.failureCount,
-                    checkPendingCount: effectivePendingCount,
-                    githubCIState: rollupState,
-                    myLastReviewState: nil,
-                    myLastReviewAt: nil,
-                    reviewRequestedAt: nil,
-                    myThreadsAllResolved: false,
-                    approvalCount: approvalCount,
-                    changesRequestedCount: changesRequestedCount,
-                    ciExtendedInfo: ciExtendedInfo
-                )
+            let excludeFilter = Self.loadCIStatusExcludeFilter()
+            return response.data.search.nodes.compactMap {
+                Self.makeSearchPullRequest(from: $0, category: category, excludeFilter: excludeFilter)
             }
         } catch {
             throw APIError.decoding(error)
         }
+    }
+
+    /// Build a PullRequest from a search-shaped node. Used by both search-list and mention-batch fetches.
+    private static func makeSearchPullRequest(
+        from node: GraphQLResponse.PRNode,
+        category: PRCategory,
+        excludeFilter: String
+    ) -> PullRequest? {
+        guard let databaseId = node.databaseId else { return nil }
+
+        let conversationComments = node.comments?.nodes.map { comment in
+            IssueCommentSummary(
+                id: comment.id,
+                author: comment.author?.login ?? "unknown",
+                body: comment.body,
+                createdAt: comment.createdAt
+            )
+        } ?? []
+
+        let reviewThreads = node.reviewThreads?.nodes.map { thread -> ReviewThread in
+            let comments = thread.comments.nodes.map { comment -> ReviewComment in
+                ReviewComment(
+                    id: comment.id,
+                    author: comment.author?.login ?? "unknown",
+                    body: comment.body,
+                    createdAt: comment.createdAt
+                )
+            }
+            return ReviewThread(
+                id: thread.id,
+                isResolved: thread.isResolved,
+                isOutdated: thread.isOutdated,
+                path: thread.path,
+                line: thread.line,
+                comments: comments
+            )
+        } ?? []
+
+        let lastCommit = node.commits?.nodes.first?.commit
+        let statusCheckRollup = lastCommit?.statusCheckRollup
+        let lastCommitAt = lastCommit?.committedDate
+
+        let ciContexts = (statusCheckRollup?.contexts?.nodes ?? []).map { ctx in
+            CIContextNode(
+                name: ctx.name,
+                conclusion: ctx.conclusion,
+                state: ctx.state,
+                context: ctx.context,
+                workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
+                completedAt: ctx.completedAt
+            )
+        }
+        let ciResult = parseCIContexts(ciContexts, excludeFilter: excludeFilter)
+
+        let rollupState = statusCheckRollup?.state
+        var ciStatus: CIStatus?
+        if ciResult.failureCount > 0 {
+            ciStatus = .failure
+        } else if ciResult.pendingCount > 0 {
+            ciStatus = .pending
+        } else if ciResult.successCount > 0 {
+            ciStatus = .success
+        } else if statusCheckRollup != nil {
+            ciStatus = .expected
+        } else {
+            ciStatus = nil
+        }
+
+        // Trust GitHub's rollup state when it says PENDING but we derived success.
+        // This handles QUEUED checks not yet visible in individual contexts.
+        var effectivePendingCount = ciResult.pendingCount
+        var effectiveIsRunning = ciResult.isRunning
+        if ciStatus == .success, rollupState?.uppercased() == "PENDING" {
+            ciStatus = .pending
+            effectivePendingCount = max(effectivePendingCount, 1)
+            effectiveIsRunning = true
+        }
+
+        let approvalCount = node.latestReviews?.nodes
+            .filter { $0.state == "APPROVED" }
+            .count ?? 0
+
+        let changesRequestedCount = node.latestReviews?.nodes
+            .filter { $0.state == "CHANGES_REQUESTED" }
+            .count ?? 0
+
+        let hasBaseConflicts = deriveBaseConflicts(
+            mergeable: node.mergeable,
+            mergeStateStatus: node.mergeStateStatus
+        )
+
+        let ciExtendedInfo: CIExtendedInfo? = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
+            isRunning: effectiveIsRunning,
+            workflows: Array(ciResult.workflows.values)
+        )
+
+        return PullRequest(
+            id: databaseId,
+            number: node.number,
+            title: node.title,
+            author: node.author?.login ?? "unknown",
+            authorAvatarURL: node.author?.avatarUrl,
+            repositoryOwner: node.repository.owner.login,
+            repositoryName: node.repository.name,
+            url: node.url,
+            state: PRState(rawValue: node.state) ?? .open,
+            isDraft: node.isDraft,
+            createdAt: node.createdAt,
+            updatedAt: node.updatedAt,
+            mergedAt: node.mergedAt,
+            body: node.body,
+            conversationComments: conversationComments,
+            lastCommitAt: lastCommitAt,
+            headCommitOid: lastCommit?.oid,
+            reviewThreads: reviewThreads,
+            category: category,
+            hasBaseConflicts: hasBaseConflicts,
+            ciStatus: ciStatus,
+            checkSuccessCount: ciResult.successCount,
+            checkFailureCount: ciResult.failureCount,
+            checkPendingCount: effectivePendingCount,
+            githubCIState: rollupState,
+            myLastReviewState: nil,
+            myLastReviewAt: nil,
+            reviewRequestedAt: nil,
+            myThreadsAllResolved: false,
+            approvalCount: approvalCount,
+            changesRequestedCount: changesRequestedCount,
+            ciExtendedInfo: ciExtendedInfo
+        )
     }
 
     /// Info needed to fetch additional review threads for a PR
@@ -952,6 +1055,86 @@ final class GitHubAPIClient: ObservableObject {
         let endCursor: String
         let rollupState: String
         let initialContextCount: Int  // Number of contexts already fetched in first page
+    }
+
+    private static func outboundMentionReferences(from pr: PullRequest) -> Set<PullRequestReference> {
+        var result = Set<PullRequestReference>()
+
+        if let body = pr.body, !body.isEmpty {
+            result.formUnion(
+                extractMentionedPRReferences(
+                    from: body,
+                    repositoryOwner: pr.repositoryOwner,
+                    repositoryName: pr.repositoryName,
+                    sourcePRNumber: pr.number
+                )
+            )
+        }
+
+        for comment in pr.conversationComments {
+            result.formUnion(
+                extractMentionedPRReferences(
+                    from: comment.body,
+                    repositoryOwner: pr.repositoryOwner,
+                    repositoryName: pr.repositoryName,
+                    sourcePRNumber: pr.number
+                )
+            )
+        }
+
+        for thread in pr.reviewThreads {
+            for comment in thread.comments {
+                result.formUnion(
+                    extractMentionedPRReferences(
+                        from: comment.body,
+                        repositoryOwner: pr.repositoryOwner,
+                        repositoryName: pr.repositoryName,
+                        sourcePRNumber: pr.number
+                    )
+                )
+            }
+        }
+
+        return result
+    }
+
+    private static func inboundMentionReferences(
+        from node: CombinedGraphQLResponse.PRNode,
+        currentPR: PullRequestReference
+    ) -> Set<PullRequestReference> {
+        let currentRepoLower = currentPR.repoFullName.lowercased()
+        var result = Set<PullRequestReference>()
+
+        // Skip closed/merged sides — fetching them later would just be filtered out as non-OPEN.
+        for event in node.crossReferences?.nodes ?? [] {
+            if let source = event.source,
+               source.state == "OPEN",
+               source.repoFullName.lowercased() == currentRepoLower,
+               source.number != currentPR.number {
+                result.insert(
+                    PullRequestReference(
+                        owner: source.repository.owner.login,
+                        repo: source.repository.name,
+                        number: source.number
+                    )
+                )
+            }
+
+            if let target = event.target,
+               target.state == "OPEN",
+               target.repoFullName.lowercased() == currentRepoLower,
+               target.number != currentPR.number {
+                result.insert(
+                    PullRequestReference(
+                        owner: target.repository.owner.login,
+                        repo: target.repository.name,
+                        number: target.number
+                    )
+                )
+            }
+        }
+
+        return result
     }
 
     private func parseCombinedResponse(data: Data, username: String) async throws -> CombinedPRResult {
@@ -1090,12 +1273,130 @@ final class GitHubAPIClient: ObservableObject {
             }
             let mergedPRs = Array(mergedById.values).sorted { ($0.mergedAt ?? $0.updatedAt) > ($1.mergedAt ?? $1.updatedAt) }
 
+            let seedPRs = openPRs + mergedPRs
+            let existingIDs = Set(seedPRs.map(\.id))
+            let existingReferences = Set(
+                seedPRs.map {
+                    PullRequestReference(
+                        owner: $0.repositoryOwner,
+                        repo: $0.repositoryName,
+                        number: $0.number
+                    )
+                }
+            )
+
+            var rawNodesById: [Int: CombinedGraphQLResponse.PRNode] = [:]
+            rawNodesById.reserveCapacity(existingIDs.count)
+            let allNodeGroups = [
+                response.data.authored.nodes,
+                response.data.reviewRequested.nodes,
+                response.data.reviewedBy.nodes,
+                response.data.mergedInvolved.nodes
+            ]
+            for group in allNodeGroups {
+                for node in group {
+                    guard let databaseId = node.databaseId, existingIDs.contains(databaseId) else { continue }
+                    rawNodesById[databaseId] = node
+                }
+            }
+
+            var mentionCandidates = Set<PullRequestReference>()
+            for pr in seedPRs {
+                mentionCandidates.formUnion(Self.outboundMentionReferences(from: pr))
+
+                guard let node = rawNodesById[pr.id] else { continue }
+                mentionCandidates.formUnion(
+                    Self.inboundMentionReferences(
+                        from: node,
+                        currentPR: PullRequestReference(
+                            owner: pr.repositoryOwner,
+                            repo: pr.repositoryName,
+                            number: pr.number
+                        )
+                    )
+                )
+            }
+            mentionCandidates.subtract(existingReferences)
+
+            var mentionedPRs: [PullRequest] = []
+            if !mentionCandidates.isEmpty {
+                mentionedPRs = try await fetchMentionedPullRequests(references: Array(mentionCandidates))
+
+                var seenMentionedIDs = Set<Int>()
+                mentionedPRs = mentionedPRs
+                    .filter { $0.state == .open && seenMentionedIDs.insert($0.id).inserted }
+                    .sorted { $0.updatedAt > $1.updatedAt }
+            }
+
             return CombinedPRResult(
                 openPRs: openPRs.sorted { $0.updatedAt > $1.updatedAt },
+                mentionedPRs: mentionedPRs,
                 mergedPRs: mergedPRs
             )
+        } catch let error as APIError {
+            throw error
         } catch {
             throw APIError.decoding(error)
+        }
+    }
+
+    private func fetchMentionedPullRequests(references: [PullRequestReference]) async throws -> [PullRequest] {
+        let sortedReferences = references.sorted {
+            if $0.owner != $1.owner { return $0.owner < $1.owner }
+            if $0.repo != $1.repo { return $0.repo < $1.repo }
+            return $0.number < $1.number
+        }
+
+        let batchSize = 20
+        let fieldSelection = buildPRFieldSelection(includeReviewMetadata: false, includeCrossReferences: false)
+        let batches: [[PullRequestReference]] = stride(from: 0, to: sortedReferences.count, by: batchSize).map {
+            Array(sortedReferences[$0..<min($0 + batchSize, sortedReferences.count)])
+        }
+
+        return try await withThrowingTaskGroup(of: [PullRequest].self) { group in
+            for batch in batches {
+                group.addTask {
+                    try await self.fetchMentionedBatch(batch, fieldSelection: fieldSelection)
+                }
+            }
+            var result: [PullRequest] = []
+            for try await batchResult in group {
+                result.append(contentsOf: batchResult)
+            }
+            return result
+        }
+    }
+
+    private func fetchMentionedBatch(
+        _ batch: [PullRequestReference],
+        fieldSelection: String
+    ) async throws -> [PullRequest] {
+        var queryParts: [String] = []
+        for (index, reference) in batch.enumerated() {
+            queryParts.append(
+                """
+                pr_\(index): repository(owner: "\(reference.owner)", name: "\(reference.repo)") {
+                    pullRequest(number: \(reference.number)) {
+                        \(fieldSelection)
+                    }
+                }
+                """
+            )
+        }
+
+        let query = "query {\n" + queryParts.joined(separator: "\n") + "\n}"
+        let responseData = try await executeGraphQL(query: query, operation: "fetchMentionedPullRequests")
+
+        let decoder = JSONDecoder.githubDecoder
+        let response: MentionedBatchResponse
+        do {
+            response = try decoder.decode(MentionedBatchResponse.self, from: responseData)
+        } catch {
+            throw APIError.decoding(error)
+        }
+        let excludeFilter = Self.loadCIStatusExcludeFilter()
+        return response.data.nodes.compactMap {
+            Self.makeSearchPullRequest(from: $0, category: .mentioned, excludeFilter: excludeFilter)
         }
     }
 
@@ -1332,6 +1633,15 @@ final class GitHubAPIClient: ObservableObject {
         return nodes.compactMap { node in
             guard let databaseId = node.databaseId else { return nil }
 
+            let conversationComments = node.comments?.nodes.map { comment in
+                IssueCommentSummary(
+                    id: comment.id,
+                    author: comment.author?.login ?? "unknown",
+                    body: comment.body,
+                    createdAt: comment.createdAt
+                )
+            } ?? []
+
             let reviewThreads = node.reviewThreads?.nodes.map { thread -> ReviewThread in
                 let comments = thread.comments.nodes.map { comment -> ReviewComment in
                     ReviewComment(
@@ -1435,6 +1745,11 @@ final class GitHubAPIClient: ObservableObject {
                 workflows: Array(ciResult.workflows.values)
             )
 
+            let hasBaseConflicts = Self.deriveBaseConflicts(
+                mergeable: node.mergeable,
+                mergeStateStatus: node.mergeStateStatus
+            )
+
             // Determine category - if username provided, check if user is author
             let resolvedCategory: PRCategory
             if let usernameLower {
@@ -1453,7 +1768,7 @@ final class GitHubAPIClient: ObservableObject {
             let myLastReviewAt: Date? = lastReview?.submittedAt
 
             // Extract the most recent review request for the current user
-            let reviewRequestedAt: Date? = node.timelineItems?.nodes
+            let reviewRequestedAt: Date? = node.reviewRequestEvents?.nodes
                 .filter { $0.requestedReviewer?.login?.lowercased() == usernameLower }
                 .compactMap { $0.createdAt }
                 .max()
@@ -1492,10 +1807,13 @@ final class GitHubAPIClient: ObservableObject {
                 createdAt: node.createdAt,
                 updatedAt: node.updatedAt,
                 mergedAt: node.mergedAt,
+                body: node.body,
+                conversationComments: conversationComments,
                 lastCommitAt: lastCommitAt,
                 headCommitOid: lastCommit?.oid,
                 reviewThreads: reviewThreads,
                 category: resolvedCategory,
+                hasBaseConflicts: hasBaseConflicts,
                 ciStatus: ciStatus,
                 checkSuccessCount: ciResult.successCount,
                 checkFailureCount: ciResult.failureCount,
@@ -1743,13 +2061,7 @@ final class GitHubAPIClient: ObservableObject {
 
     private static let jiraCacheKey = "PRDashboard.JiraTicketCache"
 
-    private static let jiraTicketRegex: NSRegularExpression = {
-        do {
-            return try NSRegularExpression(pattern: "[A-Z][A-Z0-9]+-\\d+")
-        } catch {
-            fatalError("Invalid Jira ticket regex: \(error)")
-        }
-    }()
+    private static let jiraTicketRegex = compileRegex("[A-Z][A-Z0-9]+-\\d+")
 
     static func extractJiraTicket(from text: String) -> String? {
         let range = NSRange(text.startIndex..., in: text)
@@ -1945,6 +2257,40 @@ final class GitHubAPIClient: ObservableObject {
 
 // MARK: - GraphQL Response Models
 
+/// Decodes the dynamic-aliased `pr_0`, `pr_1`, ... response from `fetchMentionedBatch`,
+/// flattening successful repository.pullRequest results into a single node list.
+private struct MentionedBatchResponse: Decodable {
+    let data: BatchData
+
+    struct BatchData: Decodable {
+        let nodes: [GraphQLResponse.PRNode]
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            var collected: [GraphQLResponse.PRNode] = []
+            for key in container.allKeys {
+                if try container.decodeNil(forKey: key) { continue }
+                if let wrapper = try? container.decode(RepositoryWrapper.self, forKey: key),
+                   let pr = wrapper.pullRequest {
+                    collected.append(pr)
+                }
+            }
+            self.nodes = collected
+        }
+    }
+
+    private struct RepositoryWrapper: Decodable {
+        let pullRequest: GraphQLResponse.PRNode?
+    }
+
+    private struct DynamicKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+}
+
 private struct GraphQLResponse: Decodable {
     let data: DataContainer
 
@@ -1966,14 +2312,18 @@ private struct GraphQLResponse: Decodable {
         let databaseId: Int?
         let number: Int
         let title: String
+        let body: String?
         let url: URL
         let state: String
         let isDraft: Bool
         let createdAt: Date
         let updatedAt: Date
         let mergedAt: Date?
+        let mergeable: String?
+        let mergeStateStatus: String?
         let author: Author?
         let repository: Repository
+        let comments: IssueCommentsContainer?
         let reviewThreads: ReviewThreadsContainer?
         let commits: CommitsContainer?
         let latestReviews: LatestReviewsContainer?
@@ -1999,6 +2349,10 @@ private struct GraphQLResponse: Decodable {
 
     struct LatestReviewNode: Decodable {
         let state: String
+    }
+
+    struct IssueCommentsContainer: Decodable {
+        let nodes: [CommentNode]
     }
 
     struct ReviewThreadsContainer: Decodable {
@@ -2101,19 +2455,24 @@ private struct CombinedGraphQLResponse: Decodable {
         let databaseId: Int?
         let number: Int
         let title: String
+        let body: String?
         let url: URL
         let state: String
         let isDraft: Bool
         let createdAt: Date
         let updatedAt: Date
         let mergedAt: Date?
+        let mergeable: String?
+        let mergeStateStatus: String?
         let author: Author?
         let repository: Repository
+        let comments: IssueCommentsContainer?
         let reviewThreads: ReviewThreadsContainer?
         let commits: CommitsContainer?
         let reviews: ReviewsContainer?
         let latestReviews: LatestReviewsContainer?
-        let timelineItems: TimelineItemsContainer?
+        let reviewRequestEvents: ReviewRequestEventsContainer?
+        let crossReferences: CrossReferencesContainer?
     }
 
     struct Author: Decodable {
@@ -2136,6 +2495,10 @@ private struct CombinedGraphQLResponse: Decodable {
 
     struct LatestReviewNode: Decodable {
         let state: String
+    }
+
+    struct IssueCommentsContainer: Decodable {
+        let nodes: [CommentNode]
     }
 
     struct ReviewThreadsContainer: Decodable {
@@ -2225,16 +2588,36 @@ private struct CombinedGraphQLResponse: Decodable {
         let submittedAt: Date?
     }
 
-    struct TimelineItemsContainer: Decodable {
-        let nodes: [TimelineItemNode]
+    struct ReviewRequestEventsContainer: Decodable {
+        let nodes: [ReviewRequestEventNode]
     }
 
-    struct TimelineItemNode: Decodable {
+    struct ReviewRequestEventNode: Decodable {
         let createdAt: Date?
         let requestedReviewer: RequestedReviewer?
     }
 
     struct RequestedReviewer: Decodable {
         let login: String?
+    }
+
+    struct CrossReferencesContainer: Decodable {
+        let nodes: [CrossReferenceEventNode]
+    }
+
+    struct CrossReferenceEventNode: Decodable {
+        let source: ReferencedPullRequest?
+        let target: ReferencedPullRequest?
+    }
+
+    struct ReferencedPullRequest: Decodable {
+        let databaseId: Int?
+        let number: Int
+        let state: String
+        let repository: Repository
+
+        var repoFullName: String {
+            "\(repository.owner.login)/\(repository.name)"
+        }
     }
 }

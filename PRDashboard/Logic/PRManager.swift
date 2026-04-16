@@ -249,13 +249,8 @@ final class PRManager: PRManagerType, ObservableObject {
 
         guard configuration.isValid else {
             let error = ConfigurationError.invalidRefreshInterval
-            prList = PRList(
-                lastUpdated: prList.lastUpdated,
-                pullRequests: prList.pullRequests,
-                mergedPullRequests: prList.mergedPullRequests,
-                isLoading: false,
-                error: error
-            )
+            prList.isLoading = false
+            prList.error = error
             refreshState = .error(error)
             consecutiveTransientFailures = 0
             return
@@ -275,13 +270,8 @@ final class PRManager: PRManagerType, ObservableObject {
     private func startRefresh(username: String, trigger: RefreshTrigger) {
         let hadUsableData = prList.hasUsableData
         refreshState = .loading
-        prList = PRList(
-            lastUpdated: prList.lastUpdated,
-            pullRequests: prList.pullRequests,
-            mergedPullRequests: prList.mergedPullRequests,
-            isLoading: true,
-            error: nil
-        )
+        prList.isLoading = true
+        prList.error = nil
 
         logger.info(
             "Starting refresh: trigger=\(trigger.rawValue, privacy: .public) staleData=\((hadUsableData ? "true" : "false"), privacy: .public)"
@@ -300,9 +290,10 @@ final class PRManager: PRManagerType, ObservableObject {
             do {
                 let result = try await self.apiClient.fetchAllPullRequests(username: username)
                 var prs = result.openPRs
+                var mentionedPRs = result.mentionedPRs
                 var mergedPRs = result.mergedPRs
 
-                logger.info("API returned: \(prs.count) open PRs, \(mergedPRs.count) merged PRs")
+                logger.info("API returned: \(prs.count) open PRs, \(mentionedPRs.count) mentioned PRs, \(mergedPRs.count) merged PRs")
 
                 // Filter by configured repositories if any (case-insensitive, supports "org/" prefix match)
                 if !configuration.repositories.isEmpty {
@@ -320,17 +311,19 @@ final class PRManager: PRManagerType, ObservableObject {
                         }
                     }
                     prs = prs.filter(repoFilter)
+                    mentionedPRs = mentionedPRs.filter(repoFilter)
                     mergedPRs = mergedPRs.filter(repoFilter)
                 }
 
                 // Filter drafts if disabled
                 if !configuration.showDrafts {
                     prs = prs.filter { !$0.isDraft }
+                    mentionedPRs = mentionedPRs.filter { !$0.isDraft }
                     // Note: merged PRs are never drafts, but filter anyway for consistency
                     mergedPRs = mergedPRs.filter { !$0.isDraft }
                 }
 
-                logger.info("After filters: \(prs.count) open PRs, \(mergedPRs.count) merged PRs")
+                logger.info("After filters: \(prs.count) open PRs, \(mentionedPRs.count) mentioned PRs, \(mergedPRs.count) merged PRs")
 
                 // Check for changes and notify
                 if configuration.notificationsEnabled {
@@ -342,8 +335,9 @@ final class PRManager: PRManagerType, ObservableObject {
 
                 // Enrich PRs with Jira tickets from body (fetches only for uncached PRs)
                 do {
-                    let jiraCache = try await apiClient.fetchJiraTickets(for: prs + mergedPRs)
+                    let jiraCache = try await apiClient.fetchJiraTickets(for: prs + mentionedPRs + mergedPRs)
                     GitHubAPIClient.applyJiraTickets(to: &prs, cache: jiraCache)
+                    GitHubAPIClient.applyJiraTickets(to: &mentionedPRs, cache: jiraCache)
                     GitHubAPIClient.applyJiraTickets(to: &mergedPRs, cache: jiraCache)
                 } catch {
                     logger.error("Failed to enrich Jira tickets: \(error.localizedDescription)")
@@ -358,6 +352,7 @@ final class PRManager: PRManagerType, ObservableObject {
                 let newPRList = PRList(
                     lastUpdated: Date(),
                     pullRequests: prs,
+                    mentionedPullRequests: mentionedPRs,
                     mergedPullRequests: mergedPRs,
                     isLoading: false,
                     error: nil
@@ -370,19 +365,14 @@ final class PRManager: PRManagerType, ObservableObject {
                 // Save to cache after successful refresh
                 PRCache.shared.save(newPRList)
                 logger.info(
-                    "Refresh succeeded: trigger=\(trigger.rawValue, privacy: .public) openPRs=\(prs.count) mergedPRs=\(mergedPRs.count)"
+                    "Refresh succeeded: trigger=\(trigger.rawValue, privacy: .public) openPRs=\(prs.count) mentionedPRs=\(mentionedPRs.count) mergedPRs=\(mergedPRs.count)"
                 )
 
             } catch {
                 if error is CancellationError || ((error as? APIError)?.isCancellation == true) {
                     if self.oauthManager.authState.isAuthenticated {
-                        self.prList = PRList(
-                            lastUpdated: self.prList.lastUpdated,
-                            pullRequests: self.prList.pullRequests,
-                            mergedPullRequests: self.prList.mergedPullRequests,
-                            isLoading: false,
-                            error: nil
-                        )
+                        self.prList.isLoading = false
+                        self.prList.error = nil
                         self.refreshState = .idle
                     }
                     logger.debug("Refresh cancelled: trigger=\(trigger.rawValue, privacy: .public)")
@@ -392,22 +382,12 @@ final class PRManager: PRManagerType, ObservableObject {
                 // Try to fallback to stale cache on API error
                 if !self.prList.hasUsableData,
                    let cached = PRCache.shared.load(ignoreExpiry: true) {
-                    self.prList = PRList(
-                        lastUpdated: cached.lastUpdated,
-                        pullRequests: cached.pullRequests,
-                        mergedPullRequests: cached.mergedPullRequests,
-                        isLoading: false,
-                        error: error  // Still show error to indicate stale data
-                    )
+                    self.prList = cached
+                    self.prList.error = error  // Still show error to indicate stale data
                     self.previousPRs = Dictionary(uniqueKeysWithValues: cached.pullRequests.map { ($0.id, $0) })
                 } else {
-                    self.prList = PRList(
-                        lastUpdated: self.prList.lastUpdated,
-                        pullRequests: self.prList.pullRequests,
-                        mergedPullRequests: self.prList.mergedPullRequests,
-                        isLoading: false,
-                        error: error
-                    )
+                    self.prList.isLoading = false
+                    self.prList.error = error
                 }
                 self.refreshState = .error(error)
 
@@ -536,19 +516,11 @@ final class PRManager: PRManagerType, ObservableObject {
                 owner: pr.repositoryOwner, repo: pr.repositoryName, number: pr.number
             )
             if let index = prList.pullRequests.firstIndex(where: { $0.id == pr.id }) {
-                var updated = prList.pullRequests
-                updated[index].ciStatus = result.ciStatus
-                updated[index].checkSuccessCount = result.checkSuccessCount
-                updated[index].checkFailureCount = result.checkFailureCount
-                updated[index].checkPendingCount = result.checkPendingCount
-                updated[index].ciExtendedInfo = result.ciExtendedInfo
-                prList = PRList(
-                    lastUpdated: prList.lastUpdated,
-                    pullRequests: updated,
-                    mergedPullRequests: prList.mergedPullRequests,
-                    isLoading: false,
-                    error: nil
-                )
+                prList.pullRequests[index].ciStatus = result.ciStatus
+                prList.pullRequests[index].checkSuccessCount = result.checkSuccessCount
+                prList.pullRequests[index].checkFailureCount = result.checkFailureCount
+                prList.pullRequests[index].checkPendingCount = result.checkPendingCount
+                prList.pullRequests[index].ciExtendedInfo = result.ciExtendedInfo
                 logger.info("Refreshed single PR CI status for #\(pr.number): \(result.ciStatus?.rawValue ?? "nil")")
             }
         } catch {
