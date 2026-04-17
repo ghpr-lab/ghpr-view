@@ -41,11 +41,30 @@ jobs:
           -configuration Release \
           -sdk macosx \
           -arch arm64 \
-          CODE_SIGN_IDENTITY="" \
-          CODE_SIGNING_REQUIRED=NO \
-          CODE_SIGNING_ALLOWED=NO \
+          CODE_SIGN_IDENTITY="-" \
+          CODE_SIGNING_REQUIRED=YES \
+          CODE_SIGNING_ALLOWED=YES \
           "${EXTRA_ARGS[@]}" \
           build
+
+    - name: Pin designated requirement
+      run: |
+        APP_PATH="$(find ~/Library/Developer/Xcode/DerivedData/PRDashboard-*/Build/Products/Release \
+          -maxdepth 2 -name 'PRDashboard.app' -type d | head -1)"
+        if [ -z "$APP_PATH" ]; then
+          echo "Error: PRDashboard.app not found"
+          exit 1
+        fi
+        REQ_FILE="$(mktemp)"
+        echo 'designated => identifier "com.xiaocang.PRDashboard"' > "$REQ_FILE"
+        codesign --force --sign - \
+          --identifier com.xiaocang.PRDashboard \
+          --requirements "$REQ_FILE" \
+          --timestamp=none \
+          "$APP_PATH"
+        rm -f "$REQ_FILE"
+        codesign --verify --strict "$APP_PATH"
+        codesign -d -r- "$APP_PATH"
 
     - name: Create Release Artifact
       run: |
