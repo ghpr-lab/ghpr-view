@@ -372,7 +372,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
                 // Try to fallback to stale cache on API error
                 if !self.prList.hasUsableData,
-                   let cached = PRCache.shared.load(ignoreExpiry: true) {
+                   let cached = PRCache.shared.load() {
                     self.prList = cached
                     self.prList.error = error  // Still show error to indicate stale data
                     self.previousPRs = Dictionary(uniqueKeysWithValues: cached.pullRequests.map { ($0.id, $0) })
