@@ -342,11 +342,11 @@ struct SettingsView: View {
     }
 
     private struct HelpHint: View {
-        let text: LocalizedStringKey
+        let text: String
         @State private var isShown = false
         @State private var hoverTask: Task<Void, Never>?
 
-        init(_ text: LocalizedStringKey) {
+        init(_ text: String) {
             self.text = text
         }
 
@@ -361,7 +361,7 @@ struct SettingsView: View {
                         hoverTask = Task {
                             try? await Task.sleep(nanoseconds: 500_000_000)
                             if !Task.isCancelled {
-                                isShown = true
+                                await MainActor.run { isShown = true }
                             }
                         }
                     } else {
@@ -372,7 +372,7 @@ struct SettingsView: View {
                     Text(text)
                         .font(.system(size: 12))
                         .padding(10)
-                        .frame(maxWidth: 280)
+                        .frame(width: 280, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 .onDisappear {
