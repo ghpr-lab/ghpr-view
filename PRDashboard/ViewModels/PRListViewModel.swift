@@ -224,6 +224,14 @@ final class PRListViewModel: ObservableObject {
         prManager.refresh()
     }
 
+    func clearCaches() {
+        PRCache.shared.clear()
+        PRDetailCache.shared.clear()
+        MentionCache.shared.clear()
+        AvatarCache.shared.clear()
+        prManager.refresh()
+    }
+
     func showSettings() {
         openSettings?()
     }

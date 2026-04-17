@@ -1224,8 +1224,12 @@ final class GitHubAPIClient: ObservableObject {
             }
             name
         }
-        reviewThreads {
+        reviewThreads(last: 50) {
             totalCount
+            nodes {
+                isResolved
+                isOutdated
+            }
         }
         comments {
             totalCount
@@ -1316,12 +1320,18 @@ final class GitHubAPIClient: ObservableObject {
         ) -> IndexedPR? {
             guard let databaseId = node.databaseId else { return nil }
             let lastCommit = node.commits?.nodes.first?.commit
+            // Sampled from last 50 threads; for PRs with more, resolution
+            // changes on older threads rely on the TTL to eventually refresh.
+            let sampledUnresolved = node.reviewThreads?.nodes?
+                .lazy.filter { !$0.isResolved && !$0.isOutdated }
+                .count ?? 0
             let snapshot = IndexSnapshot(
                 updatedAt: node.updatedAt,
                 headOid: lastCommit?.oid,
                 reviewThreadTotal: node.reviewThreads?.totalCount ?? 0,
                 commentTotal: node.comments?.totalCount ?? 0,
-                reviewTotal: node.reviews?.totalCount ?? 0
+                reviewTotal: node.reviews?.totalCount ?? 0,
+                unresolvedReviewThreadCount: sampledUnresolved
             )
             return IndexedPR(
                 databaseId: databaseId,
@@ -1974,7 +1984,14 @@ final class GitHubAPIClient: ObservableObject {
             let additional = await fetchAllAdditionalReviewThreads(enrichmentInfos: reviewThreadEnrichment)
             for (id, threads) in additional {
                 guard var pr = parsed[id] else { continue }
-                pr.reviewThreads = threads + pr.reviewThreads
+                let freshIds = Set(pr.reviewThreads.map { $0.id })
+                var merged: [ReviewThread] = []
+                merged.reserveCapacity(threads.count + pr.reviewThreads.count)
+                for thread in threads where !freshIds.contains(thread.id) {
+                    merged.append(thread)
+                }
+                merged.append(contentsOf: pr.reviewThreads)
+                pr.reviewThreads = merged
                 parsed[id] = pr
             }
         }
@@ -3188,7 +3205,7 @@ private struct IndexGraphQLResponse: Decodable {
         let mergeStateStatus: String?
         let author: Author?
         let repository: Repository
-        let reviewThreads: TotalCountContainer?
+        let reviewThreads: ReviewThreadsSummary?
         let comments: TotalCountContainer?
         let reviews: TotalCountContainer?
         let commits: CommitsContainer?
@@ -3210,6 +3227,16 @@ private struct IndexGraphQLResponse: Decodable {
 
     struct TotalCountContainer: Decodable {
         let totalCount: Int
+    }
+
+    struct ReviewThreadsSummary: Decodable {
+        let totalCount: Int
+        let nodes: [ReviewThreadStateNode]?
+    }
+
+    struct ReviewThreadStateNode: Decodable {
+        let isResolved: Bool
+        let isOutdated: Bool
     }
 
     struct CommitsContainer: Decodable {

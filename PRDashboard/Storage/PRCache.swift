@@ -71,6 +71,29 @@ struct IndexSnapshot: Codable, Equatable {
     let reviewThreadTotal: Int
     let commentTotal: Int
     let reviewTotal: Int
+    /// Resolving a review thread on GitHub bumps neither `updatedAt` nor any
+    /// count field, so without this extra dimension the cached PR detail
+    /// (and its stale `isResolved` flags) would be reused for the full TTL.
+    let unresolvedReviewThreadCount: Int
+}
+
+extension IndexSnapshot {
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        updatedAt = try c.decode(Date.self, forKey: .updatedAt)
+        headOid = try c.decodeIfPresent(String.self, forKey: .headOid)
+        reviewThreadTotal = try c.decode(Int.self, forKey: .reviewThreadTotal)
+        commentTotal = try c.decode(Int.self, forKey: .commentTotal)
+        reviewTotal = try c.decode(Int.self, forKey: .reviewTotal)
+        // Sentinel (-1) for pre-upgrade cache entries that never recorded this
+        // field: forces one-time cache-miss so the cached detail (which may
+        // carry stale `isResolved` flags) is refetched once, not silently
+        // reused because both old and new snapshots happen to read 0.
+        unresolvedReviewThreadCount = try c.decodeIfPresent(
+            Int.self,
+            forKey: .unresolvedReviewThreadCount
+        ) ?? -1
+    }
 }
 
 struct CachedPRDetail: Codable {

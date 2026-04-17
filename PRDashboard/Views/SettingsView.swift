@@ -170,6 +170,12 @@ struct SettingsView: View {
                         dismiss()
                     }
 
+                    Button("Clear cached PR data") {
+                        viewModel.clearCaches()
+                        dismiss()
+                    }
+                    .foregroundColor(.red)
+
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
                             Text("GraphQL endpoint override")

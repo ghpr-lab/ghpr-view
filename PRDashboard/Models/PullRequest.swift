@@ -119,7 +119,7 @@ struct PullRequest: Identifiable, Codable, Equatable {
     }
 
     var unresolvedCount: Int {
-        reviewThreads.filter { !$0.isResolved && !$0.isOutdated }.count
+        reviewThreads.lazy.filter(\.isUnresolved).count
     }
 
     var repoFullName: String {

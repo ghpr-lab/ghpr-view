@@ -11,6 +11,10 @@ struct ReviewThread: Identifiable, Codable {
     var latestComment: ReviewComment? {
         comments.last
     }
+
+    var isUnresolved: Bool {
+        !isResolved && !isOutdated
+    }
 }
 
 struct ReviewComment: Identifiable, Codable {

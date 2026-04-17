@@ -496,6 +496,16 @@
         }
       }
     },
+    "Clear cached PR data": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除缓存的 PR 数据"
+          }
+        }
+      }
+    },
     "Code expired. Please try again.": {
       "localizations": {
         "zh-Hans": {
