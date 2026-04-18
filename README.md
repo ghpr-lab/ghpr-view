@@ -48,7 +48,7 @@ brew install xiaocang/tap/prdashboard
 
 ### Option 2: Personal Access Token (PAT)
 
-1. Create a [Personal Access Token](https://github.com/settings/tokens) with `repo` scope
+1. Create a [Personal Access Token](https://github.com/settings/tokens) with `["repo", "read:user", "workflow"]` scope
 2. Click the menu bar icon to open the dashboard
 3. Click "Sign in with GitHub", then "Use Personal Access Token"
 4. Paste your token and click "Sign In"
