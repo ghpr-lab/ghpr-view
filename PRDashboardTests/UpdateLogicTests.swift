@@ -201,6 +201,12 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(references.isEmpty)
     }
 
+    func testPATScopeMatcherAcceptsBroaderUserScopeForReadUserRequirement() {
+        XCTAssertTrue(GitHubOAuthManager.grantedScopes(["user"], satisfy: "read:user"))
+        XCTAssertTrue(GitHubOAuthManager.grantedScopes(["repo", "user"], satisfy: "read:user"))
+        XCTAssertFalse(GitHubOAuthManager.grantedScopes(["read:org"], satisfy: "read:user"))
+    }
+
     func testPRListKeepsMentionedPRsOutOfAuthoredBadgeCount() {
         let mentionedPR = makePullRequest(
             id: 1,
