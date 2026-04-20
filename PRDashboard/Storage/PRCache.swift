@@ -94,6 +94,16 @@ extension IndexSnapshot {
             forKey: .unresolvedReviewThreadCount
         ) ?? -1
     }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(updatedAt, forKey: .updatedAt)
+        try c.encodeIfPresent(headOid, forKey: .headOid)
+        try c.encode(reviewThreadTotal, forKey: .reviewThreadTotal)
+        try c.encode(commentTotal, forKey: .commentTotal)
+        try c.encode(reviewTotal, forKey: .reviewTotal)
+        try c.encode(unresolvedReviewThreadCount, forKey: .unresolvedReviewThreadCount)
+    }
 }
 
 struct CachedPRDetail: Codable {

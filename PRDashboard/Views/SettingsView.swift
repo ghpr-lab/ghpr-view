@@ -23,6 +23,7 @@ struct SettingsView: View {
     @State private var httpProxyPassword: String = ""
     @State private var showPATSwitchSheet = false
     @State private var newPATToken = ""
+    @State private var showClearCacheConfirmation = false
 
     private let refreshIntervalOptions: [(LocalizedStringKey, Double)] = [
         ("1 minute", 60),
@@ -171,10 +172,22 @@ struct SettingsView: View {
                     }
 
                     Button("Clear cached PR data") {
-                        viewModel.clearCaches()
-                        dismiss()
+                        showClearCacheConfirmation = true
                     }
                     .foregroundColor(.red)
+                    .confirmationDialog(
+                        "Clear cached PR data?",
+                        isPresented: $showClearCacheConfirmation,
+                        titleVisibility: .visible
+                    ) {
+                        Button("Clear", role: .destructive) {
+                            viewModel.clearCaches()
+                            dismiss()
+                        }
+                        Button("Cancel", role: .cancel) {}
+                    } message: {
+                        Text("This removes all cached PRs, details, mentions, and avatars. The next refresh will refetch everything from GitHub.")
+                    }
 
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {

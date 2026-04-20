@@ -496,12 +496,32 @@
         }
       }
     },
+    "Clear": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "清除"
+          }
+        }
+      }
+    },
     "Clear cached PR data": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "清除缓存的 PR 数据"
+          }
+        }
+      }
+    },
+    "Clear cached PR data?": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "是否清除缓存的 PR 数据？"
           }
         }
       }
@@ -1464,6 +1484,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "这里是你收到的未解决评论总数。"
+          }
+        }
+      }
+    },
+    "This removes all cached PRs, details, mentions, and avatars. The next refresh will refetch everything from GitHub.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这将删除所有缓存的 PR、详情、提及和头像。下次刷新时将从 GitHub 重新获取全部数据。"
           }
         }
       }

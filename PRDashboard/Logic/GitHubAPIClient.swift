@@ -1227,6 +1227,14 @@ final class GitHubAPIClient: ObservableObject {
         reviewThreads(last: 50) {
             totalCount
             nodes {
+                id
+                isResolved
+                isOutdated
+            }
+        }
+        oldestReviewThreads: reviewThreads(first: 50) {
+            nodes {
+                id
                 isResolved
                 isOutdated
             }
@@ -1320,11 +1328,23 @@ final class GitHubAPIClient: ObservableObject {
         ) -> IndexedPR? {
             guard let databaseId = node.databaseId else { return nil }
             let lastCommit = node.commits?.nodes.first?.commit
-            // Sampled from last 50 threads; for PRs with more, resolution
-            // changes on older threads rely on the TTL to eventually refresh.
-            let sampledUnresolved = node.reviewThreads?.nodes?
-                .lazy.filter { !$0.isResolved && !$0.isOutdated }
-                .count ?? 0
+            // Sampled from the first 50 and last 50 threads; for PRs with
+            // more, resolution changes on the middle slice rely on the TTL
+            // to eventually refresh.
+            let newestNodes = node.reviewThreads?.nodes ?? []
+            let oldestNodes = node.oldestReviewThreads?.nodes ?? []
+            var seenThreadIds = Set<String>()
+            var sampledUnresolved = 0
+            for threadNode in newestNodes where seenThreadIds.insert(threadNode.id).inserted {
+                if !threadNode.isResolved && !threadNode.isOutdated {
+                    sampledUnresolved += 1
+                }
+            }
+            for threadNode in oldestNodes where seenThreadIds.insert(threadNode.id).inserted {
+                if !threadNode.isResolved && !threadNode.isOutdated {
+                    sampledUnresolved += 1
+                }
+            }
             let snapshot = IndexSnapshot(
                 updatedAt: node.updatedAt,
                 headOid: lastCommit?.oid,
@@ -3206,6 +3226,7 @@ private struct IndexGraphQLResponse: Decodable {
         let author: Author?
         let repository: Repository
         let reviewThreads: ReviewThreadsSummary?
+        let oldestReviewThreads: ReviewThreadsSummary?
         let comments: TotalCountContainer?
         let reviews: TotalCountContainer?
         let commits: CommitsContainer?
@@ -3235,6 +3256,7 @@ private struct IndexGraphQLResponse: Decodable {
     }
 
     struct ReviewThreadStateNode: Decodable {
+        let id: String
         let isResolved: Bool
         let isOutdated: Bool
     }
