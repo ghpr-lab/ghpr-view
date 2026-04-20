@@ -1233,6 +1233,7 @@ final class GitHubAPIClient: ObservableObject {
             }
         }
         oldestReviewThreads: reviewThreads(first: 50) {
+            totalCount
             nodes {
                 id
                 isResolved
