@@ -78,6 +78,15 @@ struct IndexSnapshot: Codable, Equatable {
 }
 
 extension IndexSnapshot {
+    private enum CodingKeys: String, CodingKey {
+        case updatedAt
+        case headOid
+        case reviewThreadTotal
+        case commentTotal
+        case reviewTotal
+        case unresolvedReviewThreadCount
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
