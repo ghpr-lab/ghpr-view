@@ -10,7 +10,7 @@ class GitHubOAuthManager: NSObject, ObservableObject {
     // GitHub classic PAT scopes are not strictly prefix-structured.
     // For example, `user` is broader than `read:user`, but does not share
     // a `read:user:` prefix, so we encode those implications explicitly.
-    nonisolated static let impliedScopesByGrantedScope: [String: Set<String>] = [
+    private nonisolated static let impliedScopesByGrantedScope: [String: Set<String>] = [
         "user": ["read:user"]
     ]
 
@@ -144,8 +144,8 @@ class GitHubOAuthManager: NSObject, ObservableObject {
 
     // Accept exact matches, prefix-shaped subscopes, and the explicit broader
     // classic-scope implications declared above.
-    nonisolated static func grantedScopes(_ grantedScopes: [String], satisfy requiredScope: String) -> Bool {
-        grantedScopes.contains { grantedScope in
+    nonisolated static func grantedScopes(_ scopes: [String], satisfy requiredScope: String) -> Bool {
+        scopes.contains { grantedScope in
             if grantedScope == requiredScope || grantedScope.hasPrefix("\(requiredScope):") {
                 return true
             }
