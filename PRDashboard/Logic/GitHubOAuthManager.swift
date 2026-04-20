@@ -7,6 +7,12 @@ class GitHubOAuthManager: NSObject, ObservableObject {
     // Create at: https://github.com/settings/developers
     private let clientID = "Ov23liGCAVv1nOHzVVhf"
     private let scope = "repo read:user workflow"
+    // GitHub classic PAT scopes are not strictly prefix-structured.
+    // For example, `user` is broader than `read:user`, but does not share
+    // a `read:user:` prefix, so we encode those implications explicitly.
+    private nonisolated static let impliedScopesByGrantedScope: [String: Set<String>] = [
+        "user": ["read:user"]
+    ]
 
     @Published private(set) var authState: AuthState = .empty
     @Published private(set) var isAuthenticating = false
@@ -76,10 +82,11 @@ class GitHubOAuthManager: NSObject, ObservableObject {
                 throw PATError.invalidToken
             }
 
-            // Check required scopes
+            // Match required scopes through the helper so broader classic scopes
+            // like `user` count for narrower requirements like `read:user`.
             let requiredScopes = ["repo", "read:user", "workflow"]
             let missingScopes = requiredScopes.filter { required in
-                !scopes.contains { $0 == required || $0.hasPrefix("\(required):") }
+                !Self.grantedScopes(scopes, satisfy: required)
             }
 
             if !missingScopes.isEmpty {
@@ -133,6 +140,18 @@ class GitHubOAuthManager: NSObject, ObservableObject {
         }
 
         return (true, scopes)
+    }
+
+    // Accept exact matches, prefix-shaped subscopes, and the explicit broader
+    // classic-scope implications declared above.
+    nonisolated static func grantedScopes(_ scopes: [String], satisfy requiredScope: String) -> Bool {
+        scopes.contains { grantedScope in
+            if grantedScope == requiredScope || grantedScope.hasPrefix("\(requiredScope):") {
+                return true
+            }
+
+            return impliedScopesByGrantedScope[grantedScope]?.contains(requiredScope) == true
+        }
     }
 
     func loadSavedAuth() {
