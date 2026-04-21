@@ -68,6 +68,9 @@ struct MentionCacheEntry: Codable, Equatable {
 struct IndexSnapshot: Codable, Equatable {
     let updatedAt: Date
     let headOid: String?
+    /// GitHub PR `updatedAt` does not reliably change when only CI moves, so
+    /// cache invalidation needs the latest rollup state as a separate signal.
+    let ciRollupState: String?
     let reviewThreadTotal: Int
     let commentTotal: Int
     let reviewTotal: Int
@@ -81,16 +84,26 @@ extension IndexSnapshot {
     private enum CodingKeys: String, CodingKey {
         case updatedAt
         case headOid
+        case ciRollupState
         case reviewThreadTotal
         case commentTotal
         case reviewTotal
         case unresolvedReviewThreadCount
     }
 
+    private static let missingCIRollupStateSentinel = "__missing_ci_rollup_state__"
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         updatedAt = try c.decode(Date.self, forKey: .updatedAt)
         headOid = try c.decodeIfPresent(String.self, forKey: .headOid)
+        // Sentinel for pre-upgrade cache entries that never recorded CI rollup
+        // state: forces a one-time cache miss so stale CI status does not keep
+        // getting reused solely because `updatedAt` and `headOid` stayed flat.
+        ciRollupState = try c.decodeIfPresent(
+            String.self,
+            forKey: .ciRollupState
+        ) ?? Self.missingCIRollupStateSentinel
         reviewThreadTotal = try c.decode(Int.self, forKey: .reviewThreadTotal)
         commentTotal = try c.decode(Int.self, forKey: .commentTotal)
         reviewTotal = try c.decode(Int.self, forKey: .reviewTotal)
@@ -108,6 +121,12 @@ extension IndexSnapshot {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(updatedAt, forKey: .updatedAt)
         try c.encodeIfPresent(headOid, forKey: .headOid)
+        // Never persist the migration sentinel: it's a one-shot decode-time
+        // marker. Writing it back would leave legacy entries permanently
+        // unequal to any real rollup state, defeating a future read where
+        // the field *is* present.
+        let rollupForEncode = ciRollupState == Self.missingCIRollupStateSentinel ? nil : ciRollupState
+        try c.encodeIfPresent(rollupForEncode, forKey: .ciRollupState)
         try c.encode(reviewThreadTotal, forKey: .reviewThreadTotal)
         try c.encode(commentTotal, forKey: .commentTotal)
         try c.encode(reviewTotal, forKey: .reviewTotal)
@@ -121,13 +140,14 @@ struct CachedPRDetail: Codable {
     let detail: PullRequest
     let detailFetchedAt: Date
 
-    /// Cache hit when index scalars match AND within TTL.
-    /// updatedAt bumps whenever anything material changes on GitHub's side
-    /// (new comment, thread resolved, review added, CI updated), so it's the
-    /// primary signal. The TTL is a 24h sanity net against undetected drift.
+    /// Cache hit when index scalars match, the entry is still within TTL, and
+    /// the cached CI state is terminal. GitHub PR `updatedAt` is not a reliable
+    /// signal for CI-only changes, so in-flight CI results are always refreshed
+    /// on the next normal poll instead of being reused for the full TTL.
     func isUsable(against snapshot: IndexSnapshot, now: Date, ttl: TimeInterval) -> Bool {
         guard indexSnapshot == snapshot else { return false }
-        return now.timeIntervalSince(detailFetchedAt) < ttl
+        guard now.timeIntervalSince(detailFetchedAt) < ttl else { return false }
+        return !detail.ciIsInFlight
     }
 }
 

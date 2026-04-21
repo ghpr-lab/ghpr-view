@@ -113,6 +113,9 @@ struct PullRequest: Identifiable, Codable, Equatable {
 
     var ciIsRunning: Bool { ciExtendedInfo?.isRunning ?? false }
     var ciWorkflows: [CIWorkflowInfo] { ciExtendedInfo?.workflows ?? [] }
+    var ciIsInFlight: Bool {
+        ciStatus == .pending || checkPendingCount > 0 || ciIsRunning
+    }
 
     var checkTotalCount: Int {
         checkSuccessCount + checkFailureCount + checkPendingCount

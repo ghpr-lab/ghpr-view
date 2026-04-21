@@ -245,6 +245,131 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(list.totalUnresolvedCount, 0)
     }
 
+    func testCachedPRDetailInvalidatesWhenCIRollupStateChangesWithoutPRUpdate() {
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        let cachedSnapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "PENDING")
+        let freshSnapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "FAILURE")
+        let cached = CachedPRDetail(
+            prId: 17229,
+            indexSnapshot: cachedSnapshot,
+            detail: makePullRequest(id: 17229, number: 17229, category: .authored),
+            detailFetchedAt: now
+        )
+
+        XCTAssertFalse(cached.isUsable(against: freshSnapshot, now: now, ttl: PRDetailCache.ttl))
+    }
+
+    func testIndexSnapshotDecodeWithoutCIRollupStateForcesCacheMiss() throws {
+        struct LegacyIndexSnapshot: Codable {
+            let updatedAt: Date
+            let headOid: String?
+            let reviewThreadTotal: Int
+            let commentTotal: Int
+            let reviewTotal: Int
+            let unresolvedReviewThreadCount: Int
+        }
+
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        let legacy = LegacyIndexSnapshot(
+            updatedAt: now,
+            headOid: "f574918fa04b0c7ac49de5b1f3876c430d16e81c",
+            reviewThreadTotal: 0,
+            commentTotal: 0,
+            reviewTotal: 0,
+            unresolvedReviewThreadCount: 0
+        )
+        let decoded = try JSONDecoder().decode(IndexSnapshot.self, from: JSONEncoder().encode(legacy))
+        let current = makeIndexSnapshot(
+            updatedAt: now,
+            headOid: "f574918fa04b0c7ac49de5b1f3876c430d16e81c",
+            ciRollupState: "PENDING"
+        )
+        let cached = CachedPRDetail(
+            prId: 17229,
+            indexSnapshot: decoded,
+            detail: makePullRequest(id: 17229, number: 17229, category: .authored),
+            detailFetchedAt: now
+        )
+
+        XCTAssertNotEqual(decoded, current)
+        XCTAssertFalse(cached.isUsable(against: current, now: now, ttl: PRDetailCache.ttl))
+    }
+
+    func testCachedPRDetailDoesNotReuseRunningCIWhenSnapshotMatches() {
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        let snapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "PENDING")
+        var pr = makePullRequest(id: 17229, number: 17229, category: .authored)
+        pr.ciStatus = .pending
+        pr.checkSuccessCount = 42
+        pr.checkPendingCount = 1
+        pr.githubCIState = "PENDING"
+        pr.ciExtendedInfo = CIExtendedInfo(isRunning: true, workflows: [])
+
+        let cached = CachedPRDetail(
+            prId: pr.id,
+            indexSnapshot: snapshot,
+            detail: pr,
+            detailFetchedAt: now
+        )
+
+        XCTAssertFalse(cached.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
+    }
+
+    func testCachedPRDetailReusesTerminalCIWhenSnapshotMatches() {
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        let snapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "SUCCESS")
+        var pr = makePullRequest(id: 7, number: 7, category: .authored)
+        pr.ciStatus = .success
+        pr.checkSuccessCount = 12
+        pr.checkPendingCount = 0
+        pr.githubCIState = "SUCCESS"
+        pr.ciExtendedInfo = CIExtendedInfo(isRunning: false, workflows: [])
+
+        let cached = CachedPRDetail(
+            prId: pr.id,
+            indexSnapshot: snapshot,
+            detail: pr,
+            detailFetchedAt: now
+        )
+
+        XCTAssertTrue(cached.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
+    }
+
+    func testKongStyleRunningToFailureSnapshotChangeCausesCacheMiss() {
+        let updatedAt = Date(timeIntervalSince1970: 1_713_666_108)
+        let headOid = "f574918fa04b0c7ac49de5b1f3876c430d16e81c"
+        let pendingSnapshot = makeIndexSnapshot(
+            updatedAt: updatedAt,
+            headOid: headOid,
+            ciRollupState: "PENDING"
+        )
+        let failedSnapshot = makeIndexSnapshot(
+            updatedAt: updatedAt,
+            headOid: headOid,
+            ciRollupState: "FAILURE"
+        )
+        var pr = makePullRequest(id: 17229, number: 17229, category: .authored)
+        pr.ciStatus = .pending
+        pr.checkSuccessCount = 87
+        pr.checkPendingCount = 1
+        pr.githubCIState = "PENDING"
+        pr.ciExtendedInfo = CIExtendedInfo(isRunning: true, workflows: [])
+        let cached = CachedPRDetail(
+            prId: pr.id,
+            indexSnapshot: pendingSnapshot,
+            detail: pr,
+            detailFetchedAt: Date(timeIntervalSince1970: 1_713_666_200)
+        )
+
+        XCTAssertFalse(
+            cached.isUsable(
+                against: failedSnapshot,
+                now: Date(timeIntervalSince1970: 1_713_666_201),
+                ttl: PRDetailCache.ttl
+            )
+        )
+    }
+
     private func makeRelease(assets: [String]) throws -> ReleaseInfo {
         let json = """
         {
@@ -262,6 +387,26 @@ final class UpdateLogicTests: XCTestCase {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(ReleaseInfo.self, from: Data(json.utf8))
+    }
+
+    private func makeIndexSnapshot(
+        updatedAt: Date = Date(timeIntervalSince1970: 1_713_666_108),
+        headOid: String? = "abc123",
+        ciRollupState: String? = "SUCCESS",
+        reviewThreadTotal: Int = 0,
+        commentTotal: Int = 0,
+        reviewTotal: Int = 0,
+        unresolvedReviewThreadCount: Int = 0
+    ) -> IndexSnapshot {
+        IndexSnapshot(
+            updatedAt: updatedAt,
+            headOid: headOid,
+            ciRollupState: ciRollupState,
+            reviewThreadTotal: reviewThreadTotal,
+            commentTotal: commentTotal,
+            reviewTotal: reviewTotal,
+            unresolvedReviewThreadCount: unresolvedReviewThreadCount
+        )
     }
 
     private func makePullRequest(

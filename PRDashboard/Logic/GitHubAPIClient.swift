@@ -344,9 +344,10 @@ final class GitHubAPIClient: ObservableObject {
     }
 
     /// Index-first, cache-aware refresh. Runs a cheap scalar-only "index" query
-    /// then fetches detail only for PRs whose index snapshot changed. Emits
-    /// intermediate `onProgress` frames so the UI can paint as soon as index
-    /// returns and re-paint after each detail batch.
+    /// then fetches detail only for PRs whose index snapshot changed or whose
+    /// cached CI state is still in flight. Emits intermediate `onProgress`
+    /// frames so the UI can paint as soon as index returns and re-paint after
+    /// each detail batch.
     func fetchIncremental(
         username: String,
         onProgress: (@Sendable ([PullRequest], [PullRequest], IncrementalStage) async -> Void)? = nil
@@ -1251,6 +1252,9 @@ final class GitHubAPIClient: ObservableObject {
                 commit {
                     oid
                     committedDate
+                    statusCheckRollup {
+                        state
+                    }
                 }
             }
         }
@@ -1349,6 +1353,7 @@ final class GitHubAPIClient: ObservableObject {
             let snapshot = IndexSnapshot(
                 updatedAt: node.updatedAt,
                 headOid: lastCommit?.oid,
+                ciRollupState: lastCommit?.statusCheckRollup?.state.uppercased(),
                 reviewThreadTotal: node.reviewThreads?.totalCount ?? 0,
                 commentTotal: node.comments?.totalCount ?? 0,
                 reviewTotal: node.reviews?.totalCount ?? 0,
