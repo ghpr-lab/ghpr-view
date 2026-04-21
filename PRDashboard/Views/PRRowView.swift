@@ -80,6 +80,9 @@ struct PRRowView: View {
                             .padding(.vertical, 1)
                             .background(Color.blue.opacity(0.15))
                             .cornerRadius(4)
+                            .delayedHoverTooltip(
+                                String(localized: "This is the Jira ticket linked to this PR.")
+                            )
                     }
                 }
 
@@ -136,6 +139,12 @@ struct PRRowView: View {
 
                     if pr.unresolvedCount > 0 {
                         Badge(count: pr.unresolvedCount)
+                            .delayedHoverTooltip(
+                                String(
+                                    localized:
+                                        "This shows how many unresolved review comments this PR has."
+                                )
+                            )
                     }
                 }
             }

@@ -3,6 +3,7 @@ import SwiftUI
 struct MainView: View {
     @ObservedObject var viewModel: PRListViewModel
     @ObservedObject var onboardingManager: OnboardingManager
+    @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
     @State private var firstVisibleReviewStatusPRID: Int?
 
@@ -38,6 +39,11 @@ struct MainView: View {
             }
         }
         .frame(width: 400, height: 500)
+        .coordinateSpace(name: HoverTooltipCoordinateSpace.name)
+        .environment(\.hoverTooltipPresenter, tooltipPresenter)
+        .overlay(alignment: .topLeading) {
+            HoverTooltipOverlay(presenter: tooltipPresenter)
+        }
         .onAppear(perform: syncOnboardingState)
         .onChange(of: onboardingAvailableSteps) { _ in
             syncOnboardingState()
@@ -368,6 +374,9 @@ struct MainView: View {
                         .font(.system(size: 10))
                 }
                 .foregroundColor(.orange)
+                .delayedHoverTooltip(
+                    String(localized: "This is the total unresolved comments you received.")
+                )
 
                 unresolvedView.onboardingAnchor(
                     onboardingManager,

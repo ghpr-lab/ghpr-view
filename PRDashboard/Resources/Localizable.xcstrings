@@ -1488,6 +1488,36 @@
         }
       }
     },
+    "This is the Jira ticket linked to this PR.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这是此 PR 关联的 Jira ticket。"
+          }
+        }
+      }
+    },
+    "This PR has conflicts with the base branch.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这个 PR 与 base branch 有冲突。"
+          }
+        }
+      }
+    },
+    "This PR is a draft and not ready for review.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这是一个 draft PR，暂时还没准备好进入 review。"
+          }
+        }
+      }
+    },
     "This removes all cached PRs, details, mentions, and avatars. The next refresh will refetch everything from GitHub.": {
       "localizations": {
         "zh-Hans": {
@@ -1504,6 +1534,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "这里显示此 PR 收到的 approval 数量。"
+          }
+        }
+      }
+    },
+    "This shows how many unresolved review comments this PR has.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这里显示此 PR 当前有多少条未解决的 review comments。"
           }
         }
       }
