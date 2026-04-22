@@ -37,11 +37,14 @@
 		A1000060 /* OnboardingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000060 /* OnboardingManager.swift */; };
 		A1000061 /* OnboardingBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000061 /* OnboardingBubble.swift */; };
 		A1000062 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A2000062 /* Localizable.xcstrings */; };
+		A1000063 /* CIDiagnosisMockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000063 /* CIDiagnosisMockView.swift */; };
+		A1000064 /* CIDiagnosisMockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000064 /* CIDiagnosisMockViewModel.swift */; };
 		B1000001 /* AppUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* AppUpdate.swift */; };
 		B1000002 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* UpdateManager.swift */; };
 		B1000003 /* UpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* UpdateView.swift */; };
 		B1000004 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000006 /* XCTest.framework */; };
 		B1000005 /* UpdateLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000005 /* UpdateLogicTests.swift */; };
+		B1000006 /* CIDiagnosisMockViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000007 /* CIDiagnosisMockViewModelTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -87,11 +90,14 @@
 		A2000060 /* OnboardingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingManager.swift; sourceTree = "<group>"; };
 		A2000061 /* OnboardingBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingBubble.swift; sourceTree = "<group>"; };
 		A2000062 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		A2000063 /* CIDiagnosisMockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CIDiagnosisMockView.swift; sourceTree = "<group>"; };
+		A2000064 /* CIDiagnosisMockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CIDiagnosisMockViewModel.swift; sourceTree = "<group>"; };
 		A3000001 /* PRDashboard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PRDashboard.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2000001 /* AppUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdate.swift; sourceTree = "<group>"; };
 		B2000002 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
 		B2000003 /* UpdateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateView.swift; sourceTree = "<group>"; };
 		B2000005 /* UpdateLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateLogicTests.swift; sourceTree = "<group>"; };
+		B2000007 /* CIDiagnosisMockViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CIDiagnosisMockViewModelTests.swift; sourceTree = "<group>"; };
 		B2000006 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
 		B3000001 /* PRDashboardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PRDashboardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -183,6 +189,7 @@
 		A5000006 /* ViewModels */ = {
 			isa = PBXGroup;
 			children = (
+				A2000064 /* CIDiagnosisMockViewModel.swift */,
 				A2000007 /* PRListViewModel.swift */,
 			);
 			path = ViewModels;
@@ -191,6 +198,7 @@
 		A5000007 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				A2000063 /* CIDiagnosisMockView.swift */,
 				A2000003 /* MainView.swift */,
 				A2000004 /* PRRowView.swift */,
 				A2000005 /* SettingsView.swift */,
@@ -243,6 +251,7 @@
 		B5000012 /* PRDashboardTests */ = {
 			isa = PBXGroup;
 			children = (
+				B2000007 /* CIDiagnosisMockViewModelTests.swift */,
 				B2000005 /* UpdateLogicTests.swift */,
 			);
 			path = PRDashboardTests;
@@ -400,6 +409,7 @@
 				A1000011 /* Keychain.swift in Sources */,
 				A1000012 /* GitHubOAuthManager.swift in Sources */,
 				A1000060 /* OnboardingManager.swift in Sources */,
+				A1000064 /* CIDiagnosisMockViewModel.swift in Sources */,
 				B1000002 /* UpdateManager.swift in Sources */,
 				A1000013 /* DateFormatters.swift in Sources */,
 				A1000015 /* TimeIntervalHelpers.swift in Sources */,
@@ -411,6 +421,7 @@
 				A1000050 /* PRSummaryView.swift in Sources */,
 				B1000003 /* UpdateView.swift in Sources */,
 				A1000061 /* OnboardingBubble.swift in Sources */,
+				A1000063 /* CIDiagnosisMockView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -418,6 +429,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B1000006 /* CIDiagnosisMockViewModelTests.swift in Sources */,
 				B1000005 /* UpdateLogicTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -6,6 +6,7 @@ struct MainView: View {
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
     @State private var firstVisibleReviewStatusPRID: Int?
+    @State private var pendingCIDiagnosisContext: CIDiagnosisMockContext?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -43,6 +44,25 @@ struct MainView: View {
         .environment(\.hoverTooltipPresenter, tooltipPresenter)
         .overlay(alignment: .topLeading) {
             HoverTooltipOverlay(presenter: tooltipPresenter)
+        }
+        .overlay {
+            if let context = pendingCIDiagnosisContext {
+                ZStack {
+                    Color.black.opacity(0.16)
+                        .ignoresSafeArea()
+                        .onTapGesture {
+                            pendingCIDiagnosisContext = nil
+                        }
+
+                    CIDiagnosisEntryConfirmationView(
+                        context: context,
+                        onCheckFlakyFirst: { openCIDiagnosisMock(.checkFlakyFirst) },
+                        onRerunNow: { openCIDiagnosisMock(.rerunNow) },
+                        onCancel: { pendingCIDiagnosisContext = nil }
+                    )
+                }
+                .transition(.opacity)
+            }
         }
         .onAppear(perform: syncOnboardingState)
         .onChange(of: onboardingAvailableSteps) { _ in
@@ -123,7 +143,7 @@ struct MainView: View {
                                 pr: pr,
                                 onOpen: { viewModel.openPR(pr) },
                                 onCopyURL: { viewModel.copyURL(pr) },
-                                onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
+                                onRerunFailedCI: { presentCIDiagnosisConfirmation(for: pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
                                 onToggleCIAutoRetry: {
                                     if viewModel.ciAutoRetryRound(for: pr) != nil {
@@ -226,7 +246,7 @@ struct MainView: View {
                 pr: pr,
                 onOpen: { viewModel.openPR(pr) },
                 onCopyURL: { viewModel.copyURL(pr) },
-                onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
+                onRerunFailedCI: { presentCIDiagnosisConfirmation(for: pr) },
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
                 isPinned: showPin && viewModel.isPinned(pr),
                 showCIStatus: showCIStatus,
@@ -442,6 +462,17 @@ struct MainView: View {
         if viewModel.prList.hasUsableData {
             onboardingManager.startIfNeeded()
         }
+    }
+
+    private func presentCIDiagnosisConfirmation(for pr: PullRequest) {
+        // TODO: Replace this temporary prototype routing with the real CI diagnosis flow.
+        pendingCIDiagnosisContext = viewModel.ciDiagnosisMockContext(for: pr)
+    }
+
+    private func openCIDiagnosisMock(_ launchMode: CIDiagnosisMockLaunchMode) {
+        guard let pendingCIDiagnosisContext else { return }
+        viewModel.openCIDiagnosisMock(context: pendingCIDiagnosisContext, launchMode: launchMode)
+        self.pendingCIDiagnosisContext = nil
     }
 }
 

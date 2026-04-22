@@ -25,6 +25,7 @@ final class PRListViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     var openSettings: (() -> Void)?
+    var openCIDiagnosisMock: ((CIDiagnosisMockContext, CIDiagnosisMockLaunchMode) -> Void)?
 
     init(prManager: PRManager, oauthManager: GitHubOAuthManager) {
         self.prManager = prManager
@@ -318,6 +319,23 @@ final class PRListViewModel: ObservableObject {
                 logger.error("Failed to rerun CI for PR #\(pr.number): \(error.localizedDescription)")
             }
         }
+    }
+
+    func ciDiagnosisMockContext(for pr: PullRequest) -> CIDiagnosisMockContext {
+        CIDiagnosisMockContext(
+            repoFullName: pr.repoFullName,
+            number: pr.number,
+            title: pr.title,
+            url: pr.url
+        )
+    }
+
+    func openCIDiagnosisMock(for pr: PullRequest, launchMode: CIDiagnosisMockLaunchMode) {
+        openCIDiagnosisMock?(ciDiagnosisMockContext(for: pr), launchMode)
+    }
+
+    func openCIDiagnosisMock(context: CIDiagnosisMockContext, launchMode: CIDiagnosisMockLaunchMode) {
+        openCIDiagnosisMock?(context, launchMode)
     }
 
     // MARK: - Private

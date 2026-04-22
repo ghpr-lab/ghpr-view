@@ -12,6 +12,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var updateManager: UpdateManager?
     var settingsWindow: NSWindow?
     var updateWindow: NSWindow?
+    var ciDiagnosisMockWindow: NSWindow?
+    var ciDiagnosisMockViewModel: CIDiagnosisMockViewModel?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -46,6 +48,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Wire up settings window callback
         viewModel.openSettings = { [weak self] in
             self?.openSettingsWindow(viewModel: viewModel)
+        }
+        viewModel.openCIDiagnosisMock = { [weak self] context, launchMode in
+            self?.openCIDiagnosisMock(context: context, launchMode: launchMode)
         }
 
         // 6. Create main view
@@ -139,6 +144,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         updateWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func openCIDiagnosisMock(context: CIDiagnosisMockContext, launchMode: CIDiagnosisMockLaunchMode) {
+        if let ciDiagnosisMockViewModel {
+            ciDiagnosisMockViewModel.update(context: context, launchMode: launchMode)
+        } else {
+            let viewModel = CIDiagnosisMockViewModel(context: context, launchMode: launchMode)
+            let mockView = CIDiagnosisMockView(
+                viewModel: viewModel,
+                onClose: { [weak self] in
+                    self?.ciDiagnosisMockWindow?.close()
+                }
+            )
+            let hostingController = NSHostingController(rootView: mockView)
+
+            let window = NSWindow(contentViewController: hostingController)
+            window.title = String(localized: "CI Diagnosis")
+            window.styleMask = [.titled, .closable]
+            window.setContentSize(NSSize(width: 620, height: 480))
+            window.center()
+            window.isReleasedWhenClosed = false
+
+            ciDiagnosisMockWindow = window
+            ciDiagnosisMockViewModel = viewModel
+        }
+
+        ciDiagnosisMockWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
