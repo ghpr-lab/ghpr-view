@@ -61,27 +61,6 @@ export async function listFailedJobs(gh: GhContext, runId: number): Promise<GhJo
   return jobs;
 }
 
-export async function findFailedJobByName(
-  gh: GhContext,
-  runId: number,
-  jobName: string,
-): Promise<GhJob | null> {
-  const iter = gh.octokit.paginate.iterator(gh.octokit.rest.actions.listJobsForWorkflowRun, {
-    owner: gh.owner,
-    repo: gh.repo,
-    run_id: runId,
-    per_page: 100,
-  });
-  for await (const { data } of iter) {
-    for (const j of data) {
-      if (j.name === jobName && isFailedConclusion(j.conclusion)) {
-        return { id: j.id, name: j.name, conclusion: j.conclusion };
-      }
-    }
-  }
-  return null;
-}
-
 function mapWorkflowRun(run: {
   id: number;
   workflow_id: number;

@@ -12,7 +12,7 @@ import {
   makeGh,
 } from "./github.ts";
 import { filterNoisyFilenames, stripLogNoise } from "./preprocess.ts";
-import { tailTruncate } from "./logs.ts";
+import { sliceAroundFailure } from "./logs.ts";
 import { redactSecrets } from "./redact.ts";
 import { extractSignature } from "./signature.ts";
 import { emptyHistory, fetchFailureHistory, historyToSummary } from "./history.ts";
@@ -67,7 +67,7 @@ async function main(): Promise<void> {
   }
 
   const rawLogsBlob = rawLogs.join("");
-  const filteredLogsBlob = tailTruncate(filteredLogs.join(""), LOG_TAIL_BYTES);
+  const filteredLogsBlob = sliceAroundFailure(filteredLogs.join(""), LOG_TAIL_BYTES);
   const failureSignature = primaryJob ? jobSignatures.get(primaryJob.id) ?? extractSignature(primaryFilteredLog) : "";
 
   core.info(`Fetching PR diff filenames…`);
@@ -89,7 +89,7 @@ async function main(): Promise<void> {
   let currentRun: Awaited<ReturnType<typeof getWorkflowRun>> | null = null;
   if (primaryJob && failureSignature) {
     try {
-      core.info(`Fetching recent history for primary failed job "${primaryJob.name}"…`);
+      core.info(`Fetching recent workflow-level failure history (primary job: "${primaryJob.name}")…`);
       currentRun = await getWorkflowRun(gh, inputs.runId);
       history = await fetchFailureHistory(gh, {
         workflowId: currentRun.workflow_id,

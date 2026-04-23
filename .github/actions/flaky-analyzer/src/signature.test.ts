@@ -46,4 +46,19 @@ describe("extractSignature", () => {
 
     expect(signature.length).toBe(200);
   });
+
+  test("does not match 'fail' embedded in words like pipefail", () => {
+    const log = [
+      "shell: /usr/bin/bash --noprofile --norc -e -o pipefail {0}",
+      "setup complete",
+      "FAIL spec/foo.ts:10 expected 3 got 2",
+    ].join("\n");
+
+    expect(extractSignature(log)).toBe("FAIL <FILE> expected 3 got 2");
+  });
+
+  test("matches FAILED and FAILURE as standalone words", () => {
+    expect(extractSignature("setup ok\nFAILED spec/bar.go:42")).toBe("FAILED <FILE>");
+    expect(extractSignature("setup ok\nFAILURE: boom")).toBe("FAILURE: boom");
+  });
 });

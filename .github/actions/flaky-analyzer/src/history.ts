@@ -1,12 +1,13 @@
 import * as core from "@actions/core";
-import { fetchJobLog, findFailedJobByName, listRecentFailedRuns, type GhContext, type GhWorkflowRun } from "./github.ts";
+import { fetchJobLog, listFailedJobs, listRecentFailedRuns, type GhContext, type GhWorkflowRun } from "./github.ts";
 import { stripLogNoise } from "./preprocess.ts";
 import { redactSecrets } from "./redact.ts";
 import { extractSignature } from "./signature.ts";
 import type { HistorySummary } from "./schema.ts";
 
 const RUN_LIST_LIMIT = 20;
-const LOG_FETCH_CAP = 3;
+const RUN_SAMPLE_CAP = 3;
+const JOBS_PER_RUN_CAP = 10;
 
 export interface HistoryBucket {
   sampled: number;
@@ -61,35 +62,41 @@ async function sampleBucket(
   gh: GhContext,
   label: string,
   runs: GhWorkflowRun[],
-  jobName: string,
   signature: string,
 ): Promise<HistoryBucket> {
   const started = Date.now();
   const bucket = emptyBucket();
 
   for (const run of runs) {
-    if (bucket.sampled >= LOG_FETCH_CAP) break;
+    if (bucket.sampled >= RUN_SAMPLE_CAP) break;
 
-    let job = null;
+    let failedJobs;
     try {
-      job = await findFailedJobByName(gh, run.id, jobName);
+      failedJobs = await listFailedJobs(gh, run.id);
     } catch (err: unknown) {
-      core.warning(`History ${label}: failed to inspect jobs for run ${run.id}: ${(err as Error).message}`);
+      core.warning(`History ${label}: failed to list jobs for run ${run.id}: ${(err as Error).message}`);
       continue;
     }
-    if (!job) continue;
+    if (failedJobs.length === 0) continue;
 
-    let log = "";
-    try {
-      log = await fetchJobLog(gh, job.id);
-    } catch (err: unknown) {
-      core.warning(`History ${label}: failed to fetch log for job ${job.id}: ${(err as Error).message}`);
-      continue;
-    }
-
-    const candidateSignature = extractSignature(redactSecrets(stripLogNoise(log)));
     bucket.sampled += 1;
-    if (candidateSignature === signature) {
+    let matched = false;
+    const toInspect = failedJobs.slice(0, JOBS_PER_RUN_CAP);
+    for (const job of toInspect) {
+      let log = "";
+      try {
+        log = await fetchJobLog(gh, job.id);
+      } catch (err: unknown) {
+        core.warning(`History ${label}: failed to fetch log for job ${job.id}: ${(err as Error).message}`);
+        continue;
+      }
+      const candidateSignature = extractSignature(redactSecrets(stripLogNoise(log)));
+      if (candidateSignature === signature) {
+        matched = true;
+        break;
+      }
+    }
+    if (matched) {
       bucket.matches += 1;
       bucket.sample_urls.push(run.html_url);
     }
@@ -105,7 +112,7 @@ export async function fetchFailureHistory(
   gh: GhContext,
   opts: FetchHistoryOpts,
 ): Promise<HistoryJson> {
-  if (!opts.currentFailedJobName || !opts.currentSignature) {
+  if (!opts.currentSignature) {
     return emptyHistory(opts.currentSignature, opts.currentFailedJobName);
   }
 
@@ -123,8 +130,8 @@ export async function fetchFailureHistory(
 
     return {
       ...base,
-      main: await sampleBucket(gh, "main", mainRuns, opts.currentFailedJobName, opts.currentSignature),
-      recent_prs: await sampleBucket(gh, "recent_prs", prRuns, opts.currentFailedJobName, opts.currentSignature),
+      main: await sampleBucket(gh, "main", mainRuns, opts.currentSignature),
+      recent_prs: await sampleBucket(gh, "recent_prs", prRuns, opts.currentSignature),
     };
   } catch (err: unknown) {
     const message = (err as Error).message || String(err);
