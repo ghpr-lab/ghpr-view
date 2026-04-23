@@ -1,207 +1,156 @@
 import Foundation
 
-enum CIDiagnosisMockState: String, CaseIterable, Identifiable {
-    case likelyFlaky
-    case likelyBlocker
-    case rerunTriggered
+enum FlakyCIBotReportState: Equatable {
+    case likelyFlaky(score: Int)
+    case realIssue(score: Int)
+    case needsInvestigation(score: Int)
+    case analyzing
+    case outdated
 
-    var id: Self { self }
-
-    var pickerTitle: String {
+    var title: String {
         switch self {
         case .likelyFlaky:
-            return String(localized: "Flaky")
-        case .likelyBlocker:
-            return String(localized: "Blocker")
-        case .rerunTriggered:
-            return String(localized: "Waiting")
+            return String(localized: "Likely flaky")
+        case .realIssue:
+            return String(localized: "Likely real failure")
+        case .needsInvestigation:
+            return String(localized: "Needs investigation")
+        case .analyzing:
+            return String(localized: "Analysis in progress")
+        case .outdated:
+            return String(localized: "Result outdated")
         }
     }
 
-    var statusTitle: String {
+    var compactLabel: String {
         switch self {
-        case .likelyFlaky:
-            return String(localized: "Likely Flaky")
-        case .likelyBlocker:
-            return String(localized: "Likely Blocker")
-        case .rerunTriggered:
-            return String(localized: "Rerun Triggered")
+        case let .likelyFlaky(score):
+            return String(localized: "Flaky \(score)")
+        case let .realIssue(score):
+            return String(localized: "Real issue \(score)")
+        case let .needsInvestigation(score):
+            return String(localized: "Investigate \(score)")
+        case .analyzing:
+            return String(localized: "Analyzing")
+        case .outdated:
+            return String(localized: "Outdated")
         }
     }
 }
 
-enum CIDiagnosisMockLaunchMode {
-    case checkFlakyFirst
+enum FlakyCIBotLaunchMode {
+    case analyze
+    case openReport(result: FlakyCIBotReportState)
     case rerunNow
 }
 
-struct CIDiagnosisMockContext: Equatable {
+struct FlakyCIBotContext: Equatable {
     let repoFullName: String
     let number: Int
     let title: String
     let url: URL
 }
 
-struct CIDiagnosisMockRawExcerpt: Equatable {
-    let jobName: String
-    let stepName: String
-    let message: String
-}
-
-struct CIDiagnosisMockPresentation: Equatable {
-    let summarySecondaryText: String
-    let rationaleLines: [String]
+struct FlakyCIBotReportPresentation: Equatable {
+    let state: FlakyCIBotReportState
+    let scoreText: String
+    let evidenceLine: String
+    let updatedText: String
+    let detailLine: String
     let primaryActionTitle: String
     let primaryActionDisabled: Bool
     let secondaryActionTitle: String
-    let failurePatternScript: String
-    let failurePatternVariants: String
-    let failurePatternFailedJobs: String
-    let failurePatternCallout: String?
-    let changedFilesVerdict: String
-    let changedFiles: [String]
-    let copilotHeadline: String
-    let copilotBody: String
-    let rawEvidence: [CIDiagnosisMockRawExcerpt]
-    let showsProgress: Bool
 }
 
 @MainActor
-final class CIDiagnosisMockViewModel: ObservableObject {
-    @Published private(set) var context: CIDiagnosisMockContext
-    @Published var state: CIDiagnosisMockState
-    @Published var isRawEvidenceExpanded = false
-    @Published private(set) var rawEvidenceFocusToken = UUID()
-    @Published private(set) var isHighlightingRawEvidence = false
+final class FlakyCIBotReportViewModel: ObservableObject {
+    @Published private(set) var context: FlakyCIBotContext
+    @Published private(set) var state: FlakyCIBotReportState
 
-    init(context: CIDiagnosisMockContext, launchMode: CIDiagnosisMockLaunchMode) {
+    init(context: FlakyCIBotContext, launchMode: FlakyCIBotLaunchMode) {
         self.context = context
         self.state = Self.initialState(for: launchMode)
     }
 
-    func update(context: CIDiagnosisMockContext, launchMode: CIDiagnosisMockLaunchMode) {
+    func update(context: FlakyCIBotContext, launchMode: FlakyCIBotLaunchMode) {
         self.context = context
         state = Self.initialState(for: launchMode)
-        isRawEvidenceExpanded = false
-        isHighlightingRawEvidence = false
-        rawEvidenceFocusToken = UUID()
     }
 
-    func selectState(_ newState: CIDiagnosisMockState) {
-        state = newState
-        isHighlightingRawEvidence = false
+    func analyzeAgain() {
+        state = .analyzing
     }
 
-    func triggerRerun() {
-        state = .rerunTriggered
-        isHighlightingRawEvidence = false
+    func rerunFailedCI() {
+        state = .analyzing
     }
 
-    func revealRawEvidence() {
-        isRawEvidenceExpanded = true
-        isHighlightingRawEvidence = true
-        rawEvidenceFocusToken = UUID()
-    }
-
-    func setRawEvidenceExpanded(_ isExpanded: Bool) {
-        isRawEvidenceExpanded = isExpanded
-        if !isExpanded {
-            isHighlightingRawEvidence = false
-        }
-    }
-
-    var presentation: CIDiagnosisMockPresentation {
+    var presentation: FlakyCIBotReportPresentation {
         switch state {
-        case .likelyFlaky:
-            return CIDiagnosisMockPresentation(
-                summarySecondaryText: String(localized: "Low 22/100"),
-                rationaleLines: [
-                    String(localized: "3 failed jobs across 2 images point to the same e2e script."),
-                    String(localized: "This signature has not repeated after a rerun on this SHA.")
-                ],
-                primaryActionTitle: String(localized: "Rerun Once"),
+        case let .likelyFlaky(score):
+            return FlakyCIBotReportPresentation(
+                state: state,
+                scoreText: String(localized: "Score \(score)/100"),
+                evidenceLine: String(localized: "Based on 3 failed jobs across 2 images"),
+                updatedText: String(localized: "Updated 2m ago"),
+                detailLine: String(localized: "Bot report is available on GitHub as a Check Run and PR comment."),
+                primaryActionTitle: String(localized: "Open Check Run"),
                 primaryActionDisabled: false,
-                secondaryActionTitle: String(localized: "Open Failed Jobs"),
-                failurePatternScript: String(localized: "Same script: tests/e2e/auth/login.spec.ts"),
-                failurePatternVariants: String(localized: "Seen in: ubuntu-22.04, ubuntu-24.04, debian-bookworm"),
-                failurePatternFailedJobs: String(localized: "Failed jobs: 3"),
-                failurePatternCallout: nil,
-                changedFilesVerdict: String(localized: "Weak match with files changed in this PR"),
-                changedFiles: ["ci/auth.yml", "tests/helpers/session.ts", "docs/ci-notes.md"],
-                copilotHeadline: String(localized: "Copilot assessment: weakly related to current diff"),
-                copilotBody: String(localized: "The failure overlaps helper code indirectly, but the strongest signal is repeated cross-image failure."),
-                rawEvidence: Self.rawEvidence,
-                showsProgress: false
+                secondaryActionTitle: String(localized: "Open PR Comment")
             )
-        case .likelyBlocker:
-            return CIDiagnosisMockPresentation(
-                summarySecondaryText: String(localized: "Medium 46/100"),
-                rationaleLines: [
-                    String(localized: "The same failure signature reappeared after 1 rerun on the same commit."),
-                    String(localized: "This looks less like infra flakiness and more like a blocking issue.")
-                ],
-                primaryActionTitle: String(localized: "Open Failed Jobs"),
+        case let .realIssue(score):
+            return FlakyCIBotReportPresentation(
+                state: state,
+                scoreText: String(localized: "Score \(score)/100"),
+                evidenceLine: String(localized: "Repeated failure signature after rerun"),
+                updatedText: String(localized: "Updated 4m ago"),
+                detailLine: String(localized: "The bot found moderate overlap with helper and CI files."),
+                primaryActionTitle: String(localized: "Open Check Run"),
                 primaryActionDisabled: false,
-                secondaryActionTitle: String(localized: "Rerun Anyway"),
-                failurePatternScript: String(localized: "Same script: tests/e2e/auth/login.spec.ts"),
-                failurePatternVariants: String(localized: "Seen in: ubuntu-22.04, ubuntu-24.04, debian-bookworm"),
-                failurePatternFailedJobs: String(localized: "Failed jobs: 3"),
-                failurePatternCallout: String(localized: "Repeated after 1 rerun on this SHA"),
-                changedFilesVerdict: String(localized: "Moderate overlap with helper and CI files"),
-                changedFiles: ["ci/auth.yml", "tests/helpers/session.ts", "scripts/e2e-matrix.sh"],
-                copilotHeadline: String(localized: "Copilot assessment: possibly related to current diff"),
-                copilotBody: String(localized: "The retry repeated with the same script signature, and the changed helper paths overlap the failing test setup."),
-                rawEvidence: Self.rawEvidence,
-                showsProgress: false
+                secondaryActionTitle: String(localized: "Open PR Comment")
             )
-        case .rerunTriggered:
-            return CIDiagnosisMockPresentation(
-                summarySecondaryText: String(localized: "Waiting for fresh results"),
-                rationaleLines: [
-                    String(localized: "The rerun has been queued for the current commit."),
-                    String(localized: "Keep reviewing the evidence while the next workflow round reports back.")
-                ],
-                primaryActionTitle: String(localized: "Rerun Once"),
+        case let .needsInvestigation(score):
+            return FlakyCIBotReportPresentation(
+                state: state,
+                scoreText: String(localized: "Score \(score)/100"),
+                evidenceLine: String(localized: "Signals are inconclusive"),
+                updatedText: String(localized: "Updated recently"),
+                detailLine: String(localized: "Open the report evidence before rerunning or marking this as a real failure."),
+                primaryActionTitle: String(localized: "Open Check Run"),
+                primaryActionDisabled: false,
+                secondaryActionTitle: String(localized: "Open PR Comment")
+            )
+        case .analyzing:
+            return FlakyCIBotReportPresentation(
+                state: state,
+                scoreText: String(localized: "Score pending"),
+                evidenceLine: String(localized: "Flaky CI Bot is reading failed jobs and workflow logs"),
+                updatedText: String(localized: "Queued just now"),
+                detailLine: String(localized: "Results will be written back to GitHub when analysis completes."),
+                primaryActionTitle: String(localized: "Open Check Run"),
                 primaryActionDisabled: true,
-                secondaryActionTitle: String(localized: "Open Failed Jobs"),
-                failurePatternScript: String(localized: "Same script: tests/e2e/auth/login.spec.ts"),
-                failurePatternVariants: String(localized: "Seen in: ubuntu-22.04, ubuntu-24.04, debian-bookworm"),
-                failurePatternFailedJobs: String(localized: "Failed jobs: 3"),
-                failurePatternCallout: nil,
-                changedFilesVerdict: String(localized: "Weak match with files changed in this PR"),
-                changedFiles: ["ci/auth.yml", "tests/helpers/session.ts", "docs/ci-notes.md"],
-                copilotHeadline: String(localized: "Copilot assessment: weakly related to current diff"),
-                copilotBody: String(localized: "The strongest signal is still the cross-image failure pattern; wait for the rerun before escalating."),
-                rawEvidence: Self.rawEvidence,
-                showsProgress: true
+                secondaryActionTitle: String(localized: "Open PR Comment")
+            )
+        case .outdated:
+            return FlakyCIBotReportPresentation(
+                state: state,
+                scoreText: String(localized: "Previous commit"),
+                evidenceLine: String(localized: "The PR head changed after this bot report was produced"),
+                updatedText: String(localized: "Updated 18m ago"),
+                detailLine: String(localized: "Analyze again to refresh the bot result for the current commit."),
+                primaryActionTitle: String(localized: "Analyze again"),
+                primaryActionDisabled: false,
+                secondaryActionTitle: String(localized: "Open old report")
             )
         }
     }
 
-    private static let rawEvidence: [CIDiagnosisMockRawExcerpt] = [
-        CIDiagnosisMockRawExcerpt(
-            jobName: "linux-ubuntu-22",
-            stepName: "Run auth e2e group 3",
-            message: "Timed out waiting for redirect after login callback."
-        ),
-        CIDiagnosisMockRawExcerpt(
-            jobName: "linux-ubuntu-24",
-            stepName: "Run auth e2e group 3",
-            message: "Expected session cookie to be present before navigation."
-        ),
-        CIDiagnosisMockRawExcerpt(
-            jobName: "linux-debian-bookworm",
-            stepName: "Run auth e2e group 3",
-            message: "Login flow stalled at /callback for 30s and exited with code 1."
-        )
-    ]
-
-    private static func initialState(for launchMode: CIDiagnosisMockLaunchMode) -> CIDiagnosisMockState {
+    private static func initialState(for launchMode: FlakyCIBotLaunchMode) -> FlakyCIBotReportState {
         switch launchMode {
-        case .checkFlakyFirst:
-            return .likelyFlaky
-        case .rerunNow:
-            return .rerunTriggered
+        case .analyze, .rerunNow:
+            return .analyzing
+        case let .openReport(result):
+            return result
         }
     }
 }

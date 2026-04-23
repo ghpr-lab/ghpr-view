@@ -39,12 +39,14 @@
 		A1000062 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A2000062 /* Localizable.xcstrings */; };
 		A1000063 /* CIDiagnosisMockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000063 /* CIDiagnosisMockView.swift */; };
 		A1000064 /* CIDiagnosisMockViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000064 /* CIDiagnosisMockViewModel.swift */; };
+		A1000065 /* FlakyCIAnalysisResultV2.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000065 /* FlakyCIAnalysisResultV2.swift */; };
 		B1000001 /* AppUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* AppUpdate.swift */; };
 		B1000002 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* UpdateManager.swift */; };
 		B1000003 /* UpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* UpdateView.swift */; };
 		B1000004 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000006 /* XCTest.framework */; };
 		B1000005 /* UpdateLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000005 /* UpdateLogicTests.swift */; };
 		B1000006 /* CIDiagnosisMockViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000007 /* CIDiagnosisMockViewModelTests.swift */; };
+		B1000007 /* FlakyCIProtocolV2Tests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000008 /* FlakyCIProtocolV2Tests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -92,12 +94,14 @@
 		A2000062 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		A2000063 /* CIDiagnosisMockView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CIDiagnosisMockView.swift; sourceTree = "<group>"; };
 		A2000064 /* CIDiagnosisMockViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CIDiagnosisMockViewModel.swift; sourceTree = "<group>"; };
+		A2000065 /* FlakyCIAnalysisResultV2.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlakyCIAnalysisResultV2.swift; sourceTree = "<group>"; };
 		A3000001 /* PRDashboard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PRDashboard.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2000001 /* AppUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdate.swift; sourceTree = "<group>"; };
 		B2000002 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
 		B2000003 /* UpdateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateView.swift; sourceTree = "<group>"; };
 		B2000005 /* UpdateLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateLogicTests.swift; sourceTree = "<group>"; };
 		B2000007 /* CIDiagnosisMockViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CIDiagnosisMockViewModelTests.swift; sourceTree = "<group>"; };
+		B2000008 /* FlakyCIProtocolV2Tests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlakyCIProtocolV2Tests.swift; sourceTree = "<group>"; };
 		B2000006 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
 		B3000001 /* PRDashboardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PRDashboardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -171,6 +175,7 @@
 				A200000D /* ReviewThread.swift */,
 				A200000E /* Configuration.swift */,
 				A200000F /* PRList.swift */,
+				A2000065 /* FlakyCIAnalysisResultV2.swift */,
 				B2000001 /* AppUpdate.swift */,
 			);
 			path = Models;
@@ -252,6 +257,7 @@
 			isa = PBXGroup;
 			children = (
 				B2000007 /* CIDiagnosisMockViewModelTests.swift */,
+				B2000008 /* FlakyCIProtocolV2Tests.swift */,
 				B2000005 /* UpdateLogicTests.swift */,
 			);
 			path = PRDashboardTests;
@@ -422,6 +428,7 @@
 				B1000003 /* UpdateView.swift in Sources */,
 				A1000061 /* OnboardingBubble.swift in Sources */,
 				A1000063 /* CIDiagnosisMockView.swift in Sources */,
+				A1000065 /* FlakyCIAnalysisResultV2.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -430,6 +437,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				B1000006 /* CIDiagnosisMockViewModelTests.swift in Sources */,
+				B1000007 /* FlakyCIProtocolV2Tests.swift in Sources */,
 				B1000005 /* UpdateLogicTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

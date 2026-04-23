@@ -2,59 +2,70 @@ import XCTest
 @testable import PRDashboard
 
 @MainActor
-final class CIDiagnosisMockViewModelTests: XCTestCase {
-    func testLaunchWithCheckFlakyFirstStartsInLikelyFlaky() {
-        let viewModel = CIDiagnosisMockViewModel(context: makeContext(number: 42), launchMode: .checkFlakyFirst)
+final class FlakyCIBotReportViewModelTests: XCTestCase {
+    func testAnalyzeLaunchStartsInAnalyzingState() {
+        let viewModel = FlakyCIBotReportViewModel(context: makeContext(number: 42), launchMode: .analyze)
 
-        XCTAssertEqual(viewModel.state, .likelyFlaky)
+        XCTAssertEqual(viewModel.state, .analyzing)
     }
 
-    func testLaunchWithRerunNowStartsInRerunTriggered() {
-        let viewModel = CIDiagnosisMockViewModel(context: makeContext(number: 42), launchMode: .rerunNow)
+    func testOpenReportLaunchStartsWithLatestBotResult() {
+        let viewModel = FlakyCIBotReportViewModel(
+            context: makeContext(number: 42),
+            launchMode: .openReport(result: .realIssue(score: 64))
+        )
 
-        XCTAssertEqual(viewModel.state, .rerunTriggered)
+        XCTAssertEqual(viewModel.state, .realIssue(score: 64))
     }
 
-    func testTriggerRerunTransitionsToTriggeredState() {
-        let viewModel = CIDiagnosisMockViewModel(context: makeContext(number: 42), launchMode: .checkFlakyFirst)
+    func testRerunNowLaunchStartsInAnalyzingState() {
+        let viewModel = FlakyCIBotReportViewModel(context: makeContext(number: 42), launchMode: .rerunNow)
 
-        viewModel.selectState(.likelyBlocker)
-        viewModel.triggerRerun()
-
-        XCTAssertEqual(viewModel.state, .rerunTriggered)
+        XCTAssertEqual(viewModel.state, .analyzing)
     }
 
-    func testRevealRawEvidenceExpandsAndHighlightsEvidence() {
-        let viewModel = CIDiagnosisMockViewModel(context: makeContext(number: 42), launchMode: .checkFlakyFirst)
-        let token = viewModel.rawEvidenceFocusToken
+    func testAnalyzeAgainTransitionsToAnalyzingState() {
+        let viewModel = FlakyCIBotReportViewModel(
+            context: makeContext(number: 42),
+            launchMode: .openReport(result: .likelyFlaky(score: 78))
+        )
 
-        viewModel.revealRawEvidence()
+        viewModel.analyzeAgain()
 
-        XCTAssertTrue(viewModel.isRawEvidenceExpanded)
-        XCTAssertTrue(viewModel.isHighlightingRawEvidence)
-        XCTAssertNotEqual(token, viewModel.rawEvidenceFocusToken)
+        XCTAssertEqual(viewModel.state, .analyzing)
     }
 
-    func testUpdatingContextResetsStateAndEvidenceDisclosure() {
+    func testRerunFailedCITransitionsToAnalyzingState() {
+        let viewModel = FlakyCIBotReportViewModel(
+            context: makeContext(number: 42),
+            launchMode: .openReport(result: .likelyFlaky(score: 78))
+        )
+
+        viewModel.rerunFailedCI()
+
+        XCTAssertEqual(viewModel.state, .analyzing)
+    }
+
+    func testUpdatingContextResetsStateForNewLaunchMode() {
         let original = makeContext(number: 42, title: "Original title")
         let replacement = makeContext(number: 108, title: "Replacement title")
-        let viewModel = CIDiagnosisMockViewModel(context: original, launchMode: .checkFlakyFirst)
+        let viewModel = FlakyCIBotReportViewModel(
+            context: original,
+            launchMode: .openReport(result: .outdated)
+        )
 
-        viewModel.selectState(.likelyBlocker)
-        viewModel.revealRawEvidence()
-        viewModel.update(context: replacement, launchMode: .rerunNow)
+        viewModel.analyzeAgain()
+        viewModel.update(context: replacement, launchMode: .openReport(result: .likelyFlaky(score: 78)))
 
         XCTAssertEqual(viewModel.context, replacement)
-        XCTAssertEqual(viewModel.state, .rerunTriggered)
-        XCTAssertFalse(viewModel.isRawEvidenceExpanded)
-        XCTAssertFalse(viewModel.isHighlightingRawEvidence)
+        XCTAssertEqual(viewModel.state, .likelyFlaky(score: 78))
     }
 
     private func makeContext(
         number: Int,
         title: String = "Fix flaky e2e pipeline on linux variants"
-    ) -> CIDiagnosisMockContext {
-        CIDiagnosisMockContext(
+    ) -> FlakyCIBotContext {
+        FlakyCIBotContext(
             repoFullName: "openresty/kong",
             number: number,
             title: title,

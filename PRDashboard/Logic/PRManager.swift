@@ -334,6 +334,8 @@ final class PRManager: PRManagerType, ObservableObject {
                     logger.error("Failed to enrich Jira tickets: \(error.localizedDescription)")
                 }
 
+                prs = await self.addingFlakyCIAnalyses(to: prs)
+
                 // Auto-retry CI for pinned PRs with retry tracking
                 checkCIAutoRetries(newPRs: prs)
 
@@ -416,6 +418,68 @@ final class PRManager: PRManagerType, ObservableObject {
         logger.debug(
             "Incremental progress: stage=\(stage.rawValue, privacy: .public) open=\(filteredOpen.count, privacy: .public) merged=\(filteredMerged.count, privacy: .public)"
         )
+    }
+
+    private func addingFlakyCIAnalyses(to prs: [PullRequest]) async -> [PullRequest] {
+        var enriched = prs
+
+        let pendingIndices = enriched.indices.filter { index in
+            let pr = enriched[index]
+            guard pr.category == .authored,
+                  let checkRun = pr.flakyCIAnalysisCheckRun,
+                  checkRun.isCompleted else {
+                return false
+            }
+            if let analysis = pr.flakyCIAnalysis,
+               analysis.analysisID == checkRun.externalID,
+               analysis.target.headSHA.lowercased() == (pr.headCommitOid ?? "").lowercased() {
+                return false
+            }
+            return true
+        }
+
+        if pendingIndices.isEmpty { return enriched }
+
+        let fetched: [(Int, FlakyCIAnalysisResultV2?)] = await withTaskGroup(
+            of: (Int, FlakyCIAnalysisResultV2?)?.self
+        ) { group in
+            for index in pendingIndices {
+                let pr = enriched[index]
+                guard let checkRun = pr.flakyCIAnalysisCheckRun else { continue }
+                group.addTask {
+                    if Task.isCancelled { return nil }
+                    do {
+                        let analysis = try await self.apiClient.fetchFlakyCIAnalysisResult(
+                            owner: pr.repositoryOwner,
+                            repo: pr.repositoryName,
+                            checkRunID: checkRun.databaseID,
+                            currentHeadSHA: pr.headCommitOid
+                        )
+                        return (index, analysis)
+                    } catch {
+                        logger.error("Failed to fetch Flaky CI analysis for \(pr.repoFullName)#\(pr.number): \(error.localizedDescription)")
+                        return nil
+                    }
+                }
+            }
+
+            var results: [(Int, FlakyCIAnalysisResultV2?)] = []
+            for await result in group {
+                if let result { results.append(result) }
+            }
+            return results
+        }
+
+        var parsedCount = 0
+        for (index, analysis) in fetched {
+            enriched[index].flakyCIAnalysis = analysis
+            if analysis != nil { parsedCount += 1 }
+        }
+
+        if parsedCount > 0 {
+            logger.info("Parsed \(parsedCount) Flaky CI analysis result(s)")
+        }
+        return enriched
     }
 
     private func filterByConfiguration(_ prs: [PullRequest]) -> [PullRequest] {
@@ -589,6 +653,19 @@ final class PRManager: PRManagerType, ObservableObject {
                 prList.pullRequests[index].checkFailureCount = result.checkFailureCount
                 prList.pullRequests[index].checkPendingCount = result.checkPendingCount
                 prList.pullRequests[index].ciExtendedInfo = result.ciExtendedInfo
+                prList.pullRequests[index].flakyCIAnalysisCheckRun = result.flakyCIAnalysisCheckRun
+                if let checkRun = result.flakyCIAnalysisCheckRun, checkRun.isCompleted {
+                    if let fresh = try await apiClient.fetchFlakyCIAnalysisResult(
+                        owner: pr.repositoryOwner,
+                        repo: pr.repositoryName,
+                        checkRunID: checkRun.databaseID,
+                        currentHeadSHA: pr.headCommitOid
+                    ) {
+                        prList.pullRequests[index].flakyCIAnalysis = fresh
+                    }
+                } else if result.flakyCIAnalysisCheckRun == nil {
+                    prList.pullRequests[index].flakyCIAnalysis = nil
+                }
                 logger.info("Refreshed single PR CI status for #\(pr.number): \(result.ciStatus?.rawValue ?? "nil")")
             }
         } catch {

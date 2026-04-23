@@ -6,7 +6,7 @@ struct MainView: View {
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
     @State private var firstVisibleReviewStatusPRID: Int?
-    @State private var pendingCIDiagnosisContext: CIDiagnosisMockContext?
+    @State private var pendingFlakyCIBotContext: FlakyCIBotContext?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -46,19 +46,19 @@ struct MainView: View {
             HoverTooltipOverlay(presenter: tooltipPresenter)
         }
         .overlay {
-            if let context = pendingCIDiagnosisContext {
+            if let context = pendingFlakyCIBotContext {
                 ZStack {
                     Color.black.opacity(0.16)
                         .ignoresSafeArea()
                         .onTapGesture {
-                            pendingCIDiagnosisContext = nil
+                            pendingFlakyCIBotContext = nil
                         }
 
-                    CIDiagnosisEntryConfirmationView(
+                    FlakyCIBotRetryConfirmationView(
                         context: context,
-                        onCheckFlakyFirst: { openCIDiagnosisMock(.checkFlakyFirst) },
-                        onRerunNow: { openCIDiagnosisMock(.rerunNow) },
-                        onCancel: { pendingCIDiagnosisContext = nil }
+                        onAnalyze: { openFlakyCIBotReport(.analyze) },
+                        onRerunNow: { openFlakyCIBotReport(.rerunNow) },
+                        onCancel: { pendingFlakyCIBotContext = nil }
                     )
                 }
                 .transition(.opacity)
@@ -143,7 +143,9 @@ struct MainView: View {
                                 pr: pr,
                                 onOpen: { viewModel.openPR(pr) },
                                 onCopyURL: { viewModel.copyURL(pr) },
-                                onRerunFailedCI: { presentCIDiagnosisConfirmation(for: pr) },
+                                onRerunFailedCI: { presentFlakyCIBotConfirmation(for: pr) },
+                                onAnalyzeFlakyCI: { viewModel.openFlakyCIBotReport(for: pr, launchMode: .analyze) },
+                                onOpenBotReport: { viewModel.openFlakyCIBotReport(for: pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
                                 onToggleCIAutoRetry: {
                                     if viewModel.ciAutoRetryRound(for: pr) != nil {
@@ -154,6 +156,7 @@ struct MainView: View {
                                 },
                                 isPinned: true,
                                 ciAutoRetryRound: viewModel.ciAutoRetryRound(for: pr),
+                                flakyBotStatus: viewModel.flakyCIBotStatus(for: pr),
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                                 onboardingManager: onboardingManager,
@@ -246,9 +249,12 @@ struct MainView: View {
                 pr: pr,
                 onOpen: { viewModel.openPR(pr) },
                 onCopyURL: { viewModel.copyURL(pr) },
-                onRerunFailedCI: { presentCIDiagnosisConfirmation(for: pr) },
+                onRerunFailedCI: { presentFlakyCIBotConfirmation(for: pr) },
+                onAnalyzeFlakyCI: { viewModel.openFlakyCIBotReport(for: pr, launchMode: .analyze) },
+                onOpenBotReport: { viewModel.openFlakyCIBotReport(for: pr) },
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
                 isPinned: showPin && viewModel.isPinned(pr),
+                flakyBotStatus: showCIStatus ? viewModel.flakyCIBotStatus(for: pr) : nil,
                 showCIStatus: showCIStatus,
                 showConflictStatus: showConflictStatus,
                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
@@ -464,15 +470,15 @@ struct MainView: View {
         }
     }
 
-    private func presentCIDiagnosisConfirmation(for pr: PullRequest) {
-        // TODO: Replace this temporary prototype routing with the real CI diagnosis flow.
-        pendingCIDiagnosisContext = viewModel.ciDiagnosisMockContext(for: pr)
+    private func presentFlakyCIBotConfirmation(for pr: PullRequest) {
+        // TODO: Replace this temporary prototype routing with the real Flaky CI Bot trigger/result API.
+        pendingFlakyCIBotContext = viewModel.flakyCIBotContext(for: pr)
     }
 
-    private func openCIDiagnosisMock(_ launchMode: CIDiagnosisMockLaunchMode) {
-        guard let pendingCIDiagnosisContext else { return }
-        viewModel.openCIDiagnosisMock(context: pendingCIDiagnosisContext, launchMode: launchMode)
-        self.pendingCIDiagnosisContext = nil
+    private func openFlakyCIBotReport(_ launchMode: FlakyCIBotLaunchMode) {
+        guard let pendingFlakyCIBotContext else { return }
+        viewModel.openFlakyCIBotReport(context: pendingFlakyCIBotContext, launchMode: launchMode)
+        self.pendingFlakyCIBotContext = nil
     }
 }
 

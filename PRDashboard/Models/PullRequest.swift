@@ -109,6 +109,8 @@ struct PullRequest: Identifiable, Codable, Equatable {
     var approvalCount: Int
     var changesRequestedCount: Int?
     var ciExtendedInfo: CIExtendedInfo?
+    var flakyCIAnalysis: FlakyCIAnalysisResultV2? = nil
+    var flakyCIAnalysisCheckRun: FlakyCIAnalysisCheckRun? = nil
     var jiraTicket: String? = nil
 
     var ciIsRunning: Bool { ciExtendedInfo?.isRunning ?? false }

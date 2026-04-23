@@ -25,7 +25,7 @@ final class PRListViewModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     var openSettings: (() -> Void)?
-    var openCIDiagnosisMock: ((CIDiagnosisMockContext, CIDiagnosisMockLaunchMode) -> Void)?
+    var openFlakyCIBotReport: ((FlakyCIBotContext, FlakyCIBotLaunchMode) -> Void)?
 
     init(prManager: PRManager, oauthManager: GitHubOAuthManager) {
         self.prManager = prManager
@@ -321,8 +321,8 @@ final class PRListViewModel: ObservableObject {
         }
     }
 
-    func ciDiagnosisMockContext(for pr: PullRequest) -> CIDiagnosisMockContext {
-        CIDiagnosisMockContext(
+    func flakyCIBotContext(for pr: PullRequest) -> FlakyCIBotContext {
+        FlakyCIBotContext(
             repoFullName: pr.repoFullName,
             number: pr.number,
             title: pr.title,
@@ -330,12 +330,32 @@ final class PRListViewModel: ObservableObject {
         )
     }
 
-    func openCIDiagnosisMock(for pr: PullRequest, launchMode: CIDiagnosisMockLaunchMode) {
-        openCIDiagnosisMock?(ciDiagnosisMockContext(for: pr), launchMode)
+    func flakyCIBotStatus(for pr: PullRequest) -> FlakyCIBotReportState? {
+        guard pr.category == .authored else { return nil }
+        if let checkRunState = pr.flakyCIAnalysisCheckRun?.reportState {
+            return checkRunState
+        }
+        if let analysis = pr.flakyCIAnalysis {
+            if let externalID = pr.flakyCIAnalysisCheckRun?.externalID,
+               externalID != analysis.analysisID {
+                return nil
+            }
+            return analysis.reportState(currentHeadSHA: pr.headCommitOid)
+        }
+        return nil
     }
 
-    func openCIDiagnosisMock(context: CIDiagnosisMockContext, launchMode: CIDiagnosisMockLaunchMode) {
-        openCIDiagnosisMock?(context, launchMode)
+    func openFlakyCIBotReport(for pr: PullRequest, launchMode: FlakyCIBotLaunchMode) {
+        openFlakyCIBotReport?(flakyCIBotContext(for: pr), launchMode)
+    }
+
+    func openFlakyCIBotReport(for pr: PullRequest) {
+        let result = flakyCIBotStatus(for: pr) ?? .analyzing
+        openFlakyCIBotReport(for: pr, launchMode: .openReport(result: result))
+    }
+
+    func openFlakyCIBotReport(context: FlakyCIBotContext, launchMode: FlakyCIBotLaunchMode) {
+        openFlakyCIBotReport?(context, launchMode)
     }
 
     // MARK: - Private

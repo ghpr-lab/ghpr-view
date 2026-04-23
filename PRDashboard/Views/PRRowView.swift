@@ -23,10 +23,13 @@ struct PRRowView: View {
     let onOpen: () -> Void
     let onCopyURL: () -> Void
     var onRerunFailedCI: (() -> Void)?
+    var onAnalyzeFlakyCI: (() -> Void)?
+    var onOpenBotReport: (() -> Void)?
     var onTogglePin: (() -> Void)?
     var onToggleCIAutoRetry: (() -> Void)?
     var isPinned: Bool = false
     var ciAutoRetryRound: Int?  // nil = not active, 0-3 = current round
+    var flakyBotStatus: FlakyCIBotReportState?
     var showCIStatus: Bool = true
     var showConflictStatus: Bool = true
     var showMyReviewStatus: Bool = false
@@ -120,6 +123,10 @@ struct PRRowView: View {
 
                     Spacer()
 
+                    if let flakyBotStatus {
+                        FlakyCIBotStatusLabel(state: flakyBotStatus)
+                    }
+
                     if pr.category == .authored || pr.category == .mentioned {
                         if showCIStatus, let ciStatus = pr.ciStatus {
                             CIStatusIcon(
@@ -185,8 +192,7 @@ struct PRRowView: View {
                     )
                 }
             }
-            if let onToggleCIAutoRetry, pr.category == .authored,
-                (ciAutoRetryRound != nil || pr.ciIsRunning || pr.checkFailureCount > 0) {
+            if let onToggleCIAutoRetry, canShowAutoRetryAction {
                 Divider()
                 if let round = ciAutoRetryRound {
                     Button {
@@ -202,14 +208,33 @@ struct PRRowView: View {
                     }
                 }
             }
-            if pr.category == .authored && pr.checkFailureCount > 0 {
-                if onToggleCIAutoRetry == nil {
+            if canShowFailedCITools {
+                if !canShowAutoRetryAction {
                     Divider()
                 }
-                Button {
-                    DispatchQueue.main.async { onRerunFailedCI?() }
-                } label: {
-                    Label("Rerun Failed CI", systemImage: "arrow.clockwise")
+
+                if let onAnalyzeFlakyCI {
+                    Button {
+                        DispatchQueue.main.async { onAnalyzeFlakyCI() }
+                    } label: {
+                        Label("Analyze Flaky CI", systemImage: "ladybug")
+                    }
+                }
+
+                if let onOpenBotReport {
+                    Button {
+                        DispatchQueue.main.async { onOpenBotReport() }
+                    } label: {
+                        Label("Open Bot Report", systemImage: "doc.text.magnifyingglass")
+                    }
+                }
+
+                if let onRerunFailedCI {
+                    Button {
+                        DispatchQueue.main.async { onRerunFailedCI() }
+                    } label: {
+                        Label("Rerun Failed CI", systemImage: "arrow.clockwise")
+                    }
                 }
             }
         }
@@ -237,6 +262,18 @@ struct PRRowView: View {
         } else {
             badge
         }
+    }
+
+    private var canShowAutoRetryAction: Bool {
+        onToggleCIAutoRetry != nil
+            && pr.category == .authored
+            && (ciAutoRetryRound != nil || pr.ciIsRunning || pr.checkFailureCount > 0)
+    }
+
+    private var canShowFailedCITools: Bool {
+        pr.category == .authored
+            && pr.checkFailureCount > 0
+            && (onAnalyzeFlakyCI != nil || onOpenBotReport != nil || onRerunFailedCI != nil)
     }
 }
 

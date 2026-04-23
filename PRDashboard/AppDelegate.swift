@@ -12,8 +12,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var updateManager: UpdateManager?
     var settingsWindow: NSWindow?
     var updateWindow: NSWindow?
-    var ciDiagnosisMockWindow: NSWindow?
-    var ciDiagnosisMockViewModel: CIDiagnosisMockViewModel?
+    var flakyCIBotReportWindow: NSWindow?
+    var flakyCIBotReportViewModel: FlakyCIBotReportViewModel?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -49,8 +49,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         viewModel.openSettings = { [weak self] in
             self?.openSettingsWindow(viewModel: viewModel)
         }
-        viewModel.openCIDiagnosisMock = { [weak self] context, launchMode in
-            self?.openCIDiagnosisMock(context: context, launchMode: launchMode)
+        viewModel.openFlakyCIBotReport = { [weak self] context, launchMode in
+            self?.openFlakyCIBotReport(context: context, launchMode: launchMode)
         }
 
         // 6. Create main view
@@ -147,31 +147,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    private func openCIDiagnosisMock(context: CIDiagnosisMockContext, launchMode: CIDiagnosisMockLaunchMode) {
-        if let ciDiagnosisMockViewModel {
-            ciDiagnosisMockViewModel.update(context: context, launchMode: launchMode)
+    private func openFlakyCIBotReport(context: FlakyCIBotContext, launchMode: FlakyCIBotLaunchMode) {
+        if let flakyCIBotReportViewModel {
+            flakyCIBotReportViewModel.update(context: context, launchMode: launchMode)
         } else {
-            let viewModel = CIDiagnosisMockViewModel(context: context, launchMode: launchMode)
-            let mockView = CIDiagnosisMockView(
+            let viewModel = FlakyCIBotReportViewModel(context: context, launchMode: launchMode)
+            let reportView = FlakyCIBotReportView(
                 viewModel: viewModel,
                 onClose: { [weak self] in
-                    self?.ciDiagnosisMockWindow?.close()
+                    self?.flakyCIBotReportWindow?.close()
                 }
             )
-            let hostingController = NSHostingController(rootView: mockView)
+            let hostingController = NSHostingController(rootView: reportView)
 
             let window = NSWindow(contentViewController: hostingController)
-            window.title = String(localized: "CI Diagnosis")
+            window.title = String(localized: "Flaky CI Bot")
             window.styleMask = [.titled, .closable]
-            window.setContentSize(NSSize(width: 620, height: 480))
+            window.setContentSize(NSSize(width: 340, height: 280))
             window.center()
             window.isReleasedWhenClosed = false
 
-            ciDiagnosisMockWindow = window
-            ciDiagnosisMockViewModel = viewModel
+            flakyCIBotReportWindow = window
+            flakyCIBotReportViewModel = viewModel
         }
 
-        ciDiagnosisMockWindow?.makeKeyAndOrderFront(nil)
+        flakyCIBotReportWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 

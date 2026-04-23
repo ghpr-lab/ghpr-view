@@ -87,6 +87,8 @@ struct IndexedPR {
             approvalCount: existing?.approvalCount ?? 0,
             changesRequestedCount: existing?.changesRequestedCount,
             ciExtendedInfo: existing?.ciExtendedInfo,
+            flakyCIAnalysis: existing?.flakyCIAnalysis,
+            flakyCIAnalysisCheckRun: existing?.flakyCIAnalysisCheckRun,
             jiraTicket: existing?.jiraTicket
         )
     }
@@ -665,8 +667,13 @@ final class GitHubAPIClient: ObservableObject {
                             contexts(first: 100, after: "\(after)") {
                                 nodes {
                                     ... on CheckRun {
+                                        databaseId
                                         name
+                                        status
                                         conclusion
+                                        detailsUrl
+                                        externalId
+                                        url
                                         completedAt
                                         checkSuite {
                                             workflowRun {
@@ -704,8 +711,13 @@ final class GitHubAPIClient: ObservableObject {
     }
 
     struct CIContextNode: CIContextLike {
+        let checkRunDatabaseID: Int?
         let name: String?
+        let checkRunStatus: String?
         let conclusion: String?
+        let checkRunDetailsURL: URL?
+        let checkRunExternalID: String?
+        let checkRunURL: URL?
         let state: String?
         let context: String?
         let workflowName: String?
@@ -869,8 +881,13 @@ final class GitHubAPIClient: ObservableObject {
                             contexts(first: 20) {
                                 nodes {
                                     ... on CheckRun {
+                                        databaseId
                                         name
+                                        status
                                         conclusion
+                                        detailsUrl
+                                        externalId
+                                        url
                                         completedAt
                                         checkSuite {
                                             workflowRun {
@@ -1039,8 +1056,13 @@ final class GitHubAPIClient: ObservableObject {
                 let endCursor: String?
             }
             struct ContextNode: Decodable {
+                let databaseId: Int?
                 let name: String?
+                let status: String?
                 let conclusion: String?
+                let detailsUrl: URL?
+                let externalId: String?
+                let url: URL?
                 let completedAt: Date?
                 let state: String?
                 let context: String?
@@ -1066,8 +1088,13 @@ final class GitHubAPIClient: ObservableObject {
 
         let ciContexts = contexts.nodes.map { node in
             CIContextNode(
+                checkRunDatabaseID: node.databaseId,
                 name: node.name,
+                checkRunStatus: node.status,
                 conclusion: node.conclusion,
+                checkRunDetailsURL: node.detailsUrl,
+                checkRunExternalID: node.externalId,
+                checkRunURL: node.url,
                 state: node.state,
                 context: node.context,
                 workflowName: node.checkSuite?.workflowRun?.workflow?.name,
@@ -1198,6 +1225,33 @@ final class GitHubAPIClient: ObservableObject {
                 pendingCount: pending
             )
         }
+    }
+
+    private static func flakyCICheckRun(from contexts: [CIContextNode]) -> FlakyCIAnalysisCheckRun? {
+        contexts
+            .filter {
+                FlakyCIProtocolV2.isFlakyCheckRun(
+                    name: $0.name,
+                    externalID: $0.checkRunExternalID
+                )
+            }
+            .sorted { ($0.completedAt ?? .distantPast) > ($1.completedAt ?? .distantPast) }
+            .compactMap { context -> FlakyCIAnalysisCheckRun? in
+                guard let databaseID = context.checkRunDatabaseID,
+                      let name = context.name else {
+                    return nil
+                }
+                return FlakyCIAnalysisCheckRun(
+                    databaseID: databaseID,
+                    name: name,
+                    status: context.checkRunStatus,
+                    conclusion: context.conclusion,
+                    detailsURL: context.checkRunDetailsURL ?? context.checkRunURL,
+                    externalID: context.checkRunExternalID,
+                    completedAt: context.completedAt
+                )
+            }
+            .first
     }
 
     // MARK: - Private
@@ -1656,8 +1710,13 @@ final class GitHubAPIClient: ObservableObject {
 
         let ciContexts = (statusCheckRollup?.contexts?.nodes ?? []).map { ctx in
             CIContextNode(
+                checkRunDatabaseID: ctx.databaseId,
                 name: ctx.name,
+                checkRunStatus: ctx.status,
                 conclusion: ctx.conclusion,
+                checkRunDetailsURL: ctx.detailsUrl,
+                checkRunExternalID: ctx.externalId,
+                checkRunURL: ctx.url,
                 state: ctx.state,
                 context: ctx.context,
                 workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
@@ -1665,6 +1724,7 @@ final class GitHubAPIClient: ObservableObject {
             )
         }
         let ciResult = parseCIContexts(ciContexts, excludeFilter: excludeFilter)
+        let flakyCIAnalysisCheckRun = flakyCICheckRun(from: ciContexts)
 
         let rollupState = statusCheckRollup?.state
         var ciStatus: CIStatus?
@@ -1740,7 +1800,8 @@ final class GitHubAPIClient: ObservableObject {
             myThreadsAllResolved: false,
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
-            ciExtendedInfo: ciExtendedInfo
+            ciExtendedInfo: ciExtendedInfo,
+            flakyCIAnalysisCheckRun: flakyCIAnalysisCheckRun
         )
     }
 
@@ -2447,8 +2508,13 @@ final class GitHubAPIClient: ObservableObject {
 
         let ciContexts = (statusCheckRollup?.contexts?.nodes ?? []).map { ctx in
             CIContextNode(
+                checkRunDatabaseID: ctx.databaseId,
                 name: ctx.name,
+                checkRunStatus: ctx.status,
                 conclusion: ctx.conclusion,
+                checkRunDetailsURL: ctx.detailsUrl,
+                checkRunExternalID: ctx.externalId,
+                checkRunURL: ctx.url,
                 state: ctx.state,
                 context: ctx.context,
                 workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
@@ -2456,6 +2522,7 @@ final class GitHubAPIClient: ObservableObject {
             )
         }
         let ciResult = Self.parseCIContexts(ciContexts, excludeFilter: excludeFilter)
+        let flakyCIAnalysisCheckRun = Self.flakyCICheckRun(from: ciContexts)
 
         let rollupState = statusCheckRollup?.state ?? ""
         let upperRollup = rollupState.uppercased()
@@ -2565,7 +2632,8 @@ final class GitHubAPIClient: ObservableObject {
             myThreadsAllResolved: myThreadsAllResolved,
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
-            ciExtendedInfo: ciExtendedInfo
+            ciExtendedInfo: ciExtendedInfo,
+            flakyCIAnalysisCheckRun: flakyCIAnalysisCheckRun
         )
     }
 
@@ -2577,6 +2645,7 @@ final class GitHubAPIClient: ObservableObject {
         let checkFailureCount: Int
         let checkPendingCount: Int
         let ciExtendedInfo: CIExtendedInfo?
+        let flakyCIAnalysisCheckRun: FlakyCIAnalysisCheckRun?
     }
 
     func fetchSinglePRCIStatus(owner: String, repo: String, number: Int) async throws -> SinglePRCIResult {
@@ -2592,8 +2661,13 @@ final class GitHubAPIClient: ObservableObject {
                                     contexts(first: 100) {
                                         nodes {
                                             ... on CheckRun {
+                                                databaseId
                                                 name
+                                                status
                                                 conclusion
+                                                detailsUrl
+                                                externalId
+                                                url
                                                 completedAt
                                                 checkSuite {
                                                     workflowRun {
@@ -2651,8 +2725,13 @@ final class GitHubAPIClient: ObservableObject {
                 let nodes: [ContextNode]
             }
             struct ContextNode: Decodable {
+                let databaseId: Int?
                 let name: String?
+                let status: String?
                 let conclusion: String?
+                let detailsUrl: URL?
+                let externalId: String?
+                let url: URL?
                 let completedAt: Date?
                 let state: String?
                 let context: String?
@@ -2673,13 +2752,25 @@ final class GitHubAPIClient: ObservableObject {
         let response = try decoder.decode(Response.self, from: data)
 
         guard let rollup = response.data.repository?.pullRequest?.commits?.nodes.first?.commit.statusCheckRollup else {
-            return SinglePRCIResult(ciStatus: nil, checkSuccessCount: 0, checkFailureCount: 0, checkPendingCount: 0, ciExtendedInfo: nil)
+            return SinglePRCIResult(
+                ciStatus: nil,
+                checkSuccessCount: 0,
+                checkFailureCount: 0,
+                checkPendingCount: 0,
+                ciExtendedInfo: nil,
+                flakyCIAnalysisCheckRun: nil
+            )
         }
 
         let ciContexts = (rollup.contexts?.nodes ?? []).map { node in
             CIContextNode(
+                checkRunDatabaseID: node.databaseId,
                 name: node.name,
+                checkRunStatus: node.status,
                 conclusion: node.conclusion,
+                checkRunDetailsURL: node.detailsUrl,
+                checkRunExternalID: node.externalId,
+                checkRunURL: node.url,
                 state: node.state,
                 context: node.context,
                 workflowName: node.checkSuite?.workflowRun?.workflow?.name,
@@ -2689,6 +2780,7 @@ final class GitHubAPIClient: ObservableObject {
 
         let excludeFilter = Self.loadCIStatusExcludeFilter()
         let ciResult = Self.parseCIContexts(ciContexts, excludeFilter: excludeFilter)
+        let flakyCIAnalysisCheckRun = Self.flakyCICheckRun(from: ciContexts)
 
         var ciStatus: CIStatus?
         if ciResult.failureCount > 0 {
@@ -2721,8 +2813,64 @@ final class GitHubAPIClient: ObservableObject {
             checkSuccessCount: ciResult.successCount,
             checkFailureCount: ciResult.failureCount,
             checkPendingCount: effectivePendingCount,
-            ciExtendedInfo: ciExtendedInfo
+            ciExtendedInfo: ciExtendedInfo,
+            flakyCIAnalysisCheckRun: flakyCIAnalysisCheckRun
         )
+    }
+
+    // MARK: - Flaky CI Protocol
+
+    func fetchFlakyCIAnalysisResult(
+        owner: String,
+        repo: String,
+        checkRunID: Int,
+        currentHeadSHA: String?
+    ) async throws -> FlakyCIAnalysisResultV2? {
+        let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/check-runs/\(checkRunID)")!
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw APIError.network(error)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        updateRateLimitInfo(from: httpResponse)
+
+        switch httpResponse.statusCode {
+        case 200:
+            struct CheckRunResponse: Decodable {
+                struct Output: Decodable {
+                    let text: String?
+                }
+                let output: Output?
+            }
+
+            do {
+                let decoded = try JSONDecoder.githubDecoder.decode(CheckRunResponse.self, from: data)
+                guard let text = decoded.output?.text else { return nil }
+                return try FlakyCIProtocolV2.decodeMarker(from: text, currentHeadSHA: currentHeadSHA)
+            } catch let error as APIError {
+                throw error
+            } catch {
+                throw APIError.decoding(error)
+            }
+        case 401:
+            throw APIError.unauthorized
+        case 403:
+            if let rateLimitError = rateLimitError(from: httpResponse) {
+                throw rateLimitError
+            }
+            throw APIError.unauthorized
+        default:
+            throw APIError.http(statusCode: httpResponse.statusCode)
+        }
     }
 
     // MARK: - Rerun Failed CI
@@ -3411,8 +3559,13 @@ private struct GraphQLResponse: Decodable {
 
     struct ContextNode: Decodable {
         // CheckRun uses "name" and "conclusion", StatusContext uses "state" and "context"
+        let databaseId: Int?
         let name: String?        // CheckRun name (e.g., "build", "test")
+        let status: String?      // QUEUED, IN_PROGRESS, COMPLETED for CheckRun
         let conclusion: String?  // SUCCESS, FAILURE, NEUTRAL, CANCELLED, SKIPPED, TIMED_OUT, ACTION_REQUIRED, null (in progress)
+        let detailsUrl: URL?
+        let externalId: String?
+        let url: URL?
         let completedAt: Date?   // CheckRun completion timestamp (used for dedup ordering)
         let state: String?       // PENDING, SUCCESS, FAILURE, ERROR, EXPECTED
         let context: String?     // StatusContext name (e.g., "ci/build", "code-review/reviewable")
@@ -3556,8 +3709,13 @@ private struct CombinedGraphQLResponse: Decodable {
     }
 
     struct ContextNode: Decodable {
+        let databaseId: Int?
         let name: String?
+        let status: String?
         let conclusion: String?
+        let detailsUrl: URL?
+        let externalId: String?
+        let url: URL?
         let completedAt: Date?
         let state: String?
         let context: String?
