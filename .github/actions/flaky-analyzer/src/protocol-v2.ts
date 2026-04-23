@@ -105,16 +105,11 @@ export interface BuildProtocolResultOpts {
   backendVersion?: string;
 }
 
-function classificationTitle(classification: Classification): string {
-  switch (classification) {
-  case "likely_flaky":
-    return "Likely flaky";
-  case "likely_blocker":
-    return "Likely blocker";
-  case "investigate":
-    return "Needs investigation";
-  }
-}
+export const CLASSIFICATION_LABEL: Record<Classification, { plain: string; emoji: string }> = {
+  likely_flaky: { plain: "Likely flaky", emoji: "🟡 Likely flaky" },
+  likely_blocker: { plain: "Likely blocker", emoji: "🔴 Likely blocker" },
+  investigate: { plain: "Needs investigation", emoji: "🔍 Needs investigation" },
+};
 
 function flakyScore(classification: Classification, confidence: Confidence): number {
   const confidenceBoost: Record<Confidence, number> = { low: 8, medium: 16, high: 24 };
@@ -205,7 +200,7 @@ export function buildProtocolResultV2(
       history: job.job_id === primaryJobId ? history : emptyHistory(),
     })),
     summary: {
-      title: classificationTitle(result.classification),
+      title: CLASSIFICATION_LABEL[result.classification].plain,
       evidence_line: evidenceLine || result.error_summary || result.root_cause,
       detail: result.explanation || result.error_summary || result.root_cause,
     },
@@ -232,25 +227,12 @@ export function buildProtocolResultV2(
   };
 }
 
-function base64UrlEncode(input: string): string {
-  return Buffer.from(input, "utf8")
-    .toString("base64")
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/g, "");
-}
-
-function base64UrlDecode(input: string): string {
-  const padded = input.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(input.length / 4) * 4, "=");
-  return Buffer.from(padded, "base64").toString("utf8");
-}
-
 export function encodeProtocolMarker(result: FlakyCIAnalysisResultV2): string {
-  const payload = JSON.stringify(result);
-  const encoded = base64UrlEncode(payload);
+  const encoded = Buffer.from(JSON.stringify(result), "utf8").toString("base64url");
   const marker = `${FLAKY_CI_MARKER_PREFIX}${encoded} -->`;
-  if (Buffer.byteLength(marker, "utf8") > MAX_MARKER_BYTES) {
-    throw new Error(`Flaky CI protocol marker is too large: ${Buffer.byteLength(marker, "utf8")} bytes`);
+  const markerBytes = Buffer.byteLength(marker, "utf8");
+  if (markerBytes > MAX_MARKER_BYTES) {
+    throw new Error(`Flaky CI protocol marker is too large: ${markerBytes} bytes`);
   }
   return marker;
 }
@@ -262,7 +244,8 @@ export function decodeProtocolMarker(text: string): FlakyCIAnalysisResultV2 | nu
   const end = text.indexOf(" -->", encodedStart);
   if (end < 0) return null;
 
-  const decoded = JSON.parse(base64UrlDecode(text.slice(encodedStart, end))) as FlakyCIAnalysisResultV2;
+  const payload = Buffer.from(text.slice(encodedStart, end), "base64url").toString("utf8");
+  const decoded = JSON.parse(payload) as FlakyCIAnalysisResultV2;
   if (decoded.schema_version !== FLAKY_CI_SCHEMA_VERSION || decoded.protocol !== FLAKY_CI_PROTOCOL) {
     return null;
   }

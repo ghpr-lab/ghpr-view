@@ -28,22 +28,30 @@ export function classify(agent: AgentOutput, meta: ClassifyMeta): FlakyResult {
     classification = "investigate";
   }
 
-  const agrees =
-    (agent.verdict === "flaky" && agent.relatedness_score < 0.5) ||
-    (agent.verdict === "blocker" && agent.relatedness_score >= 0.5);
+  const agrees = classification !== "investigate";
   const confidence: Confidence = historyInfluenced
     ? "high"
     : agrees
       ? agent.confidence
       : "low";
 
+  // Prefer the agent-generated signature for display. Fall back to the regex
+  // seed (meta.failure_signature) when the agent couldn't produce one. The
+  // seed is also what history lookup was run against, so note it separately
+  // in evidence when the two diverge.
+  const agentSignature = agent.failure_signature.trim();
+  const finalSignature = agentSignature || meta.failure_signature;
+
   const evidence: string[] = [
     `root cause: ${agent.root_cause || "(none)"}`,
     `verdict: ${agent.verdict} — ${agent.rationale || "(no rationale)"}`,
     `relatedness: ${agent.relatedness_score.toFixed(2)}`,
-    `failure signature: ${meta.failure_signature || "(none)"}`,
+    `failure signature: ${finalSignature || "(none)"}`,
     `history: signature matched in ${meta.history.main_matches}/${meta.history.main_sampled} main failures, ${meta.history.pr_matches}/${meta.history.pr_sampled} recent PR failures`,
   ];
+  if (agentSignature && meta.failure_signature && agentSignature !== meta.failure_signature) {
+    evidence.push(`history anchor (regex seed): ${meta.failure_signature}`);
+  }
   if (meta.history.sample_run_urls.length > 0) {
     evidence.push(`history matched runs: ${meta.history.sample_run_urls.join(", ")}`);
   }
@@ -70,7 +78,7 @@ export function classify(agent: AgentOutput, meta: ClassifyMeta): FlakyResult {
     verdict: agent.verdict,
     relatedness_score: agent.relatedness_score,
     confidence,
-    failure_signature: meta.failure_signature,
+    failure_signature: finalSignature,
     history: meta.history,
     history_influenced: historyInfluenced,
     root_cause: agent.root_cause,

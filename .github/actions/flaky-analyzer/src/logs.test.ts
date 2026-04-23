@@ -49,4 +49,14 @@ describe("sliceAroundFailure", () => {
     const out = sliceAroundFailure(input, 3000);
     expect(out).toContain("FAIL spec/foo.ts:42 expected X got Y");
   });
+
+  test("does not anchor on hyphenated 'error' in package-install output", () => {
+    const prelude = `${"Installing libgpg-error (1.47-r2)\n".repeat(1000)}`;
+    const failure = "FAIL spec/foo.ts:42 expected 3 got 2\n";
+    const postlude = `${"trailing\n".repeat(200)}`;
+    const input = prelude + failure + postlude;
+
+    const out = sliceAroundFailure(input, 3000);
+    expect(out).toContain("FAIL spec/foo.ts:42 expected 3 got 2");
+  });
 });

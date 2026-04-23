@@ -11,6 +11,7 @@ import {
 import type { AgentOutput, HistorySummary } from "./schema.ts";
 
 const agent: AgentOutput = {
+  failure_signature: "Error: service timed out",
   root_cause: "service timed out",
   error_summary: "The service timed out during startup.",
   verdict: "flaky",

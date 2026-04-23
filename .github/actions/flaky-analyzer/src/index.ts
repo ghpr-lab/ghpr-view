@@ -48,7 +48,6 @@ async function main(): Promise<void> {
   }
 
   const primaryJob = jobs[0];
-  let primaryFilteredLog = "";
   const jobSignatures = new Map<number, string>();
   const jobConclusions = new Map<number, string | null>();
   const rawLogs: string[] = [];
@@ -63,14 +62,11 @@ async function main(): Promise<void> {
     jobConclusions.set(j.id, j.conclusion);
     rawLogs.push(`\n===== JOB ${j.id} ${j.name} =====\n${redactedRawLog}`);
     filteredLogs.push(`\n===== JOB ${j.id} ${j.name} =====\n${filteredLog}`);
-    if (primaryJob?.id === j.id) {
-      primaryFilteredLog = filteredLog;
-    }
   }
 
   const rawLogsBlob = rawLogs.join("");
   const filteredLogsBlob = sliceAroundFailure(filteredLogs.join(""), LOG_TAIL_BYTES);
-  const failureSignature = primaryJob ? jobSignatures.get(primaryJob.id) ?? extractSignature(primaryFilteredLog) : "";
+  const failureSignature = primaryJob ? jobSignatures.get(primaryJob.id) ?? "" : "";
 
   core.info(`Fetching PR diff filenames…`);
   const rawDiffFiles = await fetchPrDiffFilenames(gh, inputs.prNumber);
@@ -108,37 +104,35 @@ async function main(): Promise<void> {
     core.info("Skipping history lookup because no primary failed job signature was available.");
   }
 
-  fs.writeFileSync(path.join(ioDir, "logs.raw.txt"), rawLogsBlob);
-  fs.writeFileSync(path.join(ioDir, "logs.txt"), filteredLogsBlob);
-  fs.writeFileSync(path.join(ioDir, "diff-files.raw.txt"), rawDiffFiles.join("\n"));
-  fs.writeFileSync(
-    path.join(ioDir, "diff-files.txt"),
-    filteredDiffFiles.length > 0
-      ? filteredDiffFiles.join("\n")
-      : "(all changed files were auto-generated / lockfiles)",
+  const diffFilesText = filteredDiffFiles.length > 0
+    ? filteredDiffFiles.join("\n")
+    : "(all changed files were auto-generated / lockfiles)";
+  const contextJson = JSON.stringify(
+    {
+      pr_number: inputs.prNumber,
+      schema_version: inputs.schemaVersion,
+      request_id: inputs.requestId,
+      trigger: inputs.trigger,
+      run_id: inputs.runId,
+      head_sha: inputs.headSha,
+      failed_jobs: jobs.map((j) => ({ job_id: j.id, job_name: j.name })),
+      primary_failed_job: primaryJob
+        ? { job_id: primaryJob.id, job_name: primaryJob.name }
+        : null,
+      failure_signature: failureSignature,
+    },
+    null,
+    2,
   );
-  fs.writeFileSync(path.join(ioDir, "diff.patch"), diffPatch);
-  fs.writeFileSync(
-    path.join(ioDir, "context.json"),
-    JSON.stringify(
-      {
-        pr_number: inputs.prNumber,
-        schema_version: inputs.schemaVersion,
-        request_id: inputs.requestId,
-        trigger: inputs.trigger,
-        run_id: inputs.runId,
-        head_sha: inputs.headSha,
-        failed_jobs: jobs.map((j) => ({ job_id: j.id, job_name: j.name })),
-        primary_failed_job: primaryJob
-          ? { job_id: primaryJob.id, job_name: primaryJob.name }
-          : null,
-        failure_signature: failureSignature,
-      },
-      null,
-      2,
-    ),
-  );
-  fs.writeFileSync(path.join(ioDir, "history.json"), JSON.stringify(history, null, 2));
+  await Promise.all([
+    fs.promises.writeFile(path.join(ioDir, "logs.raw.txt"), rawLogsBlob),
+    fs.promises.writeFile(path.join(ioDir, "logs.txt"), filteredLogsBlob),
+    fs.promises.writeFile(path.join(ioDir, "diff-files.raw.txt"), rawDiffFiles.join("\n")),
+    fs.promises.writeFile(path.join(ioDir, "diff-files.txt"), diffFilesText),
+    fs.promises.writeFile(path.join(ioDir, "diff.patch"), diffPatch),
+    fs.promises.writeFile(path.join(ioDir, "context.json"), contextJson),
+    fs.promises.writeFile(path.join(ioDir, "history.json"), JSON.stringify(history, null, 2)),
+  ]);
 
   const agentOut = await runCopilotAgent({
     actionPath: inputs.actionPath,

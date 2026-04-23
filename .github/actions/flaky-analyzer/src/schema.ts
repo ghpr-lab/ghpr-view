@@ -16,6 +16,7 @@ export interface HistorySummary {
 }
 
 export interface AgentOutput {
+  failure_signature: string;
   root_cause: string;
   error_summary: string;
   verdict: Verdict;

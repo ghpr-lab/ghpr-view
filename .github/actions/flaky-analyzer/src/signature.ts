@@ -1,4 +1,5 @@
-const ERROR_LINE = /\b(?:Error|FAIL(?:ED|URE)?|panic|Exception|fatal)\b/i;
+import { FAILURE_PATTERN } from "./failure-pattern.ts";
+
 const ISO_TIMESTAMP = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/g;
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
 const FILE_PATH = /[A-Za-z0-9_./-]+\.(?:ts|js|go|py|rb|swift|rs|c|cpp|h|java)(?::\d+)*/gi;
@@ -20,7 +21,7 @@ function normalizeSignatureLine(line: string): string {
 
 export function extractSignature(log: string): string {
   const lines = log.split("\n");
-  const errorLine = lines.find((line) => ERROR_LINE.test(line));
+  const errorLine = lines.find((line) => FAILURE_PATTERN.test(line));
   if (errorLine !== undefined) return normalizeSignatureLine(errorLine);
 
   for (let i = lines.length - 1; i >= 0; i -= 1) {

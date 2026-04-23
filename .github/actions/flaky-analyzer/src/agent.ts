@@ -85,19 +85,17 @@ function spawnCopilot(argv: string[], cwd: string, timeoutMs: number): Promise<S
 }
 
 function neutralStub(stderr: string, reason: string): AgentOutput {
+  const errorSummary = stderr ? `${reason} stderr: ${stderr.slice(-200).trim()}` : reason;
   return {
+    failure_signature: "",
     root_cause: "(agent unavailable)",
-    error_summary: reason,
+    error_summary: errorSummary,
     verdict: "flaky",
     relatedness_score: 0.5,
     related_files: [],
     rationale: `Agent fallback: ${reason}`,
     confidence: "low",
     tools_used: [],
-    // Preserve a short stderr hint in rationale if present
-    ...(stderr
-      ? { error_summary: `${reason} stderr: ${stderr.slice(-200).trim()}` }
-      : {}),
   };
 }
 
@@ -116,7 +114,10 @@ function parseResultJson(raw: string): AgentOutput | null {
   if (score === null) return null;
   const confidence = o.confidence;
   if (confidence !== "low" && confidence !== "medium" && confidence !== "high") return null;
+  const rawSignature = typeof o.failure_signature === "string" ? o.failure_signature : "";
+  const failureSignature = rawSignature.trim().replace(/\s+/g, " ").slice(0, 200);
   return {
+    failure_signature: failureSignature,
     root_cause: typeof o.root_cause === "string" ? o.root_cause : "",
     error_summary: typeof o.error_summary === "string" ? o.error_summary : "",
     verdict,

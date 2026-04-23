@@ -3,6 +3,7 @@ import { classify } from "./classify.ts";
 import type { AgentOutput, ClassifyMeta, HistorySummary } from "./schema.ts";
 
 const baseAgent: AgentOutput = {
+  failure_signature: "",
   root_cause: "unit test failed because assertion mismatched",
   error_summary: "The test assertion failed.",
   verdict: "blocker",
@@ -85,6 +86,30 @@ describe("classify", () => {
     expect(result.classification).toBe("investigate");
     expect(result.confidence).toBe("low");
     expect(result.evidence.some((e) => e.includes("classified as investigate"))).toBe(true);
+  });
+
+  test("prefers the agent-generated failure signature over the regex seed", () => {
+    const result = classify(
+      { ...baseAgent, failure_signature: "spec/foo_spec.lua:1040 assertion 'Expected 3, got 2'" },
+      meta(),
+    );
+
+    expect(result.failure_signature).toBe(
+      "spec/foo_spec.lua:1040 assertion 'Expected 3, got 2'",
+    );
+    expect(result.evidence).toContain(
+      "failure signature: spec/foo_spec.lua:1040 assertion 'Expected 3, got 2'",
+    );
+    expect(result.evidence).toContain(
+      "history anchor (regex seed): Error: assertion failed",
+    );
+  });
+
+  test("falls back to the regex seed when the agent omits the signature", () => {
+    const result = classify({ ...baseAgent, failure_signature: "" }, meta());
+
+    expect(result.failure_signature).toBe("Error: assertion failed");
+    expect(result.evidence.every((e) => !e.startsWith("history anchor"))).toBe(true);
   });
 
   test("always includes history evidence", () => {

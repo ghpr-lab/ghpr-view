@@ -14,7 +14,7 @@ enum FlakyCIProtocolV2 {
 
         let encoded = String(text[encodedStart..<endRange.lowerBound])
         guard let data = Data(base64URLEncoded: encoded) else { return nil }
-        let result = try JSONDecoder.flakyCIProtocolDecoder.decode(FlakyCIAnalysisResultV2.self, from: data)
+        let result = try JSONDecoder.githubDecoder.decode(FlakyCIAnalysisResultV2.self, from: data)
         guard result.schemaVersion == 2, result.protocolName == protocolName else { return nil }
 
         if let currentHeadSHA, result.target.headSHA.lowercased() != currentHeadSHA.lowercased() {
@@ -299,37 +299,3 @@ private extension Data {
     }
 }
 
-private extension JSONDecoder {
-    static var flakyCIProtocolDecoder: JSONDecoder {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .custom { decoder in
-            let container = try decoder.singleValueContainer()
-            let value = try container.decode(String.self)
-            if let date = ISO8601DateFormatter.flakyCIProtocolFormatterWithFractionalSeconds.date(from: value) {
-                return date
-            }
-            if let date = ISO8601DateFormatter.flakyCIProtocolFormatter.date(from: value) {
-                return date
-            }
-            throw DecodingError.dataCorruptedError(
-                in: container,
-                debugDescription: "Invalid ISO-8601 date: \(value)"
-            )
-        }
-        return decoder
-    }
-}
-
-private extension ISO8601DateFormatter {
-    static let flakyCIProtocolFormatter: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter
-    }()
-
-    static let flakyCIProtocolFormatterWithFractionalSeconds: ISO8601DateFormatter = {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter
-    }()
-}

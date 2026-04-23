@@ -1,4 +1,4 @@
-const FAILURE_PATTERN = /\b(?:Error|FAIL(?:ED|URE)?|panic|Exception|fatal)\b/i;
+import { FAILURE_PATTERN } from "./failure-pattern.ts";
 
 export function tailTruncate(input: string, maxBytes: number): string {
   const buf = Buffer.from(input, "utf8");

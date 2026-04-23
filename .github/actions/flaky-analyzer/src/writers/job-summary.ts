@@ -1,11 +1,6 @@
 import * as core from "@actions/core";
 import type { FlakyResult } from "../schema.ts";
-
-const BADGE: Record<FlakyResult["classification"], string> = {
-  likely_flaky: "🟡 Likely flaky",
-  likely_blocker: "🔴 Likely blocker",
-  investigate: "🔍 Needs investigation",
-};
+import { CLASSIFICATION_LABEL } from "../protocol-v2.ts";
 
 export async function writeJobSummary(result: FlakyResult): Promise<void> {
   const md = renderSummary(result);
@@ -14,7 +9,7 @@ export async function writeJobSummary(result: FlakyResult): Promise<void> {
 
 export function renderSummary(r: FlakyResult): string {
   const lines: string[] = [];
-  lines.push(`## Flaky CI Review — ${BADGE[r.classification]}`);
+  lines.push(`## Flaky CI Review — ${CLASSIFICATION_LABEL[r.classification].emoji}`);
   lines.push("");
   lines.push(`**Verdict:** \`${r.verdict}\``);
   lines.push(`**Relatedness:** \`${r.relatedness_score.toFixed(2)}\``);
