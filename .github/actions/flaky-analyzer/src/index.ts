@@ -39,6 +39,14 @@ async function main(): Promise<void> {
     : allJobs;
   core.info(`Found ${jobs.length} failed job(s) in run ${inputs.runId}`);
 
+  if (jobs.length === 0) {
+    core.info("No failed jobs — skipping analyzer.");
+    core.setOutput("classification", "no_failure");
+    core.setOutput("verdict", "no_failure");
+    core.setOutput("result_json", "");
+    return;
+  }
+
   const primaryJob = jobs[0];
   let primaryFilteredLog = "";
   const jobSignatures = new Map<number, string>();
@@ -47,13 +55,7 @@ async function main(): Promise<void> {
   const filteredLogs: string[] = [];
   for (const j of jobs) {
     core.info(`Fetching log for job ${j.id} (${j.name})…`);
-    let log = "";
-    try {
-      log = await fetchJobLog(gh, j.id);
-    } catch (err: unknown) {
-      core.warning(`Failed to fetch log for job ${j.id}: ${(err as Error).message}`);
-      log = `(failed to fetch log for job ${j.id}: ${(err as Error).message})\n`;
-    }
+    const log = await fetchJobLog(gh, j.id);
     const redactedRawLog = redactSecrets(log);
     const filteredLog = redactSecrets(stripLogNoise(log));
     const jobSignature = extractSignature(filteredLog);
