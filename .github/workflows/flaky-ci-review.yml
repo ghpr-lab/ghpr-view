@@ -1,0 +1,114 @@
+name: Flaky CI Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      schema_version:
+        description: "Flaky CI protocol schema version"
+        required: false
+        type: string
+        default: "2"
+      request_id:
+        description: "Client request id for result correlation"
+        required: false
+        type: string
+      pr_number:
+        description: "Pull request number"
+        required: true
+        type: string
+      head_sha:
+        description: "PR head commit SHA (validated against PR.head.sha)"
+        required: true
+        type: string
+      run_id:
+        description: "Failed workflow run id to analyze"
+        required: true
+        type: string
+      job_ids:
+        description: "Optional comma-separated failed job ids"
+        required: false
+        type: string
+      trigger:
+        description: "Trigger source"
+        required: false
+        type: string
+        default: "manual"
+      correlation_id:
+        description: "Opaque client request id, echoed back in result"
+        required: false
+        type: string
+      write_pr_comment:
+        description: "Post/update a PR comment (requires pull-requests:write + issues:write)"
+        required: false
+        type: boolean
+        default: false
+      dry_run:
+        description: "Compute verdict and emit result_json output but skip Check Run + PR comment writes"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: read
+  checks: write
+  # Uncomment these two ONLY if you invoke with write_pr_comment=true:
+  # pull-requests: write
+  # issues: write
+
+concurrency:
+  group: flaky-ci-review-${{ inputs.pr_number }}-${{ inputs.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout action code (default branch)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Checkout PR head into ./pr-code
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ inputs.pr_number }}/head
+          fetch-depth: 1
+          path: pr-code
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Copilot CLI
+        run: npm install -g @github/copilot
+
+      - name: Run flaky analyzer
+        uses: ./.github/actions/flaky-analyzer
+        with:
+          schema_version: ${{ inputs.schema_version }}
+          request_id: ${{ inputs.request_id }}
+          pr_number: ${{ inputs.pr_number }}
+          head_sha: ${{ inputs.head_sha }}
+          run_id: ${{ inputs.run_id }}
+          job_ids: ${{ inputs.job_ids }}
+          trigger: ${{ inputs.trigger }}
+          correlation_id: ${{ inputs.correlation_id }}
+          write_pr_comment: ${{ inputs.write_pr_comment }}
+          dry_run: ${{ inputs.dry_run }}
+          pr_code_dir: ${{ github.workspace }}/pr-code
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          copilot_token: ${{ secrets.COPILOT_PAT }}
+
+      - name: Upload diagnostic artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flaky-ci-review-${{ inputs.run_id }}
+          path: pr-code/.tmp/flaky/
+          retention-days: 7
+          if-no-files-found: warn

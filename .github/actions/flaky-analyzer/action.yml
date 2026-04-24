@@ -1,0 +1,77 @@
+name: Flaky CI Analyzer
+description: Copilot-CLI-based flaky-CI verdict for one workflow run.
+
+inputs:
+  schema_version:
+    required: false
+    default: "2"
+  request_id:
+    required: false
+    default: ""
+  pr_number:
+    required: true
+  head_sha:
+    required: true
+  run_id:
+    required: true
+  job_ids:
+    required: false
+    default: ""
+  trigger:
+    required: false
+    default: "manual"
+  pr_code_dir:
+    required: true
+  correlation_id:
+    required: false
+    default: ""
+  write_pr_comment:
+    required: false
+    default: "false"
+  dry_run:
+    required: false
+    default: "false"
+  github_token:
+    required: true
+  copilot_token:
+    required: true
+
+outputs:
+  classification:
+    description: "likely_flaky | likely_blocker | investigate"
+    value: ${{ steps.run.outputs.classification }}
+  verdict:
+    description: "flaky | blocker (agent output before agreement check)"
+    value: ${{ steps.run.outputs.verdict }}
+  result_json:
+    description: "Full FlakyResult JSON (single-line)"
+    value: ${{ steps.run.outputs.result_json }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install deps
+      run: bun install --frozen-lockfile
+      shell: bash
+      working-directory: ${{ github.action_path }}
+
+    - id: run
+      name: Run analyzer
+      run: bun run src/index.ts
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        INPUT_SCHEMA_VERSION: ${{ inputs.schema_version }}
+        INPUT_REQUEST_ID: ${{ inputs.request_id }}
+        INPUT_PR_NUMBER: ${{ inputs.pr_number }}
+        INPUT_HEAD_SHA: ${{ inputs.head_sha }}
+        INPUT_RUN_ID: ${{ inputs.run_id }}
+        INPUT_JOB_IDS: ${{ inputs.job_ids }}
+        INPUT_TRIGGER: ${{ inputs.trigger }}
+        INPUT_PR_CODE_DIR: ${{ inputs.pr_code_dir }}
+        INPUT_CORRELATION_ID: ${{ inputs.correlation_id }}
+        INPUT_WRITE_PR_COMMENT: ${{ inputs.write_pr_comment }}
+        INPUT_DRY_RUN: ${{ inputs.dry_run }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        COPILOT_GITHUB_TOKEN: ${{ inputs.copilot_token }}
+        ACTION_PATH: ${{ github.action_path }}
