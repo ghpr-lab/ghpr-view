@@ -2,7 +2,7 @@ name: Flaky CI Auto-Trigger
 
 on:
   workflow_run:
-    workflows: ["Swift"]
+    workflows: ["Swift", "Flaky Analyzer CI"]
     types: [completed]
 
 permissions:
