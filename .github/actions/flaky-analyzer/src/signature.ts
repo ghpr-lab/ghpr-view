@@ -2,7 +2,7 @@ import { FAILURE_PATTERN } from "./failure-pattern.ts";
 
 const ISO_TIMESTAMP = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b/g;
 const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
-const FILE_PATH = /[A-Za-z0-9_./-]+\.(?:ts|js|go|py|rb|swift|rs|c|cpp|h|java)(?::\d+)*/gi;
+const FILE_PATH = /[A-Za-z0-9_./-]+\.(?:ts|js|go|py|rb|swift|rs|c|cpp|h|java|lua)(?::\d+)*/gi;
 const IP_ADDRESS = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 const HEX_HASH = /\b[0-9a-f]{7,}\b/gi;
 const LONG_NUMBER = /\b\d{3,}\b/g;

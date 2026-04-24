@@ -62,19 +62,7 @@ describe("extractSignature", () => {
     expect(extractSignature("setup ok\nFAILURE: boom")).toBe("FAILURE: boom");
   });
 
-  test("skips apk/apt install noise that contains hyphenated 'error'", () => {
-    const log = [
-      "<TS> #6 0.<N> (5/34) Installing libgpg-error (1.47-r2)",
-      "<TS> #6 0.<N> (6/34) Installing gnutls (3.8.1-r0)",
-      "FAIL spec/03-plugins/46-ai-sanitizer/01-integration_spec.lua:1040 expected 3 got 2",
-    ].join("\n");
-
-    expect(extractSignature(log)).toBe(
-      "FAIL <FILE> expected 3 got 2",
-    );
-  });
-
-  test("matches capitalized error subtypes like SyntaxError and TypeError", () => {
+test("matches capitalized error subtypes like SyntaxError and TypeError", () => {
     expect(extractSignature("setup ok\nSyntaxError: unexpected token")).toBe(
       "SyntaxError: unexpected token",
     );

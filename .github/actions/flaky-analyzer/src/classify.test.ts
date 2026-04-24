@@ -90,15 +90,15 @@ describe("classify", () => {
 
   test("prefers the agent-generated failure signature over the regex seed", () => {
     const result = classify(
-      { ...baseAgent, failure_signature: "spec/foo_spec.lua:1040 assertion 'Expected 3, got 2'" },
+      { ...baseAgent, failure_signature: "spec/foo_spec.ts:1040 assertion 'Expected 3, got 2'" },
       meta(),
     );
 
     expect(result.failure_signature).toBe(
-      "spec/foo_spec.lua:1040 assertion 'Expected 3, got 2'",
+      "spec/foo_spec.ts:1040 assertion 'Expected 3, got 2'",
     );
     expect(result.evidence).toContain(
-      "failure signature: spec/foo_spec.lua:1040 assertion 'Expected 3, got 2'",
+      "failure signature: spec/foo_spec.ts:1040 assertion 'Expected 3, got 2'",
     );
     expect(result.evidence).toContain(
       "history anchor (regex seed): Error: assertion failed",
