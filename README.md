@@ -36,6 +36,7 @@ brew install xiaocang/tap/prdashboard
 - **Review Status** - Shows your review status (approved, changes requested, etc.) on review-requested PRs
 - **Notifications** - Desktop alerts for new unresolved comments and CI status changes
 - **Rate Limit Display** - Shows GitHub API rate limit in footer
+- **Local CLI** - Query the running app over a local Unix socket with `ghpr`
 
 ## Usage
 
@@ -59,6 +60,25 @@ brew install xiaocang/tap/prdashboard
 - **Right-click** menu bar icon - Show context menu (version info, quit)
 - **Cmd+R** - Refresh PR list
 - **Settings** (gear icon) - Configure refresh interval, filters, notifications
+
+### Local CLI
+
+Build the command-line tool:
+
+```bash
+make build-cli
+```
+
+`make build-cli` prints the built `ghpr` path. Add it to your `PATH` or run that binary directly. Run PRDashboard, then query its current in-memory snapshot:
+
+```bash
+ghpr status
+ghpr prs --section authored
+ghpr prs --json
+ghpr snapshot --json
+```
+
+The CLI connects to a read-only Unix socket at `/tmp/com.xiaocang.PRDashboard.<uid>.sock`. Use `GHPR_SOCKET_PATH` or `--socket PATH` to override the path.
 
 ### Settings
 
@@ -84,6 +104,7 @@ brew install xiaocang/tap/prdashboard
 git clone https://github.com/xiaocang/ghpr-view.git
 cd ghpr-view
 ./run.sh
+make build-cli
 ```
 
 ## License

@@ -42,6 +42,18 @@
 		B1000003 /* UpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* UpdateView.swift */; };
 		B1000004 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000006 /* XCTest.framework */; };
 		B1000005 /* UpdateLogicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000005 /* UpdateLogicTests.swift */; };
+		C1000001 /* LocalAPIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000001 /* LocalAPIModels.swift */; };
+		C1000002 /* UnixSocketAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000002 /* UnixSocketAddress.swift */; };
+		C1000003 /* LocalSnapshotFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000003 /* LocalSnapshotFactory.swift */; };
+		C1000004 /* LocalSocketServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000004 /* LocalSocketServer.swift */; };
+		C1000005 /* LocalSocketClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000005 /* LocalSocketClient.swift */; };
+		C1000006 /* GHPRCLICore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000006 /* GHPRCLICore.swift */; };
+		C1000007 /* LocalAPITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000007 /* LocalAPITests.swift */; };
+		D1000001 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2000001 /* main.swift */; };
+		D1000002 /* LocalAPIModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000001 /* LocalAPIModels.swift */; };
+		D1000003 /* UnixSocketAddress.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000002 /* UnixSocketAddress.swift */; };
+		D1000004 /* LocalSocketClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000005 /* LocalSocketClient.swift */; };
+		D1000005 /* GHPRCLICore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C2000006 /* GHPRCLICore.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -94,6 +106,15 @@
 		B2000005 /* UpdateLogicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateLogicTests.swift; sourceTree = "<group>"; };
 		B2000006 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
 		B3000001 /* PRDashboardTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PRDashboardTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C2000001 /* LocalAPIModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAPIModels.swift; sourceTree = "<group>"; };
+		C2000002 /* UnixSocketAddress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnixSocketAddress.swift; sourceTree = "<group>"; };
+		C2000003 /* LocalSnapshotFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSnapshotFactory.swift; sourceTree = "<group>"; };
+		C2000004 /* LocalSocketServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSocketServer.swift; sourceTree = "<group>"; };
+		C2000005 /* LocalSocketClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalSocketClient.swift; sourceTree = "<group>"; };
+		C2000006 /* GHPRCLICore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GHPRCLICore.swift; sourceTree = "<group>"; };
+		C2000007 /* LocalAPITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalAPITests.swift; sourceTree = "<group>"; };
+		D2000001 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		D3000001 /* ghpr */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = ghpr; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -112,6 +133,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		D4000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -119,6 +147,7 @@
 			isa = PBXGroup;
 			children = (
 				A5000002 /* PRDashboard */,
+				D5000001 /* ghpr */,
 				B5000012 /* PRDashboardTests */,
 				B5000013 /* Frameworks */,
 				A5000010 /* Products */,
@@ -136,6 +165,7 @@
 				A5000006 /* ViewModels */,
 				A5000007 /* Views */,
 				A5000009 /* Helpers */,
+				C5000001 /* LocalAPI */,
 				A5000011 /* Resources */,
 				A2000020 /* Assets.xcassets */,
 				A2000021 /* Info.plist */,
@@ -228,6 +258,7 @@
 			children = (
 				A3000001 /* PRDashboard.app */,
 				B3000001 /* PRDashboardTests.xctest */,
+				D3000001 /* ghpr */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -244,6 +275,7 @@
 			isa = PBXGroup;
 			children = (
 				B2000005 /* UpdateLogicTests.swift */,
+				C2000007 /* LocalAPITests.swift */,
 			);
 			path = PRDashboardTests;
 			sourceTree = "<group>";
@@ -254,6 +286,27 @@
 				B2000006 /* XCTest.framework */,
 			);
 			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		C5000001 /* LocalAPI */ = {
+			isa = PBXGroup;
+			children = (
+				C2000001 /* LocalAPIModels.swift */,
+				C2000002 /* UnixSocketAddress.swift */,
+				C2000003 /* LocalSnapshotFactory.swift */,
+				C2000004 /* LocalSocketServer.swift */,
+				C2000005 /* LocalSocketClient.swift */,
+				C2000006 /* GHPRCLICore.swift */,
+			);
+			path = LocalAPI;
+			sourceTree = "<group>";
+		};
+		D5000001 /* ghpr */ = {
+			isa = PBXGroup;
+			children = (
+				D2000001 /* main.swift */,
+			);
+			path = ghpr;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -295,6 +348,22 @@
 			productReference = B3000001 /* PRDashboardTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		D6000001 /* ghpr */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D8000001 /* Build configuration list for PBXNativeTarget "ghpr" */;
+			buildPhases = (
+				D7000001 /* Sources */,
+				D4000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ghpr;
+			productName = ghpr;
+			productReference = D3000001 /* ghpr */;
+			productType = "com.apple.product-type.tool";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -309,6 +378,9 @@
 						CreatedOnToolsVersion = 15.0;
 					};
 					B6000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+					D6000001 = {
 						CreatedOnToolsVersion = 15.0;
 					};
 				};
@@ -329,6 +401,7 @@
 			targets = (
 				A6000001 /* PRDashboard */,
 				B6000001 /* PRDashboardTests */,
+				D6000001 /* ghpr */,
 			);
 		};
 /* End PBXProject section */
@@ -393,6 +466,12 @@
 				A1000009 /* PRManager.swift in Sources */,
 				A100000A /* GitHubAPIClient.swift in Sources */,
 				A100000B /* NotificationManager.swift in Sources */,
+				C1000001 /* LocalAPIModels.swift in Sources */,
+				C1000002 /* UnixSocketAddress.swift in Sources */,
+				C1000003 /* LocalSnapshotFactory.swift in Sources */,
+				C1000004 /* LocalSocketServer.swift in Sources */,
+				C1000005 /* LocalSocketClient.swift in Sources */,
+				C1000006 /* GHPRCLICore.swift in Sources */,
 				A100000C /* PullRequest.swift in Sources */,
 				A100000D /* ReviewThread.swift in Sources */,
 				A100000E /* Configuration.swift in Sources */,
@@ -419,6 +498,19 @@
 			buildActionMask = 2147483647;
 			files = (
 				B1000005 /* UpdateLogicTests.swift in Sources */,
+				C1000007 /* LocalAPITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D7000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D1000002 /* LocalAPIModels.swift in Sources */,
+				D1000003 /* UnixSocketAddress.swift in Sources */,
+				D1000004 /* LocalSocketClient.swift in Sources */,
+				D1000005 /* GHPRCLICore.swift in Sources */,
+				D1000001 /* main.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -660,6 +752,35 @@
 			};
 			name = Release;
 		};
+		DA000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 24;
+				DEVELOPMENT_TEAM = "";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.3.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.xiaocang.ghpr;
+				PRODUCT_NAME = ghpr;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		DA000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 24;
+				DEVELOPMENT_TEAM = "";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MARKETING_VERSION = 1.3.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.xiaocang.ghpr;
+				PRODUCT_NAME = ghpr;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -686,6 +807,15 @@
 			buildConfigurations = (
 				BA000001 /* Debug */,
 				BA000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D8000001 /* Build configuration list for PBXNativeTarget "ghpr" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				DA000001 /* Debug */,
+				DA000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

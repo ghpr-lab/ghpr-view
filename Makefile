@@ -1,11 +1,13 @@
-.PHONY: build build-release run clean install uninstall open lint format help
+.PHONY: build build-cli build-release run clean install uninstall open lint format help
 
 # Project configuration
 PROJECT_NAME = PRDashboard
 SCHEME = PRDashboard
+CLI_SCHEME = ghpr
 BUILD_DIR = build
 DERIVED_DATA = $(BUILD_DIR)/DerivedData
 APP_NAME = $(PROJECT_NAME).app
+CLI_NAME = ghpr
 INSTALL_DIR = /Applications
 
 # Xcode build settings
@@ -19,6 +21,13 @@ all: build
 
 build: ## Build debug version
 	xcodebuild $(XCODE_FLAGS) -configuration Debug build
+
+build-cli: ## Build ghpr command-line tool
+	xcodebuild -project $(XCODE_PROJECT) -scheme $(CLI_SCHEME) -derivedDataPath $(DERIVED_DATA) -configuration Debug build
+	@CLI_PATH=$$(find $(DERIVED_DATA) -name "$(CLI_NAME)" -type f | head -1); \
+	if [ -n "$$CLI_PATH" ]; then \
+		echo "Built $$CLI_PATH"; \
+	fi
 
 build-release: ## Build release version
 	xcodebuild $(XCODE_FLAGS) -configuration Release build

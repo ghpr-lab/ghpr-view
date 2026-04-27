@@ -10,6 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var notificationManager: NotificationManager?
     var onboardingManager: OnboardingManager?
     var updateManager: UpdateManager?
+    var localSocketServer: LocalSocketServer?
     var settingsWindow: NSWindow?
     var updateWindow: NSWindow?
 
@@ -84,6 +85,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
+        localSocketServer = LocalSocketServer { [weak self] in
+            AppDelegate.makeLocalSnapshot(
+                oauthManager: self?.oauthManager,
+                prManager: self?.prManager
+            )
+        }
+        localSocketServer?.start()
+
         // 10. Request notification permission if authenticated
         if oauthManager?.authState.isAuthenticated == true {
             notificationManager?.requestPermission()
@@ -99,6 +108,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
 
         updateManager?.start()
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        localSocketServer?.stop()
+        localSocketServer = nil
     }
 
     private func openSettingsWindow(viewModel: PRListViewModel) {
@@ -148,5 +162,42 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         updateManager?.checkForUpdates(userInitiated: userInitiated)
+    }
+
+    private static func makeLocalSnapshot(
+        oauthManager: GitHubOAuthManager?,
+        prManager: PRManager?
+    ) -> LocalSnapshot {
+        let refreshStatus: String
+        let refreshError: String?
+        switch prManager?.refreshState ?? .idle {
+        case .idle:
+            refreshStatus = "idle"
+            refreshError = prManager?.prList.error?.localizedDescription
+        case .loading:
+            refreshStatus = "loading"
+            refreshError = nil
+        case .error(let error):
+            refreshStatus = "error"
+            refreshError = error.localizedDescription
+        }
+
+        return LocalSnapshotFactory.makeSnapshot(
+            input: LocalSnapshotInput(
+                appVersion: appInfoValue("CFBundleShortVersionString"),
+                buildVersion: appInfoValue("CFBundleVersion"),
+                bundleIdentifier: Bundle.main.bundleIdentifier ?? "unknown",
+                authState: oauthManager?.authState ?? .empty,
+                prList: prManager?.prList ?? .empty,
+                rateLimitInfo: prManager?.rateLimitInfo ?? .empty,
+                pinnedPRIdentifiers: prManager?.pinnedPRIdentifiers ?? [],
+                refreshStatus: refreshStatus,
+                refreshError: refreshError
+            )
+        )
+    }
+
+    private static func appInfoValue(_ key: String) -> String {
+        Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "unknown"
     }
 }
