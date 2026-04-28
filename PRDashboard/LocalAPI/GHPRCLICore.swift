@@ -4,6 +4,7 @@ enum GHPRCLICommand: String, CaseIterable {
     case ping
     case status
     case prs
+    case pr
     case snapshot
 }
 
@@ -21,6 +22,8 @@ struct GHPRCLIOptions: Equatable {
     let socketPath: String
     let section: GHPRCLISection
     let limit: Int?
+    let repository: String?
+    let number: Int?
 }
 
 enum GHPRCLIParseError: LocalizedError, Equatable {
@@ -54,6 +57,7 @@ enum GHPRCLI {
       ping        Check whether PRDashboard is running
       status      Show app health, auth, counts, and rate limit (default)
       prs         Show pull requests from the app snapshot
+      pr          Show one pull request by repo and number
       snapshot    Print the current app snapshot
 
     Options:
@@ -61,6 +65,8 @@ enum GHPRCLI {
       --socket PATH               Use a custom Unix socket path
       --section authored|review|mentioned|merged|all
       --limit N                   Limit PR rows
+      --repo OWNER/NAME           Repository for `pr` command
+      --number N                  PR number for `pr` command
       -h, --help                  Show this help
     """
 
@@ -73,6 +79,8 @@ enum GHPRCLI {
         var socketPath: String?
         var section: GHPRCLISection = .all
         var limit: Int?
+        var repository: String?
+        var number: Int?
 
         var index = 0
         while index < arguments.count {
@@ -104,6 +112,22 @@ enum GHPRCLI {
                 limit = try parseLimit(arguments[index])
             } else if argument.hasPrefix("--limit=") {
                 limit = try parseLimit(String(argument.dropFirst("--limit=".count)))
+            } else if argument == "--repo" {
+                index += 1
+                guard index < arguments.count else {
+                    throw GHPRCLIParseError.usage("--repo requires a value.")
+                }
+                repository = arguments[index]
+            } else if argument.hasPrefix("--repo=") {
+                repository = String(argument.dropFirst("--repo=".count))
+            } else if argument == "--number" {
+                index += 1
+                guard index < arguments.count else {
+                    throw GHPRCLIParseError.usage("--number requires a value.")
+                }
+                number = try parseNumber(arguments[index])
+            } else if argument.hasPrefix("--number=") {
+                number = try parseNumber(String(argument.dropFirst("--number=".count)))
             } else if argument == "-h" || argument == "--help" {
                 throw GHPRCLIParseError.usage(usage)
             } else if argument.hasPrefix("-") {
@@ -124,7 +148,9 @@ enum GHPRCLI {
             json: json,
             socketPath: socketPath ?? LocalSocketPath.resolvedPath(environment: environment),
             section: section,
-            limit: limit
+            limit: limit,
+            repository: repository,
+            number: number
         )
     }
 
@@ -150,9 +176,26 @@ enum GHPRCLI {
             return GHPRCLIExitCode.usage.rawValue
         }
 
-        let request = LocalAPIRequest(
-            command: options.command == .ping ? .ping : .snapshot
-        )
+        let request: LocalAPIRequest
+        switch options.command {
+        case .ping:
+            request = LocalAPIRequest(command: .ping)
+        case .pr:
+            guard let repository = options.repository?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !repository.isEmpty,
+                  let number = options.number else {
+                stderr("`pr` requires --repo OWNER/NAME and --number N.\n\n\(usage)")
+                return GHPRCLIExitCode.usage.rawValue
+            }
+            request = LocalAPIRequest(
+                command: .pr,
+                repository: repository,
+                number: number
+            )
+        case .status, .prs, .snapshot:
+            request = LocalAPIRequest(command: .snapshot)
+        }
 
         let response: LocalAPIResponse
         do {
@@ -219,6 +262,12 @@ enum GHPRCLI {
                     return GHPRCLIExitCode.protocolError.rawValue
                 }
                 stdout(options.json ? try renderJSON(snapshot) : renderStatus(snapshot))
+            case .pr:
+                guard let pullRequest = response.pullRequest else {
+                    stderr("Local API response did not include a pull request.")
+                    return GHPRCLIExitCode.protocolError.rawValue
+                }
+                stdout(options.json ? try renderJSON(pullRequest) : renderPR(pullRequest))
             }
         } catch {
             stderr(error.localizedDescription)
@@ -316,6 +365,44 @@ enum GHPRCLI {
         return selected
     }
 
+    static func renderPR(_ pr: LocalPRSnapshot) -> String {
+        var lines: [String] = [
+            "Repository: \(pr.repository)",
+            "Number: #\(pr.number)",
+            "Title: \(pr.title)",
+            "Author: \(pr.author)",
+            "URL: \(pr.url)",
+            "Section: \(pr.section.rawValue)",
+            "State: \(pr.state)\(pr.isDraft ? " (draft)" : "")",
+            "Updated: \(formatDate(pr.updatedAt))"
+        ]
+        if let mergedAt = pr.mergedAt {
+            lines.append("Merged: \(formatDate(mergedAt))")
+        }
+        lines.append("CI: \(ciDescription(for: pr))")
+        lines.append(
+            "Checks: success \(pr.checkSuccessCount), failure \(pr.checkFailureCount), pending \(pr.checkPendingCount)"
+        )
+        lines.append("Unresolved: \(pr.unresolvedCount)")
+        lines.append("Approvals: \(pr.approvalCount)")
+        if let changesRequested = pr.changesRequestedCount {
+            lines.append("Changes requested: \(changesRequested)")
+        }
+        if let myReview = pr.myReviewStatus {
+            lines.append("My review: \(myReview)")
+        }
+        if pr.hasBaseConflicts {
+            lines.append("Base conflicts: yes")
+        }
+        if pr.isPinned {
+            lines.append("Pinned: yes")
+        }
+        if let jira = pr.jiraTicket {
+            lines.append("Jira: \(jira)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
     static func renderJSON<T: Encodable>(_ value: T) throws -> String {
         let data = try LocalAPIJSON.encode(value, prettyPrinted: true)
         return String(decoding: data, as: UTF8.self)
@@ -333,6 +420,13 @@ enum GHPRCLI {
             throw GHPRCLIParseError.usage("--limit requires a positive integer.")
         }
         return limit
+    }
+
+    private static func parseNumber(_ value: String) throws -> Int {
+        guard let number = Int(value), number > 0 else {
+            throw GHPRCLIParseError.usage("--number requires a positive integer.")
+        }
+        return number
     }
 
     private static func ciDescription(for pr: LocalPRSnapshot) -> String {

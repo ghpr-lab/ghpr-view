@@ -191,6 +191,99 @@ final class LocalAPITests: XCTestCase {
         )
     }
 
+    func testLocalAPIPrCommandReturnsMatchingPullRequest() {
+        let snapshot = makeTwoPRSnapshot()
+
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .pr, repository: "OWNER/repo", number: 202),
+            snapshotProvider: { snapshot }
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertNil(response.error)
+        XCTAssertEqual(response.pullRequest?.number, 202)
+        XCTAssertEqual(response.pullRequest?.section, .review)
+    }
+
+    func testLocalAPIPrCommandReturnsNotFoundWhenMissing() {
+        let snapshot = makeTwoPRSnapshot()
+
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .pr, repository: "owner/repo", number: 999),
+            snapshotProvider: { snapshot }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.notFound.rawValue)
+    }
+
+    func testLocalAPIPrCommandRequiresRepositoryAndNumber() {
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .pr, repository: "  ", number: nil),
+            snapshotProvider: { fatalError("snapshot should not be built") }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.invalidRequest.rawValue)
+    }
+
+    func testCLIParsesPrCommandWithRepoAndNumber() throws {
+        let options = try GHPRCLI.parse(
+            arguments: ["pr", "--repo", "owner/repo", "--number", "42", "--json"],
+            environment: [:]
+        )
+        XCTAssertEqual(options.command, .pr)
+        XCTAssertEqual(options.repository, "owner/repo")
+        XCTAssertEqual(options.number, 42)
+        XCTAssertTrue(options.json)
+
+        let equalsOptions = try GHPRCLI.parse(
+            arguments: ["pr", "--repo=owner/repo", "--number=7"],
+            environment: [:]
+        )
+        XCTAssertEqual(equalsOptions.repository, "owner/repo")
+        XCTAssertEqual(equalsOptions.number, 7)
+    }
+
+    func testCLIRejectsPrNumberThatIsNotPositive() {
+        XCTAssertThrowsError(
+            try GHPRCLI.parse(
+                arguments: ["pr", "--repo", "owner/repo", "--number", "0"],
+                environment: [:]
+            )
+        )
+    }
+
+    private func makeTwoPRSnapshot() -> LocalSnapshot {
+        let now = Date(timeIntervalSince1970: 1_775_000_000)
+        let authored = makePullRequest(
+            id: 101,
+            number: 101,
+            title: "Authored",
+            category: .authored,
+            updatedAt: now
+        )
+        let review = makePullRequest(
+            id: 202,
+            number: 202,
+            title: "Review",
+            category: .reviewRequest,
+            updatedAt: now.addingTimeInterval(-60)
+        )
+        return LocalSnapshotFactory.makeSnapshot(
+            input: makeInput(
+                authState: AuthState(accessToken: "token", username: "tester", authMethod: .pat),
+                prList: PRList(
+                    lastUpdated: now,
+                    pullRequests: [authored, review],
+                    isLoading: false,
+                    error: nil
+                )
+            ),
+            now: now
+        )
+    }
+
     private func makeInput(
         authState: AuthState = .empty,
         prList: PRList = .empty,

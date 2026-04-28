@@ -8,17 +8,32 @@ enum LocalAPIProtocol {
 enum LocalAPICommand: String, CaseIterable, Codable {
     case ping
     case snapshot
+    case pr
 }
 
 struct LocalAPIRequest: Codable, Equatable {
     let command: String
+    let repository: String?
+    let number: Int?
 
-    init(command: LocalAPICommand) {
+    init(
+        command: LocalAPICommand,
+        repository: String? = nil,
+        number: Int? = nil
+    ) {
         self.command = command.rawValue
+        self.repository = repository
+        self.number = number
     }
 
-    init(command: String) {
+    init(
+        command: String,
+        repository: String? = nil,
+        number: Int? = nil
+    ) {
         self.command = command
+        self.repository = repository
+        self.number = number
     }
 }
 
@@ -27,6 +42,7 @@ enum LocalAPIErrorCode: String, Codable {
     case unsupportedCommand = "unsupported_command"
     case internalError = "internal_error"
     case unauthorizedPeer = "unauthorized_peer"
+    case notFound = "not_found"
 }
 
 struct LocalAPIErrorPayload: Codable, Equatable {
@@ -38,13 +54,18 @@ struct LocalAPIResponse: Codable, Equatable {
     let schemaVersion: Int
     let ok: Bool
     let snapshot: LocalSnapshot?
+    let pullRequest: LocalPRSnapshot?
     let error: LocalAPIErrorPayload?
 
-    static func success(snapshot: LocalSnapshot? = nil) -> LocalAPIResponse {
+    static func success(
+        snapshot: LocalSnapshot? = nil,
+        pullRequest: LocalPRSnapshot? = nil
+    ) -> LocalAPIResponse {
         LocalAPIResponse(
             schemaVersion: LocalAPIProtocol.schemaVersion,
             ok: true,
             snapshot: snapshot,
+            pullRequest: pullRequest,
             error: nil
         )
     }
@@ -54,6 +75,7 @@ struct LocalAPIResponse: Codable, Equatable {
             schemaVersion: LocalAPIProtocol.schemaVersion,
             ok: false,
             snapshot: nil,
+            pullRequest: nil,
             error: LocalAPIErrorPayload(code: code.rawValue, message: message)
         )
     }
@@ -76,7 +98,46 @@ enum LocalAPIHandler {
             return .success()
         case .snapshot:
             return .success(snapshot: snapshotProvider())
+        case .pr:
+            guard let repository = request.repository?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !repository.isEmpty,
+                  let number = request.number else {
+                return .failure(
+                    code: .invalidRequest,
+                    message: "pr command requires 'repository' and 'number'."
+                )
+            }
+            let snapshot = snapshotProvider()
+            guard let match = findPullRequest(in: snapshot, repository: repository, number: number) else {
+                return .failure(
+                    code: .notFound,
+                    message: "No PR found for \(repository)#\(number)."
+                )
+            }
+            return .success(pullRequest: match)
         }
+    }
+
+    static func findPullRequest(
+        in snapshot: LocalSnapshot,
+        repository: String,
+        number: Int
+    ) -> LocalPRSnapshot? {
+        let sections = [
+            snapshot.pullRequests.authored,
+            snapshot.pullRequests.reviewRequests,
+            snapshot.pullRequests.mentioned,
+            snapshot.pullRequests.mergedLast24h
+        ]
+        for section in sections {
+            if let match = section.first(where: {
+                $0.repository.caseInsensitiveCompare(repository) == .orderedSame &&
+                $0.number == number
+            }) {
+                return match
+            }
+        }
+        return nil
     }
 }
 
