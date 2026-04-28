@@ -8,6 +8,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var oauthManager: GitHubOAuthManager?
     var prManager: PRManager?
     var notificationManager: NotificationManager?
+    var prLinkOpener: PRLinkOpener?
     var onboardingManager: OnboardingManager?
     var updateManager: UpdateManager?
     var localSocketServer: LocalSocketServer?
@@ -36,12 +37,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         updateManager?.onRequestPresentation = { [weak self] in
             self?.openUpdateWindow()
         }
+        prLinkOpener = PRLinkOpener(configurationProvider: { [weak self] in
+            self?.prManager?.configuration ?? .default
+        })
+        notificationManager?.openURL = { [weak self] url in
+            self?.prLinkOpener?.open(url)
+        }
 
         // 4.1 Load cached PR data for immediate display
         prManager?.loadCachedData()
 
         // 5. Create view model
-        let viewModel = PRListViewModel(prManager: prManager!, oauthManager: oauthManager!)
+        let viewModel = PRListViewModel(
+            prManager: prManager!,
+            oauthManager: oauthManager!,
+            linkOpener: prLinkOpener!
+        )
         onboardingManager = OnboardingManager()
 
         // Wire up settings window callback

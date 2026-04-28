@@ -4,6 +4,7 @@ import AppKit
 
 final class NotificationManager: NSObject, ObservableObject {
     @Published private(set) var isAuthorized = false
+    var openURL: (@MainActor (URL) -> Void)?
 
     private let notificationCenter = UNUserNotificationCenter.current()
     private var mutedPRIds: Set<Int> = []
@@ -168,7 +169,13 @@ extension NotificationManager: UNUserNotificationCenterDelegate {
         case "OPEN_PR", UNNotificationDefaultActionIdentifier:
             if let urlString = userInfo["pr_url"] as? String,
                let url = URL(string: urlString) {
-                NSWorkspace.shared.open(url)
+                if let openURL {
+                    Task { @MainActor in
+                        openURL(url)
+                    }
+                } else {
+                    NSWorkspace.shared.open(url)
+                }
             }
 
         case "MUTE_PR":
