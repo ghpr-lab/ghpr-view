@@ -17,6 +17,7 @@ struct SettingsView: View {
     @State private var pausePollingOnExpensiveNetwork: Bool = true
     @State private var showMyReviewStatus: Bool = false
     @State private var automaticallyCheckForUpdates: Bool = true
+    @State private var openAtCmuxFirst: Bool = false
     @State private var graphQLEndpoint: String = ""
     @State private var httpProxyURL: String = ""
     @State private var httpProxyUsername: String = ""
@@ -122,6 +123,11 @@ struct SettingsView: View {
                                 launchAtLogin = !newValue
                             }
                         }
+
+                    HStack {
+                        Toggle("Open PRs in cmux first", isOn: $openAtCmuxFirst)
+                        HelpHint("If the same PR is already open in cmux, switch to it and reload it. Otherwise, open the PR in your default browser.\n\nRequires cmux → Settings → Socket Control set to “Automation” (the default “cmux only” rejects connections from other apps).")
+                    }
                 }
 
                 Section("Refresh") {
@@ -354,6 +360,7 @@ struct SettingsView: View {
         pausePollingOnExpensiveNetwork = config.pausePollingOnExpensiveNetwork
         showMyReviewStatus = config.showMyReviewStatus
         automaticallyCheckForUpdates = config.automaticallyCheckForUpdates
+        openAtCmuxFirst = config.openAtCmuxFirst
         graphQLEndpoint = config.graphQLEndpoint
         httpProxyURL = config.httpProxyURL
         httpProxyUsername = config.httpProxyUsername
@@ -421,6 +428,7 @@ struct SettingsView: View {
             pausePollingOnExpensiveNetwork: pausePollingOnExpensiveNetwork,
             showMyReviewStatus: showMyReviewStatus,
             automaticallyCheckForUpdates: automaticallyCheckForUpdates,
+            openAtCmuxFirst: openAtCmuxFirst,
             graphQLEndpoint: graphQLEndpoint.trimmingCharacters(in: .whitespacesAndNewlines),
             httpProxyURL: trimmedProxyURL,
             httpProxyUsername: trimmedProxyUsername

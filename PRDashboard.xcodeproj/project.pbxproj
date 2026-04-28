@@ -37,6 +37,7 @@
 		A1000060 /* OnboardingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000060 /* OnboardingManager.swift */; };
 		A1000061 /* OnboardingBubble.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000061 /* OnboardingBubble.swift */; };
 		A1000062 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = A2000062 /* Localizable.xcstrings */; };
+		A1000070 /* PRLinkOpener.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000070 /* PRLinkOpener.swift */; };
 		B1000001 /* AppUpdate.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000001 /* AppUpdate.swift */; };
 		B1000002 /* UpdateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000002 /* UpdateManager.swift */; };
 		B1000003 /* UpdateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000003 /* UpdateView.swift */; };
@@ -99,6 +100,7 @@
 		A2000060 /* OnboardingManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingManager.swift; sourceTree = "<group>"; };
 		A2000061 /* OnboardingBubble.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingBubble.swift; sourceTree = "<group>"; };
 		A2000062 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
+		A2000070 /* PRLinkOpener.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRLinkOpener.swift; sourceTree = "<group>"; };
 		A3000001 /* PRDashboard.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PRDashboard.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B2000001 /* AppUpdate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdate.swift; sourceTree = "<group>"; };
 		B2000002 /* UpdateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateManager.swift; sourceTree = "<group>"; };
@@ -181,6 +183,7 @@
 				A2000009 /* PRManager.swift */,
 				A200000A /* GitHubAPIClient.swift */,
 				A200000B /* NotificationManager.swift */,
+				A2000070 /* PRLinkOpener.swift */,
 				A2000012 /* GitHubOAuthManager.swift */,
 				A2000060 /* OnboardingManager.swift */,
 				B2000002 /* UpdateManager.swift */,
@@ -466,6 +469,7 @@
 				A1000009 /* PRManager.swift in Sources */,
 				A100000A /* GitHubAPIClient.swift in Sources */,
 				A100000B /* NotificationManager.swift in Sources */,
+				A1000070 /* PRLinkOpener.swift in Sources */,
 				C1000001 /* LocalAPIModels.swift in Sources */,
 				C1000002 /* UnixSocketAddress.swift in Sources */,
 				C1000003 /* LocalSnapshotFactory.swift in Sources */,

@@ -718,6 +718,16 @@
     },
     "Failure fallback (3/5)": {},
     "Failure running (2/3wf·5)": {},
+    "If the same PR is already open in cmux, switch to it and reload it. Otherwise, open the PR in your default browser.\n\nRequires cmux → Settings → Socket Control set to “Automation” (the default “cmux only” rejects connections from other apps).": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "如果同一个 PR 已经在 cmux 中打开，则切换过去并刷新；否则在默认浏览器中打开。\n\n需要在 cmux → 设置 → Socket 控制中将访问模式设为「自动化（Automation）」，默认的「仅 cmux（cmux only）」会拒绝来自其他应用的连接。"
+          }
+        }
+      }
+    },
     "Filter PRs to specific repos. Format: owner/repo, comma-separated (e.g., owner/repo1, owner/repo2). Leave empty to show PRs from all repos.": {
       "localizations": {
         "zh-Hans": {
@@ -1074,6 +1084,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "打开 PR"
+          }
+        }
+      }
+    },
+    "Open PRs in cmux first": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "优先用 cmux 打开 PR"
           }
         }
       }

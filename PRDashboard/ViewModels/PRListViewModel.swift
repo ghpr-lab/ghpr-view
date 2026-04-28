@@ -22,13 +22,15 @@ final class PRListViewModel: ObservableObject {
 
     private let prManager: PRManager
     private let oauthManager: GitHubOAuthManager
+    private let linkOpener: PRLinkOpener
     private var cancellables = Set<AnyCancellable>()
 
     var openSettings: (() -> Void)?
 
-    init(prManager: PRManager, oauthManager: GitHubOAuthManager) {
+    init(prManager: PRManager, oauthManager: GitHubOAuthManager, linkOpener: PRLinkOpener) {
         self.prManager = prManager
         self.oauthManager = oauthManager
+        self.linkOpener = linkOpener
 
         setupBindings()
     }
@@ -237,7 +239,7 @@ final class PRListViewModel: ObservableObject {
     }
 
     func openPR(_ pr: PullRequest) {
-        NSWorkspace.shared.open(pr.url)
+        linkOpener.open(pr.url)
     }
 
     func copyURL(_ pr: PullRequest) {

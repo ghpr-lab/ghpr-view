@@ -11,6 +11,7 @@ struct Configuration: Codable, Equatable {
     var pausePollingOnExpensiveNetwork: Bool  // pause background polling on cellular/hotspot
     var showMyReviewStatus: Bool  // show my review status badges on review-requested PRs
     var automaticallyCheckForUpdates: Bool
+    var openAtCmuxFirst: Bool  // switch to an existing cmux PR browser tab before falling back to the default browser
     var graphQLEndpoint: String  // developer override for GitHub GraphQL URL; empty = default
     var httpProxyURL: String     // e.g. "http://host:port"; empty = no proxy
     var httpProxyUsername: String  // empty = no auth; password stored in Keychain
@@ -27,6 +28,7 @@ struct Configuration: Codable, Equatable {
             pausePollingOnExpensiveNetwork: true,
             showMyReviewStatus: false,
             automaticallyCheckForUpdates: true,
+            openAtCmuxFirst: false,
             graphQLEndpoint: "",
             httpProxyURL: "",
             httpProxyUsername: ""
@@ -44,6 +46,7 @@ struct Configuration: Codable, Equatable {
         pausePollingOnExpensiveNetwork: Bool,
         showMyReviewStatus: Bool,
         automaticallyCheckForUpdates: Bool,
+        openAtCmuxFirst: Bool,
         graphQLEndpoint: String,
         httpProxyURL: String,
         httpProxyUsername: String
@@ -58,6 +61,7 @@ struct Configuration: Codable, Equatable {
         self.pausePollingOnExpensiveNetwork = pausePollingOnExpensiveNetwork
         self.showMyReviewStatus = showMyReviewStatus
         self.automaticallyCheckForUpdates = automaticallyCheckForUpdates
+        self.openAtCmuxFirst = openAtCmuxFirst
         self.graphQLEndpoint = graphQLEndpoint
         self.httpProxyURL = httpProxyURL
         self.httpProxyUsername = httpProxyUsername
@@ -74,6 +78,7 @@ struct Configuration: Codable, Equatable {
         case pausePollingOnExpensiveNetwork
         case showMyReviewStatus
         case automaticallyCheckForUpdates
+        case openAtCmuxFirst
         case graphQLEndpoint
         case httpProxyURL
         case httpProxyUsername
@@ -93,6 +98,7 @@ struct Configuration: Codable, Equatable {
         pausePollingOnExpensiveNetwork = try container.decodeIfPresent(Bool.self, forKey: .pausePollingOnExpensiveNetwork) ?? defaults.pausePollingOnExpensiveNetwork
         showMyReviewStatus = try container.decodeIfPresent(Bool.self, forKey: .showMyReviewStatus) ?? defaults.showMyReviewStatus
         automaticallyCheckForUpdates = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCheckForUpdates) ?? defaults.automaticallyCheckForUpdates
+        openAtCmuxFirst = try container.decodeIfPresent(Bool.self, forKey: .openAtCmuxFirst) ?? defaults.openAtCmuxFirst
         graphQLEndpoint = try container.decodeIfPresent(String.self, forKey: .graphQLEndpoint) ?? defaults.graphQLEndpoint
         httpProxyURL = try container.decodeIfPresent(String.self, forKey: .httpProxyURL) ?? defaults.httpProxyURL
         httpProxyUsername = try container.decodeIfPresent(String.self, forKey: .httpProxyUsername) ?? defaults.httpProxyUsername

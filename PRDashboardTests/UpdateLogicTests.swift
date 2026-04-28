@@ -25,6 +25,19 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(configuration.refreshOnOpen)
         XCTAssertEqual(configuration.ciStatusExcludeFilter, "lint")
         XCTAssertTrue(configuration.automaticallyCheckForUpdates)
+        XCTAssertFalse(configuration.openAtCmuxFirst)
+    }
+
+    func testConfigurationDecodesOpenAtCmuxFirst() throws {
+        let json = """
+        {
+          "openAtCmuxFirst": true
+        }
+        """
+
+        let configuration = try JSONDecoder().decode(Configuration.self, from: Data(json.utf8))
+
+        XCTAssertTrue(configuration.openAtCmuxFirst)
     }
 
     func testAppVersionComparisonUsesNumericComponents() {
@@ -450,5 +463,140 @@ final class UpdateLogicTests: XCTestCase {
             changesRequestedCount: 0,
             ciExtendedInfo: nil
         )
+    }
+}
+
+final class CmuxBrowserRouterTests: XCTestCase {
+    func testFindMatchingSurfaceMatchesSamePRSubpage() throws {
+        let target = try XCTUnwrap(GitHubPRIdentity(url: URL(string: "https://github.com/Owner/Repo/pull/123")!))
+
+        let match = CmuxBrowserRouter.findMatchingSurface(
+            in: Self.treeJSON(
+                surfaceURL: "https://github.com/owner/repo/pull/123/files?plain=1#diff"
+            ),
+            target: target
+        )
+
+        XCTAssertEqual(
+            match,
+            CmuxBrowserRouter.BrowserMatch(
+                windowHandle: "window:1",
+                workspaceHandle: "workspace:2",
+                surfaceHandle: "surface:3"
+            )
+        )
+    }
+
+    func testFindMatchingSurfaceRejectsDifferentPR() throws {
+        let target = try XCTUnwrap(GitHubPRIdentity(url: URL(string: "https://github.com/owner/repo/pull/123")!))
+
+        let match = CmuxBrowserRouter.findMatchingSurface(
+            in: Self.treeJSON(surfaceURL: "https://github.com/owner/repo/pull/124"),
+            target: target
+        )
+
+        XCTAssertNil(match)
+    }
+
+    func testOpenExistingPRFocusesMatchingTabWithoutReloading() {
+        let runner = FakeCmuxCommandRunner(results: [
+            .success(stdout: Self.treeJSON(surfaceURL: "https://github.com/owner/repo/pull/123")),
+            .success(),
+            .success(),
+            .success()
+        ])
+        let router = CmuxBrowserRouter(commandRunner: runner, timeout: 0.1)
+
+        let handled = router.openExistingPR(URL(string: "https://github.com/owner/repo/pull/123")!)
+
+        XCTAssertTrue(handled)
+        XCTAssertEqual(runner.commands, [
+            ["--json", "--id-format", "uuids", "tree", "--all"],
+            ["focus-window", "--window", "window:1"],
+            ["select-workspace", "--workspace", "workspace:2"],
+            ["focus-panel", "--workspace", "workspace:2", "--panel", "surface:3"]
+        ])
+    }
+
+    func testOpenExistingPRFallsBackWhenNoMatch() {
+        let runner = FakeCmuxCommandRunner(results: [
+            .success(stdout: Self.treeJSON(surfaceURL: "https://github.com/owner/repo/pull/456"))
+        ])
+        let router = CmuxBrowserRouter(commandRunner: runner, timeout: 0.1)
+
+        let handled = router.openExistingPR(URL(string: "https://github.com/owner/repo/pull/123")!)
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(runner.commands, [
+            ["--json", "--id-format", "uuids", "tree", "--all"]
+        ])
+    }
+
+    func testOpenExistingPRFallsBackWhenTreeCommandFails() {
+        let runner = FakeCmuxCommandRunner(results: [
+            CmuxCommandResult(exitCode: 1, stdout: "", stderr: "socket unavailable", timedOut: false)
+        ])
+        let router = CmuxBrowserRouter(commandRunner: runner, timeout: 0.1)
+
+        let handled = router.openExistingPR(URL(string: "https://github.com/owner/repo/pull/123")!)
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(runner.commands, [
+            ["--json", "--id-format", "uuids", "tree", "--all"]
+        ])
+    }
+
+    private static func treeJSON(surfaceURL: String) -> String {
+        """
+        {
+          "windows": [
+            {
+              "id": "window-id",
+              "ref": "window:1",
+              "workspaces": [
+                {
+                  "id": "workspace-id",
+                  "ref": "workspace:2",
+                  "panes": [
+                    {
+                      "surfaces": [
+                        {
+                          "id": "surface-id",
+                          "ref": "surface:3",
+                          "type": "browser",
+                          "url": "\(surfaceURL)"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+        """
+    }
+}
+
+private final class FakeCmuxCommandRunner: CmuxCommandRunning, @unchecked Sendable {
+    private var results: [CmuxCommandResult]
+    private(set) var commands: [[String]] = []
+
+    init(results: [CmuxCommandResult]) {
+        self.results = results
+    }
+
+    func run(arguments: [String], timeout: TimeInterval) -> CmuxCommandResult {
+        commands.append(arguments)
+        guard !results.isEmpty else {
+            return CmuxCommandResult(exitCode: 1, stdout: "", stderr: "missing fake result", timedOut: false)
+        }
+        return results.removeFirst()
+    }
+}
+
+private extension CmuxCommandResult {
+    static func success(stdout: String = "") -> CmuxCommandResult {
+        CmuxCommandResult(exitCode: 0, stdout: stdout, stderr: "", timedOut: false)
     }
 }
