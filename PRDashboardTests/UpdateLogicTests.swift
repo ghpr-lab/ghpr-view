@@ -498,7 +498,7 @@ final class CmuxBrowserRouterTests: XCTestCase {
         XCTAssertNil(match)
     }
 
-    func testOpenExistingPRFocusesAndReloadsMatchingTab() {
+    func testOpenExistingPRFocusesMatchingTabWithoutReloading() {
         let runner = FakeCmuxCommandRunner(results: [
             .success(stdout: Self.treeJSON(surfaceURL: "https://github.com/owner/repo/pull/123")),
             .success(),
@@ -511,11 +511,10 @@ final class CmuxBrowserRouterTests: XCTestCase {
 
         XCTAssertTrue(handled)
         XCTAssertEqual(runner.commands, [
-            ["--json", "tree", "--all"],
+            ["--json", "--id-format", "uuids", "tree", "--all"],
             ["focus-window", "--window", "window:1"],
             ["select-workspace", "--workspace", "workspace:2"],
-            ["focus-panel", "--workspace", "workspace:2", "--panel", "surface:3"],
-            ["browser", "--surface", "surface:3", "reload"]
+            ["focus-panel", "--workspace", "workspace:2", "--panel", "surface:3"]
         ])
     }
 
@@ -529,7 +528,7 @@ final class CmuxBrowserRouterTests: XCTestCase {
 
         XCTAssertFalse(handled)
         XCTAssertEqual(runner.commands, [
-            ["--json", "tree", "--all"]
+            ["--json", "--id-format", "uuids", "tree", "--all"]
         ])
     }
 
@@ -543,7 +542,7 @@ final class CmuxBrowserRouterTests: XCTestCase {
 
         XCTAssertFalse(handled)
         XCTAssertEqual(runner.commands, [
-            ["--json", "tree", "--all"]
+            ["--json", "--id-format", "uuids", "tree", "--all"]
         ])
     }
 

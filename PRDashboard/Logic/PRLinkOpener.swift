@@ -186,14 +186,6 @@ final class CmuxBrowserRouter: CmuxBrowserRouting {
             return false
         }
 
-        let reload = commandRunner.run(
-            arguments: ["browser", "--surface", match.surfaceHandle, "reload"],
-            timeout: timeout
-        )
-        if !reload.succeeded {
-            prLinkLogger.debug("cmux browser reload failed after focus: exit=\(reload.exitCode) stderr=\(reload.stderr, privacy: .public)")
-        }
-
         return true
     }
 
