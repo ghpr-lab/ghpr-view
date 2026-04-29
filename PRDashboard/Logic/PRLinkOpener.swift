@@ -274,6 +274,11 @@ private enum CmuxExecutableResolver {
     }
 }
 
+private final class DrainedOutput: @unchecked Sendable {
+    var stdout = Data()
+    var stderr = Data()
+}
+
 private final class ProcessCmuxCommandRunner: CmuxCommandRunning {
     private let executableURL: URL
     private let socketPath: String?
@@ -298,23 +303,46 @@ private final class ProcessCmuxCommandRunner: CmuxCommandRunning {
         process.executableURL = executableURL
         process.arguments = arguments
 
-        // GUI apps inherit a minimal environment, so cmux's auto-discovery may
-        // attach to a stale/debug socket recorded in last-socket-path. Pin to
-        // the production socket explicitly when we can locate it.
+        // GUI apps inherit CMUX_SOCKET_PATH from the shell that launched them;
+        // when cmux later restarts on a different socket, that inherited value
+        // points at a dead socket and `tree` hangs until SIGTERM. Always pin
+        // to the canonical production socket when we can locate it.
         var env = ProcessInfo.processInfo.environment
-        if env["CMUX_SOCKET_PATH"] == nil, let socketPath {
+        if let socketPath {
             env["CMUX_SOCKET_PATH"] = socketPath
         }
         process.environment = env
+        process.standardInput = FileHandle.nullDevice
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
+        // Drain pipes concurrently — Foundation's pipe buffer is ~64 KB on
+        // macOS, so a `tree --all` response (~70 KB) blocks the child on
+        // write() unless we read while it runs.
+        let drained = DrainedOutput()
+        let drainGroup = DispatchGroup()
+        let drainQueue = DispatchQueue.global(qos: .utility)
+
+        drainGroup.enter()
+        drainQueue.async {
+            drained.stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+            drainGroup.leave()
+        }
+        drainGroup.enter()
+        drainQueue.async {
+            drained.stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+            drainGroup.leave()
+        }
+
         do {
             try process.run()
         } catch {
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            drainGroup.wait()
             return CmuxCommandResult(
                 exitCode: -1,
                 stdout: "",
@@ -323,25 +351,27 @@ private final class ProcessCmuxCommandRunner: CmuxCommandRunning {
             )
         }
 
-        let group = DispatchGroup()
-        group.enter()
+        let exitGroup = DispatchGroup()
+        exitGroup.enter()
         DispatchQueue.global(qos: .utility).async {
             process.waitUntilExit()
-            group.leave()
+            exitGroup.leave()
         }
 
         var timedOut = false
-        if group.wait(timeout: .now() + timeout) == .timedOut {
+        if exitGroup.wait(timeout: .now() + timeout) == .timedOut {
             timedOut = true
             process.terminate()
-            if group.wait(timeout: .now() + 0.5) == .timedOut {
+            if exitGroup.wait(timeout: .now() + 0.5) == .timedOut {
                 kill(process.processIdentifier, SIGKILL)
-                group.wait()
+                exitGroup.wait()
             }
         }
 
-        let stdout = String(data: stdoutPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        let stderr = String(data: stderrPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        drainGroup.wait()
+
+        let stdout = String(data: drained.stdout, encoding: .utf8) ?? ""
+        let stderr = String(data: drained.stderr, encoding: .utf8) ?? ""
 
         return CmuxCommandResult(
             exitCode: process.terminationStatus,
