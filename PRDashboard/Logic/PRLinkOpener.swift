@@ -6,32 +6,55 @@ import os
 private let prLinkLogger = Logger(subsystem: "com.prdashboard", category: "PRLinkOpener")
 
 @MainActor
-final class PRLinkOpener {
+protocol PRLinkOpening: AnyObject {
+    var opensAtCmuxFirst: Bool { get }
+    func open(_ url: URL) async
+}
+
+@MainActor
+final class PRLinkOpener: PRLinkOpening {
     private let configurationProvider: @MainActor () -> Configuration
     private let cmuxRouter: CmuxBrowserRouting
+    private let defaultOpener: @MainActor (URL) -> Void
+    private let cmuxActivator: @MainActor () -> Void
 
     init(
         configurationProvider: @escaping @MainActor () -> Configuration,
-        cmuxRouter: CmuxBrowserRouting = CmuxBrowserRouter()
+        cmuxRouter: CmuxBrowserRouting = CmuxBrowserRouter(),
+        defaultOpener: @escaping @MainActor (URL) -> Void = { NSWorkspace.shared.open($0) },
+        cmuxActivator: @escaping @MainActor () -> Void = {
+            _ = NSWorkspace.shared.runningApplications
+                .first { $0.bundleIdentifier == "com.cmuxterm.app" }?
+                .activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        }
     ) {
         self.configurationProvider = configurationProvider
         self.cmuxRouter = cmuxRouter
+        self.defaultOpener = defaultOpener
+        self.cmuxActivator = cmuxActivator
     }
 
-    func open(_ url: URL) {
-        guard configurationProvider().openAtCmuxFirst else {
-            NSWorkspace.shared.open(url)
+    var opensAtCmuxFirst: Bool {
+        configurationProvider().openAtCmuxFirst
+    }
+
+    func open(_ url: URL) async {
+        guard opensAtCmuxFirst else {
+            defaultOpener(url)
             return
         }
 
         let router = cmuxRouter
-        DispatchQueue.global(qos: .userInitiated).async {
-            let handledByCmux = router.openExistingPR(url)
-            DispatchQueue.main.async {
-                if !handledByCmux {
-                    NSWorkspace.shared.open(url)
-                }
+        let handledByCmux = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: router.openExistingPR(url))
             }
+        }
+
+        if !handledByCmux {
+            defaultOpener(url)
+        } else {
+            cmuxActivator()
         }
     }
 }

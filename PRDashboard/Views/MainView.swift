@@ -135,6 +135,7 @@ struct MainView: View {
                                     }
                                 },
                                 isPinned: true,
+                                isOpening: viewModel.isOpeningPR(pr),
                                 ciAutoRetryRound: viewModel.ciAutoRetryRound(for: pr),
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
@@ -233,6 +234,7 @@ struct MainView: View {
                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
                 isPinned: showPin && viewModel.isPinned(pr),
+                isOpening: viewModel.isOpeningPR(pr),
                 showCIStatus: showCIStatus,
                 showConflictStatus: showConflictStatus,
                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,

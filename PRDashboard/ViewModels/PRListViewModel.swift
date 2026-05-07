@@ -19,15 +19,16 @@ final class PRListViewModel: ObservableObject {
     @Published private(set) var isValidatingPAT: Bool = false
     @Published private(set) var patError: Error?
     @Published private(set) var rateLimitInfo: RateLimitInfo = .empty
+    @Published private(set) var openingPRIDs: Set<Int> = []
 
     private let prManager: PRManager
     private let oauthManager: GitHubOAuthManager
-    private let linkOpener: PRLinkOpener
+    private let linkOpener: PRLinkOpening
     private var cancellables = Set<AnyCancellable>()
 
     var openSettings: (() -> Void)?
 
-    init(prManager: PRManager, oauthManager: GitHubOAuthManager, linkOpener: PRLinkOpener) {
+    init(prManager: PRManager, oauthManager: GitHubOAuthManager, linkOpener: PRLinkOpening) {
         self.prManager = prManager
         self.oauthManager = oauthManager
         self.linkOpener = linkOpener
@@ -239,7 +240,21 @@ final class PRListViewModel: ObservableObject {
     }
 
     func openPR(_ pr: PullRequest) {
-        linkOpener.open(pr.url)
+        guard linkOpener.opensAtCmuxFirst else {
+            Task { @MainActor [linkOpener] in
+                await linkOpener.open(pr.url)
+            }
+            return
+        }
+
+        guard !openingPRIDs.contains(pr.id) else { return }
+        markOpeningPR(pr.id)
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.clearOpeningPR(pr.id) }
+            await self.linkOpener.open(pr.url)
+        }
     }
 
     func copyURL(_ pr: PullRequest) {
@@ -279,6 +294,10 @@ final class PRListViewModel: ObservableObject {
 
     func isPinned(_ pr: PullRequest) -> Bool {
         pinnedPRIdentifiers.contains(pr.pinIdentifier)
+    }
+
+    func isOpeningPR(_ pr: PullRequest) -> Bool {
+        openingPRIDs.contains(pr.id)
     }
 
     func togglePin(_ pr: PullRequest) {
@@ -331,6 +350,18 @@ final class PRListViewModel: ObservableObject {
     }
 
     // MARK: - Private
+
+    private func markOpeningPR(_ id: Int) {
+        var updated = openingPRIDs
+        updated.insert(id)
+        openingPRIDs = updated
+    }
+
+    private func clearOpeningPR(_ id: Int) {
+        var updated = openingPRIDs
+        updated.remove(id)
+        openingPRIDs = updated
+    }
 
     private func filterPRs(_ prs: [PullRequest]) -> [PullRequest] {
         guard !searchText.isEmpty else { return prs }

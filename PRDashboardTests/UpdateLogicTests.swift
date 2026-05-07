@@ -40,6 +40,81 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(configuration.openAtCmuxFirst)
     }
 
+    @MainActor
+    func testPRLinkOpenerWithoutCmuxFirstOpensDefaultAndSkipsCmuxRouter() async {
+        var configuration = Configuration.default
+        configuration.openAtCmuxFirst = false
+        let router = RecordingCmuxBrowserRouter(result: false)
+        let url = URL(string: "https://github.com/owner/repo/pull/123")!
+        var openedURLs: [URL] = []
+        var activationCount = 0
+        let opener = PRLinkOpener(
+            configurationProvider: { configuration },
+            cmuxRouter: router,
+            defaultOpener: { openedURLs.append($0) },
+            cmuxActivator: { activationCount += 1 }
+        )
+
+        await opener.open(url)
+
+        XCTAssertEqual(openedURLs, [url])
+        XCTAssertEqual(activationCount, 0)
+        XCTAssertTrue(router.openedURLs.isEmpty)
+    }
+
+    @MainActor
+    func testPRLinkOpenerWaitsForCmuxMissBeforeFallback() async {
+        var configuration = Configuration.default
+        configuration.openAtCmuxFirst = true
+        let router = ControlledCmuxBrowserRouter(result: false)
+        let url = URL(string: "https://github.com/owner/repo/pull/123")!
+        var openedURLs: [URL] = []
+        var activationCount = 0
+        let opener = PRLinkOpener(
+            configurationProvider: { configuration },
+            cmuxRouter: router,
+            defaultOpener: { openedURLs.append($0) },
+            cmuxActivator: { activationCount += 1 }
+        )
+
+        let task = Task {
+            await opener.open(url)
+        }
+        await Task.yield()
+        router.waitUntilCalled()
+
+        XCTAssertEqual(router.openedURLs, [url])
+        XCTAssertTrue(openedURLs.isEmpty)
+
+        router.release()
+        await task.value
+
+        XCTAssertEqual(openedURLs, [url])
+        XCTAssertEqual(activationCount, 0)
+    }
+
+    @MainActor
+    func testPRLinkOpenerActivatesCmuxWhenCmuxHandlesURL() async {
+        var configuration = Configuration.default
+        configuration.openAtCmuxFirst = true
+        let router = RecordingCmuxBrowserRouter(result: true)
+        let url = URL(string: "https://github.com/owner/repo/pull/123")!
+        var openedURLs: [URL] = []
+        var activationCount = 0
+        let opener = PRLinkOpener(
+            configurationProvider: { configuration },
+            cmuxRouter: router,
+            defaultOpener: { openedURLs.append($0) },
+            cmuxActivator: { activationCount += 1 }
+        )
+
+        await opener.open(url)
+
+        XCTAssertEqual(router.openedURLs, [url])
+        XCTAssertTrue(openedURLs.isEmpty)
+        XCTAssertEqual(activationCount, 1)
+    }
+
     func testAppVersionComparisonUsesNumericComponents() {
         XCTAssertLessThan(AppVersion("1.2.9"), AppVersion("1.10.0"))
         XCTAssertEqual(AppVersion("v1.2.1"), AppVersion("1.2.1"))
@@ -205,7 +280,7 @@ final class UpdateLogicTests: XCTestCase {
 
     func testMentionParserDoesNotTreatCrossRepoQualifiedReferenceAsBareSameRepoReference() {
         let references = GitHubAPIClient.extractMentionedPRReferences(
-            from: "Do not treat other/repo#12 as repo-local #12.",
+            from: "Do not treat other/repo#12 as a repo-local pull request reference.",
             repositoryOwner: "owner",
             repositoryName: "repo",
             sourcePRNumber: 88
@@ -461,6 +536,41 @@ final class UpdateLogicTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testPRListViewModelSuppressesDuplicateCmuxFirstOpenUntilCompletion() async {
+        let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
+        let prManager = PRManager(
+            apiClient: GitHubAPIClient(token: ""),
+            notificationManager: NotificationManager(),
+            oauthManager: oauthManager
+        )
+        let linkOpener = FakePRLinkOpening(opensAtCmuxFirst: true)
+        let viewModel = PRListViewModel(
+            prManager: prManager,
+            oauthManager: oauthManager,
+            linkOpener: linkOpener
+        )
+        let pr = makePullRequest(id: 42, number: 42, category: .authored)
+
+        viewModel.openPR(pr)
+        await Task.yield()
+
+        XCTAssertTrue(viewModel.isOpeningPR(pr))
+        XCTAssertEqual(linkOpener.openedURLs, [pr.url])
+
+        viewModel.openPR(pr)
+        await Task.yield()
+
+        XCTAssertEqual(linkOpener.openedURLs, [pr.url])
+
+        linkOpener.finishOpen()
+        for _ in 0..<5 where viewModel.isOpeningPR(pr) {
+            await Task.yield()
+        }
+
+        XCTAssertFalse(viewModel.isOpeningPR(pr))
+    }
+
     private func makeRelease(assets: [String]) throws -> ReleaseInfo {
         let json = """
         {
@@ -641,6 +751,20 @@ final class CmuxBrowserRouterTests: XCTestCase {
         ])
     }
 
+    func testOpenExistingPRFallsBackWhenTreeCommandTimesOut() {
+        let runner = FakeCmuxCommandRunner(results: [
+            CmuxCommandResult(exitCode: 0, stdout: "", stderr: "", timedOut: true)
+        ])
+        let router = CmuxBrowserRouter(commandRunner: runner, timeout: 0.1)
+
+        let handled = router.openExistingPR(URL(string: "https://github.com/owner/repo/pull/123")!)
+
+        XCTAssertFalse(handled)
+        XCTAssertEqual(runner.commands, [
+            ["--json", "--id-format", "uuids", "tree", "--all"]
+        ])
+    }
+
     private static func treeJSON(surfaceURL: String) -> String {
         """
         {
@@ -670,6 +794,90 @@ final class CmuxBrowserRouterTests: XCTestCase {
           ]
         }
         """
+    }
+}
+
+private final class RecordingCmuxBrowserRouter: CmuxBrowserRouting, @unchecked Sendable {
+    private let result: Bool
+    private let lock = NSLock()
+    private var recordedURLs: [URL] = []
+
+    init(result: Bool) {
+        self.result = result
+    }
+
+    var openedURLs: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedURLs
+    }
+
+    func openExistingPR(_ url: URL) -> Bool {
+        lock.lock()
+        recordedURLs.append(url)
+        lock.unlock()
+        return result
+    }
+}
+
+private final class ControlledCmuxBrowserRouter: CmuxBrowserRouting, @unchecked Sendable {
+    private let result: Bool
+    private let called = DispatchSemaphore(value: 0)
+    private let releaseSemaphore = DispatchSemaphore(value: 0)
+    private let lock = NSLock()
+    private var recordedURLs: [URL] = []
+
+    init(result: Bool) {
+        self.result = result
+    }
+
+    var openedURLs: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedURLs
+    }
+
+    func openExistingPR(_ url: URL) -> Bool {
+        lock.lock()
+        recordedURLs.append(url)
+        lock.unlock()
+        called.signal()
+        releaseSemaphore.wait()
+        return result
+    }
+
+    func waitUntilCalled(file: StaticString = #filePath, line: UInt = #line) {
+        let status = called.wait(timeout: .now() + 1)
+        if case .timedOut = status {
+            XCTFail("Timed out waiting for cmux router call", file: file, line: line)
+        }
+    }
+
+    func release() {
+        releaseSemaphore.signal()
+    }
+}
+
+@MainActor
+private final class FakePRLinkOpening: PRLinkOpening {
+    var opensAtCmuxFirst: Bool
+    private(set) var openedURLs: [URL] = []
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    init(opensAtCmuxFirst: Bool) {
+        self.opensAtCmuxFirst = opensAtCmuxFirst
+    }
+
+    func open(_ url: URL) async {
+        openedURLs.append(url)
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+        }
+    }
+
+    func finishOpen() {
+        continuation?.resume()
+        continuation = nil
     }
 }
 

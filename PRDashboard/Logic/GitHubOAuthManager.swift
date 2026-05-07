@@ -27,9 +27,11 @@ class GitHubOAuthManager: NSObject, ObservableObject {
 
     private var pollingTask: Task<Void, Never>?
 
-    override init() {
+    init(loadSavedAuth: Bool = true) {
         super.init()
-        loadSavedAuth()
+        if loadSavedAuth {
+            self.loadSavedAuth()
+        }
     }
 
     // MARK: - Public Methods

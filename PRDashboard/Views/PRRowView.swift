@@ -28,6 +28,7 @@ struct PRRowView: View {
     var onTogglePin: (() -> Void)?
     var onToggleCIAutoRetry: (() -> Void)?
     var isPinned: Bool = false
+    var isOpening: Bool = false
     var ciAutoRetryRound: Int?  // nil = not active, 0-3 = current round
     var showCIStatus: Bool = true
     var showConflictStatus: Bool = true
@@ -122,6 +123,13 @@ struct PRRowView: View {
 
                     Spacer()
 
+                    if isOpening {
+                        ProgressView()
+                            .scaleEffect(0.45)
+                            .frame(width: 14, height: 14)
+                            .help("Opening PR")
+                    }
+
                     if pr.category == .authored || pr.category == .mentioned {
                         if showCIStatus, let ciStatus = pr.ciStatus {
                             CIStatusIcon(
@@ -175,12 +183,14 @@ struct PRRowView: View {
             }
         }
         .onTapGesture {
+            guard !isOpening else { return }
             onOpen()
         }
         .contextMenu {
             Button("Open in Browser") {
                 onOpen()
             }
+            .disabled(isOpening)
             Button("Copy URL") {
                 onCopyURL()
             }

@@ -41,7 +41,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.prManager?.configuration ?? .default
         })
         notificationManager?.openURL = { [weak self] url in
-            self?.prLinkOpener?.open(url)
+            Task { @MainActor in
+                await self?.prLinkOpener?.open(url)
+            }
         }
 
         // 4.1 Load cached PR data for immediate display
