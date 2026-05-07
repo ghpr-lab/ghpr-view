@@ -26,6 +26,7 @@ final class PRManager: PRManagerType, ObservableObject {
     @Published private(set) var rateLimitInfo: RateLimitInfo = .empty
     @Published var configuration: Configuration
     @Published private(set) var pinnedPRIdentifiers: Set<String>
+    @Published private(set) var readReviewThreadIDs: Set<String>
     @Published private(set) var ciRetryTracking: [String: CIRetryState] = [:]
 
     enum RefreshState {
@@ -73,6 +74,7 @@ final class PRManager: PRManagerType, ObservableObject {
         self.oauthManager = oauthManager
         self.configuration = Self.loadConfiguration()
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
+        self.readReviewThreadIDs = Self.loadReadReviewThreadIDs()
 
         apiClient.updateGraphQLEndpoint(self.configuration.graphQLEndpoint)
         apiClient.updateProxy(
@@ -181,7 +183,8 @@ final class PRManager: PRManagerType, ObservableObject {
 
     /// Load cached PR data on startup for immediate display
     func loadCachedData() {
-        if let cached = PRCache.shared.load() {
+        if var cached = PRCache.shared.load() {
+            applyReadState(to: &cached)
             self.prList = cached
             // Rebuild previousPRs for change detection
             for pr in cached.pullRequests {
@@ -313,6 +316,9 @@ final class PRManager: PRManagerType, ObservableObject {
                 var prs = self.filterByConfiguration(result.openPRs)
                 var mentionedPRs = self.filterByConfiguration(result.mentionedPRs)
                 var mergedPRs = self.filterByConfiguration(result.mergedPRs)
+                self.applyReadState(to: &prs)
+                self.applyReadState(to: &mentionedPRs)
+                self.applyReadState(to: &mergedPRs)
 
                 logger.info("After filters: \(prs.count) open PRs, \(mentionedPRs.count) mentioned PRs, \(mergedPRs.count) merged PRs")
 
@@ -404,8 +410,10 @@ final class PRManager: PRManagerType, ObservableObject {
         mergedPRs: [PullRequest],
         stage: GitHubAPIClient.IncrementalStage
     ) {
-        let filteredOpen = filterByConfiguration(openPRs)
-        let filteredMerged = filterByConfiguration(mergedPRs)
+        var filteredOpen = filterByConfiguration(openPRs)
+        var filteredMerged = filterByConfiguration(mergedPRs)
+        applyReadState(to: &filteredOpen)
+        applyReadState(to: &filteredMerged)
 
         var updated = prList
         updated.pullRequests = filteredOpen
@@ -610,6 +618,64 @@ final class PRManager: PRManagerType, ObservableObject {
         // Restart polling with new interval if currently polling
         if timer != nil {
             enablePolling(true)
+        }
+    }
+
+    // MARK: - Review Comment Read State
+
+    func markReviewCommentsRead(for pr: PullRequest) {
+        updateReviewCommentReadState(for: pr, isRead: true)
+    }
+
+    func markReviewCommentsUnread(for pr: PullRequest) {
+        updateReviewCommentReadState(for: pr, isRead: false)
+    }
+
+    private func updateReviewCommentReadState(for pr: PullRequest, isRead: Bool) {
+        let threadIDs = unresolvedReviewThreadIDs(for: pr)
+        guard !threadIDs.isEmpty else { return }
+
+        var updated = readReviewThreadIDs
+        if isRead {
+            updated.formUnion(threadIDs)
+        } else {
+            updated.subtract(threadIDs)
+        }
+
+        guard updated != readReviewThreadIDs else { return }
+
+        readReviewThreadIDs = updated
+        Self.saveReadReviewThreadIDs(updated)
+        refreshReadStateOverlay()
+
+        let action = isRead ? "read" : "unread"
+        logger.info(
+            "Marked review comments \(action, privacy: .public): \(pr.pinIdentifier, privacy: .public) threads=\(threadIDs.count, privacy: .public)"
+        )
+    }
+
+    private func unresolvedReviewThreadIDs(for pr: PullRequest) -> Set<String> {
+        Set(pr.reviewThreads.lazy.filter(\.isUnresolved).map(\.id))
+    }
+
+    private func refreshReadStateOverlay() {
+        var updated = prList
+        applyReadState(to: &updated)
+        prList = updated
+    }
+
+    private func applyReadState(to prList: inout PRList) {
+        applyReadState(to: &prList.pullRequests)
+        applyReadState(to: &prList.mentionedPullRequests)
+        applyReadState(to: &prList.mergedPullRequests)
+    }
+
+    private func applyReadState(to prs: inout [PullRequest]) {
+        for prIndex in prs.indices {
+            for threadIndex in prs[prIndex].reviewThreads.indices {
+                let threadID = prs[prIndex].reviewThreads[threadIndex].id
+                prs[prIndex].reviewThreads[threadIndex].isRead = readReviewThreadIDs.contains(threadID)
+            }
         }
     }
 
@@ -818,6 +884,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
     private static let configurationKey = "PRDashboard.Configuration"
     private static let pinnedPRsKey = "PRDashboard.PinnedPRs"
+    private static let readReviewThreadIDsKey = "PRDashboard.ReadReviewThreadIDs"
 
     private static func loadConfiguration() -> Configuration {
         guard let data = UserDefaults.standard.data(forKey: configurationKey),
@@ -833,14 +900,27 @@ final class PRManager: PRManagerType, ObservableObject {
         }
     }
 
+    private static func loadStringSet(forKey key: String) -> Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
+    }
+
+    private static func saveStringSet(_ values: Set<String>, forKey key: String) {
+        UserDefaults.standard.set(Array(values), forKey: key)
+    }
+
     private static func loadPinnedPRs() -> Set<String> {
-        guard let array = UserDefaults.standard.stringArray(forKey: pinnedPRsKey) else {
-            return []
-        }
-        return Set(array)
+        loadStringSet(forKey: pinnedPRsKey)
     }
 
     private static func savePinnedPRs(_ identifiers: Set<String>) {
-        UserDefaults.standard.set(Array(identifiers), forKey: pinnedPRsKey)
+        saveStringSet(identifiers, forKey: pinnedPRsKey)
+    }
+
+    private static func loadReadReviewThreadIDs() -> Set<String> {
+        loadStringSet(forKey: readReviewThreadIDsKey)
+    }
+
+    private static func saveReadReviewThreadIDs(_ identifiers: Set<String>) {
+        saveStringSet(identifiers, forKey: readReviewThreadIDsKey)
     }
 }

@@ -125,6 +125,14 @@ struct PullRequest: Identifiable, Codable, Equatable {
         reviewThreads.lazy.filter(\.isUnresolved).count
     }
 
+    var unreadUnresolvedCount: Int {
+        reviewThreads.lazy.filter(\.isUnreadUnresolved).count
+    }
+
+    var readUnresolvedCount: Int {
+        reviewThreads.lazy.filter(\.isReadUnresolved).count
+    }
+
     var repoFullName: String {
         "\(repositoryOwner)/\(repositoryName)"
     }

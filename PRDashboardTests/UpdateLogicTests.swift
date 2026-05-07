@@ -255,7 +255,85 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertTrue(list.hasUsableData)
         XCTAssertEqual(list.authoredUnresolvedCount, 0)
+        XCTAssertEqual(list.authoredUnreadUnresolvedCount, 0)
         XCTAssertEqual(list.totalUnresolvedCount, 0)
+    }
+
+    func testPullRequestReadUnreadUnresolvedCountsExcludeResolvedAndOutdated() {
+        let pr = makePullRequest(
+            id: 10,
+            number: 10,
+            category: .authored,
+            reviewThreads: [
+                makeReviewThread(id: "unread-unresolved"),
+                makeReviewThread(id: "read-unresolved", isRead: true),
+                makeReviewThread(id: "read-resolved", isResolved: true, isRead: true),
+                makeReviewThread(id: "unread-outdated", isOutdated: true)
+            ]
+        )
+
+        XCTAssertEqual(pr.unresolvedCount, 2)
+        XCTAssertEqual(pr.unreadUnresolvedCount, 1)
+        XCTAssertEqual(pr.readUnresolvedCount, 1)
+    }
+
+    func testReviewThreadDecodesMissingReadStateAsUnread() throws {
+        let json = """
+        {
+          "id": "thread-1",
+          "isResolved": false,
+          "isOutdated": false,
+          "path": null,
+          "line": null,
+          "comments": []
+        }
+        """
+
+        let thread = try JSONDecoder().decode(ReviewThread.self, from: Data(json.utf8))
+
+        XCTAssertFalse(thread.isRead)
+        XCTAssertTrue(thread.isUnreadUnresolved)
+    }
+
+    func testPRListAuthoredUnreadUnresolvedCountExcludesReadAndNonAuthoredPRs() {
+        let authored = makePullRequest(
+            id: 1,
+            number: 1,
+            category: .authored,
+            reviewThreads: [
+                makeReviewThread(id: "authored-unread"),
+                makeReviewThread(id: "authored-read", isRead: true)
+            ]
+        )
+        let reviewRequest = makePullRequest(
+            id: 2,
+            number: 2,
+            category: .reviewRequest,
+            reviewThreads: [
+                makeReviewThread(id: "review-unread")
+            ]
+        )
+        let mentioned = makePullRequest(
+            id: 3,
+            number: 3,
+            category: .mentioned,
+            reviewThreads: [
+                makeReviewThread(id: "mentioned-unread")
+            ]
+        )
+
+        let list = PRList(
+            lastUpdated: Date(),
+            pullRequests: [authored, reviewRequest],
+            mentionedPullRequests: [mentioned],
+            mergedPullRequests: [],
+            isLoading: false,
+            error: nil
+        )
+
+        XCTAssertEqual(list.authoredUnresolvedCount, 2)
+        XCTAssertEqual(list.authoredUnreadUnresolvedCount, 1)
+        XCTAssertEqual(list.totalUnresolvedCount, 3)
     }
 
     func testCachedPRDetailInvalidatesWhenCIRollupStateChangesWithoutPRUpdate() {
@@ -419,6 +497,23 @@ final class UpdateLogicTests: XCTestCase {
             commentTotal: commentTotal,
             reviewTotal: reviewTotal,
             unresolvedReviewThreadCount: unresolvedReviewThreadCount
+        )
+    }
+
+    private func makeReviewThread(
+        id: String,
+        isResolved: Bool = false,
+        isOutdated: Bool = false,
+        isRead: Bool = false
+    ) -> ReviewThread {
+        ReviewThread(
+            id: id,
+            isResolved: isResolved,
+            isOutdated: isOutdated,
+            path: nil,
+            line: nil,
+            comments: [],
+            isRead: isRead
         )
     }
 

@@ -22,6 +22,8 @@ struct PRRowView: View {
     let pr: PullRequest
     let onOpen: () -> Void
     let onCopyURL: () -> Void
+    var onMarkReviewCommentsRead: (() -> Void)?
+    var onMarkReviewCommentsUnread: (() -> Void)?
     var onRerunFailedCI: (() -> Void)?
     var onTogglePin: (() -> Void)?
     var onToggleCIAutoRetry: (() -> Void)?
@@ -137,12 +139,20 @@ struct PRRowView: View {
                         }
                     }
 
-                    if pr.unresolvedCount > 0 {
-                        Badge(count: pr.unresolvedCount)
+                    if pr.unreadUnresolvedCount > 0 {
+                        Badge(count: pr.unreadUnresolvedCount)
                             .delayedHoverTooltip(
                                 String(
                                     localized:
-                                        "This shows how many unresolved review comments this PR has."
+                                        "This shows how many unread unresolved review comments this PR has."
+                                )
+                            )
+                    } else if pr.readUnresolvedCount > 0 {
+                        Badge(count: pr.readUnresolvedCount, color: .gray)
+                            .delayedHoverTooltip(
+                                String(
+                                    localized:
+                                        "All current unresolved review comments on this PR are marked as read."
                                 )
                             )
                     }
@@ -173,6 +183,25 @@ struct PRRowView: View {
             }
             Button("Copy URL") {
                 onCopyURL()
+            }
+            let canMarkRead = pr.unreadUnresolvedCount > 0 && onMarkReviewCommentsRead != nil
+            let canMarkUnread = pr.readUnresolvedCount > 0 && onMarkReviewCommentsUnread != nil
+            if canMarkRead || canMarkUnread {
+                Divider()
+                if canMarkRead, let onMarkReviewCommentsRead {
+                    Button {
+                        DispatchQueue.main.async { onMarkReviewCommentsRead() }
+                    } label: {
+                        Label("Mark as Read", systemImage: "checkmark.circle")
+                    }
+                }
+                if canMarkUnread, let onMarkReviewCommentsUnread {
+                    Button {
+                        DispatchQueue.main.async { onMarkReviewCommentsUnread() }
+                    } label: {
+                        Label("Mark as Unread", systemImage: "circle.fill")
+                    }
+                }
             }
             if let onTogglePin {
                 Divider()

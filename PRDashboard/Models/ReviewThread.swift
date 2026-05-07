@@ -7,6 +7,12 @@ struct ReviewThread: Identifiable, Codable {
     let path: String?
     let line: Int?
     let comments: [ReviewComment]
+    // Overlay applied by PRManager from its persisted Set<String>; not encoded.
+    var isRead: Bool = false
+
+    enum CodingKeys: String, CodingKey {
+        case id, isResolved, isOutdated, path, line, comments
+    }
 
     var latestComment: ReviewComment? {
         comments.last
@@ -14,6 +20,14 @@ struct ReviewThread: Identifiable, Codable {
 
     var isUnresolved: Bool {
         !isResolved && !isOutdated
+    }
+
+    var isUnreadUnresolved: Bool {
+        isUnresolved && !isRead
+    }
+
+    var isReadUnresolved: Bool {
+        isUnresolved && isRead
     }
 }
 

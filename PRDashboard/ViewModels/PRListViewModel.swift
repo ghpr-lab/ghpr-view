@@ -297,6 +297,14 @@ final class PRListViewModel: ObservableObject {
         }
     }
 
+    func markReviewCommentsRead(_ pr: PullRequest) {
+        prManager.markReviewCommentsRead(for: pr)
+    }
+
+    func markReviewCommentsUnread(_ pr: PullRequest) {
+        prManager.markReviewCommentsUnread(for: pr)
+    }
+
     /// Returns nil if auto-retry is not active, otherwise the max retry round (0-3).
     func ciAutoRetryRound(for pr: PullRequest) -> Int? {
         guard let state = ciRetryTracking[pr.pinIdentifier] else { return nil }

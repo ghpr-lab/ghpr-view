@@ -123,6 +123,8 @@ struct MainView: View {
                                 pr: pr,
                                 onOpen: { viewModel.openPR(pr) },
                                 onCopyURL: { viewModel.copyURL(pr) },
+                                onMarkReviewCommentsRead: { viewModel.markReviewCommentsRead(pr) },
+                                onMarkReviewCommentsUnread: { viewModel.markReviewCommentsUnread(pr) },
                                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
                                 onToggleCIAutoRetry: {
@@ -226,6 +228,8 @@ struct MainView: View {
                 pr: pr,
                 onOpen: { viewModel.openPR(pr) },
                 onCopyURL: { viewModel.copyURL(pr) },
+                onMarkReviewCommentsRead: { viewModel.markReviewCommentsRead(pr) },
+                onMarkReviewCommentsUnread: { viewModel.markReviewCommentsUnread(pr) },
                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
                 isPinned: showPin && viewModel.isPinned(pr),

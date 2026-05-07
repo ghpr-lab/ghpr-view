@@ -60,6 +60,11 @@ struct PRList: Codable {
         authoredPRs.reduce(0) { $0 + $1.unresolvedCount }
     }
 
+    /// Unread unresolved comment count for authored PRs only (used for menu bar badge)
+    var authoredUnreadUnresolvedCount: Int {
+        authoredPRs.reduce(0) { $0 + $1.unreadUnresolvedCount }
+    }
+
     var authoredPRs: [PullRequest] {
         pullRequests.filter { $0.category == .authored }
     }
