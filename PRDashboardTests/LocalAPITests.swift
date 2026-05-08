@@ -102,6 +102,44 @@ final class LocalAPITests: XCTestCase {
         XCTAssertTrue(snapshot.pullRequests.authored.isEmpty)
     }
 
+    func testSnapshotFactoryPinsReviewRequestsWithinReviewSection() {
+        let now = Date(timeIntervalSince1970: 1_775_000_000)
+        let unpinned = makePullRequest(
+            id: 201,
+            number: 201,
+            title: "Newer review request",
+            category: .reviewRequest,
+            updatedAt: now
+        )
+        let pinned = makePullRequest(
+            id: 202,
+            number: 202,
+            title: "Pinned review request",
+            category: .reviewRequest,
+            updatedAt: now.addingTimeInterval(-3600)
+        )
+        let prList = PRList(
+            lastUpdated: now,
+            pullRequests: [unpinned, pinned],
+            mentionedPullRequests: [],
+            mergedPullRequests: [],
+            isLoading: false,
+            error: nil
+        )
+
+        let snapshot = LocalSnapshotFactory.makeSnapshot(
+            input: makeInput(
+                prList: prList,
+                pinnedPRIdentifiers: [pinned.pinIdentifier]
+            ),
+            now: now
+        )
+
+        XCTAssertEqual(snapshot.pullRequests.reviewRequests.map(\.number), [202, 201])
+        XCTAssertEqual(snapshot.pullRequests.reviewRequests.first?.isPinned, true)
+        XCTAssertTrue(snapshot.pullRequests.authored.isEmpty)
+    }
+
     func testCLIParserUsesEnvironmentSocketAndFlags() throws {
         let envOptions = try GHPRCLI.parse(
             arguments: ["status"],

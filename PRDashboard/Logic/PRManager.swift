@@ -5,6 +5,72 @@ import os
 
 private let logger = Logger(subsystem: "com.prdashboard", category: "PRManager")
 
+enum PinnedMajorPREvent: Hashable {
+    case ciFailure
+    case changeRequests(Int)
+    case approvals(Int)
+
+    var notificationText: String {
+        switch self {
+        case .ciFailure:
+            return String(localized: "CI failing")
+        case .changeRequests(let count):
+            if count == 1 {
+                return String(localized: "1 change request")
+            }
+            return String(localized: "\(count) change requests")
+        case .approvals(let count):
+            if count == 1 {
+                return String(localized: "1 approval")
+            }
+            return String(localized: "\(count) approvals")
+        }
+    }
+}
+
+struct PinnedMajorPRNotificationPlan: Equatable {
+    let prID: Int
+    let events: [PinnedMajorPREvent]
+}
+
+enum PinnedMajorPRNotificationPlanner {
+    static func events(for pr: PullRequest) -> [PinnedMajorPREvent] {
+        var events: [PinnedMajorPREvent] = []
+
+        if pr.ciStatus == .failure || pr.ciStatus == .unknown || pr.checkFailureCount > 0 {
+            events.append(.ciFailure)
+        }
+
+        if let changesRequestedCount = pr.changesRequestedCount, changesRequestedCount > 0 {
+            events.append(.changeRequests(changesRequestedCount))
+        }
+
+        if pr.approvalCount > 0 {
+            events.append(.approvals(pr.approvalCount))
+        }
+
+        return events
+    }
+
+    static func plans(
+        for prs: [PullRequest],
+        pinnedPRIdentifiers: Set<String>
+    ) -> [PinnedMajorPRNotificationPlan] {
+        prs.compactMap { pr in
+            guard pr.category == .authored || pr.category == .reviewRequest else { return nil }
+            guard pinnedPRIdentifiers.contains(pr.pinIdentifier) else { return nil }
+
+            let events = events(for: pr)
+            guard !events.isEmpty else { return nil }
+
+            return PinnedMajorPRNotificationPlan(
+                prID: pr.id,
+                events: events
+            )
+        }
+    }
+}
+
 @MainActor
 protocol PRManagerType: AnyObject {
     func enablePolling(_ enabled: Bool)
@@ -60,6 +126,7 @@ final class PRManager: PRManagerType, ObservableObject {
     private var queuedRefresh = false
     private var consecutiveTransientFailures = 0
     private var previousPRs: [Int: PullRequest] = [:]
+    private var previousPinnedMajorEvents: [Int: Set<PinnedMajorPREvent>] = [:]
     private var pendingAutoRetryPRIds: Set<Int> = []
     private var hoverDetailTasks: [Int: Task<Void, Never>] = [:]
     private var hoverDetailCache: [Int: HoverDetailCacheEntry] = [:]
@@ -191,6 +258,7 @@ final class PRManager: PRManagerType, ObservableObject {
             cancelRefreshWork(reason: "sign_out")
             prList = .empty
             previousPRs = [:]
+            previousPinnedMajorEvents = [:]
             hoverDetailTasks.values.forEach { $0.cancel() }
             hoverDetailTasks = [:]
             hoverDetailCache = [:]
@@ -347,6 +415,7 @@ final class PRManager: PRManagerType, ObservableObject {
                 // Check for changes and notify
                 if configuration.notificationsEnabled {
                     checkForChangesAndNotify(newPRs: prs)
+                    notifyPinnedMajorEvents(newPRs: prs)
                 }
 
                 // Auto-retry failed CI when workflow completes
@@ -922,10 +991,41 @@ final class PRManager: PRManagerType, ObservableObject {
             if previousCI != currentCI {
                 if let newStatus = currentCI,
                    (newStatus == .success || newStatus == .failure) {
+                    if newStatus == .failure && pinnedPRIdentifiers.contains(pr.pinIdentifier) {
+                        continue
+                    }
                     notificationManager.notifyCIStatusChange(pr: pr, newStatus: newStatus)
                 }
             }
         }
+    }
+
+    private func notifyPinnedMajorEvents(newPRs: [PullRequest]) {
+        guard !pinnedPRIdentifiers.isEmpty else {
+            previousPinnedMajorEvents.removeAll(keepingCapacity: true)
+            return
+        }
+
+        var nextState: [Int: Set<PinnedMajorPREvent>] = [:]
+
+        for pr in newPRs where pinnedPRIdentifiers.contains(pr.pinIdentifier) {
+            guard pr.category == .authored || pr.category == .reviewRequest else { continue }
+
+            let events = PinnedMajorPRNotificationPlanner.events(for: pr)
+            let currentSet = Set(events)
+
+            // Suppress on first sighting (cold start, newly pinned) — record state and wait for next delta.
+            if let previousSet = previousPinnedMajorEvents[pr.id] {
+                let newEvents = events.filter { !previousSet.contains($0) }
+                if !newEvents.isEmpty {
+                    notificationManager.notifyPinnedMajorEvents(pr: pr, events: newEvents)
+                }
+            }
+
+            nextState[pr.id] = currentSet
+        }
+
+        previousPinnedMajorEvents = nextState
     }
 
     // MARK: - CI Auto-retry (3x per workflow)

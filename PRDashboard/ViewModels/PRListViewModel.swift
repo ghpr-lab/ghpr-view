@@ -155,6 +155,14 @@ final class PRListViewModel: ObservableObject {
         filteredPRs.filter { $0.category == .reviewRequest }
     }
 
+    var pinnedReviewRequestPRs: [PullRequest] {
+        reviewRequestPRs.filter { pinnedPRIdentifiers.contains($0.pinIdentifier) }
+    }
+
+    var unpinnedReviewRequestPRs: [PullRequest] {
+        reviewRequestPRs.filter { !pinnedPRIdentifiers.contains($0.pinIdentifier) }
+    }
+
     var mentionedPRs: [PullRequest] {
         filterPRs(prList.mentionedPullRequests)
     }
@@ -164,7 +172,7 @@ final class PRListViewModel: ObservableObject {
     }
 
     var groupedReviewPRs: [(String, [PullRequest])] {
-        groupByRepo(reviewRequestPRs)
+        groupByRepo(unpinnedReviewRequestPRs)
     }
 
     var groupedMentionedPRs: [(String, [PullRequest])] {
@@ -330,8 +338,8 @@ final class PRListViewModel: ObservableObject {
         pinnedPRIdentifiers = prManager.pinnedPRIdentifiers
         logger.info("Pin toggled: \(identifier) → pinned=\(self.pinnedPRIdentifiers.contains(identifier)), total=\(self.pinnedPRIdentifiers.count)")
 
-        // Force SwiftUI to rebuild the authored PRs section after context menu dismisses.
-        // Changing pinChangeToken invalidates the .id() on the section container in MainView,
+        // Force SwiftUI to rebuild PR sections after context menu dismisses.
+        // Changing pinChangeToken invalidates the .id() on the list container in MainView,
         // causing a full view tree rebuild that cannot be diff-optimized away.
         Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 300_000_000)

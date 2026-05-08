@@ -35,7 +35,8 @@ enum LocalSnapshotFactory {
 
         let reviewSnapshots = sortPRs(
             reviewRequestPRs,
-            pinnedPRIdentifiers: input.pinnedPRIdentifiers
+            pinnedPRIdentifiers: input.pinnedPRIdentifiers,
+            pinnedFirst: true
         ).map {
             makePRSnapshot(
                 $0,

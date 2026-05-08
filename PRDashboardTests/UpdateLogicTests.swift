@@ -411,6 +411,77 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(list.totalUnresolvedCount, 3)
     }
 
+    func testPinnedMajorEventPlannerReportsCIFailureEveryRefresh() {
+        var pr = makePullRequest(id: 11, number: 11, category: .authored)
+        pr.ciStatus = .failure
+        pr.checkFailureCount = 1
+
+        let firstPlan = PinnedMajorPRNotificationPlanner.plans(
+            for: [pr],
+            pinnedPRIdentifiers: [pr.pinIdentifier]
+        )
+        let secondPlan = PinnedMajorPRNotificationPlanner.plans(
+            for: [pr],
+            pinnedPRIdentifiers: [pr.pinIdentifier]
+        )
+
+        XCTAssertEqual(firstPlan, secondPlan)
+        XCTAssertEqual(firstPlan.first?.events, [.ciFailure])
+    }
+
+    func testPinnedMajorEventPlannerTreatsUnknownCIAsFailure() {
+        var pr = makePullRequest(id: 12, number: 12, category: .authored)
+        pr.ciStatus = .unknown
+
+        let plan = PinnedMajorPRNotificationPlanner.plans(
+            for: [pr],
+            pinnedPRIdentifiers: [pr.pinIdentifier]
+        )
+
+        XCTAssertEqual(plan.first?.events, [.ciFailure])
+    }
+
+    func testPinnedMajorEventPlannerReportsChangeRequestsAndApprovals() {
+        var pr = makePullRequest(id: 13, number: 13, category: .reviewRequest)
+        pr.changesRequestedCount = 2
+        pr.approvalCount = 1
+
+        let plan = PinnedMajorPRNotificationPlanner.plans(
+            for: [pr],
+            pinnedPRIdentifiers: [pr.pinIdentifier]
+        )
+
+        XCTAssertEqual(plan.first?.events, [.changeRequests(2), .approvals(1)])
+    }
+
+    func testPinnedMajorEventPlannerIgnoresUnpinnedPRs() {
+        var pr = makePullRequest(id: 14, number: 14, category: .authored)
+        pr.ciStatus = .failure
+        pr.checkFailureCount = 1
+        pr.changesRequestedCount = 1
+        pr.approvalCount = 1
+
+        let plan = PinnedMajorPRNotificationPlanner.plans(
+            for: [pr],
+            pinnedPRIdentifiers: []
+        )
+
+        XCTAssertTrue(plan.isEmpty)
+    }
+
+    func testPinnedMajorEventPlannerAggregatesMultipleEvents() {
+        var pr = makePullRequest(id: 15, number: 15, category: .reviewRequest)
+        pr.ciStatus = .failure
+        pr.checkFailureCount = 3
+        pr.changesRequestedCount = 2
+        pr.approvalCount = 4
+
+        let events = PinnedMajorPRNotificationPlanner.events(for: pr)
+
+        XCTAssertEqual(events, [.ciFailure, .changeRequests(2), .approvals(4)])
+        XCTAssertEqual(events.map(\.notificationText).count, 3)
+    }
+
     func testCachedPRDetailInvalidatesWhenCIRollupStateChangesWithoutPRUpdate() {
         let now = Date(timeIntervalSince1970: 1_713_666_108)
         let cachedSnapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "PENDING")
@@ -490,6 +561,9 @@ final class UpdateLogicTests: XCTestCase {
         pr.checkPendingCount = 0
         pr.githubCIState = "SUCCESS"
         pr.ciExtendedInfo = CIExtendedInfo(isRunning: false, workflows: [])
+        pr.graphqlNodeId = "PR_node_7"
+        pr.baseRefName = "main"
+        pr.headRefName = "feature"
 
         let cached = CachedPRDetail(
             prId: pr.id,

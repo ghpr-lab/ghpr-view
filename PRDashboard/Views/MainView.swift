@@ -150,7 +150,7 @@ struct MainView: View {
 
                     // Unpinned PRs grouped by repo
                     ForEach(viewModel.groupedAuthoredPRs, id: \.0) { repo, prs in
-                        repoSection(repo: repo, prs: prs, showPin: true)
+                        repoSection(repo: repo, prs: prs, showPin: true, showReviewCommentActions: true)
                             .id("authored-\(repo)")
                     }
                 }
@@ -159,8 +159,31 @@ struct MainView: View {
                 if !viewModel.reviewRequestPRs.isEmpty {
                     sectionHeader("Review Requests", count: viewModel.reviewRequestPRs.count, onboardingStep: .reviewRequests)
 
+                    if !viewModel.pinnedReviewRequestPRs.isEmpty {
+                        ForEach(viewModel.pinnedReviewRequestPRs) { pr in
+                            PRRowView(
+                                pr: pr,
+                                onOpen: { viewModel.openPR(pr) },
+                                onCopyURL: { viewModel.copyURL(pr) },
+                                onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
+                                onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
+                                onLoadHoverDetail: { viewModel.loadHoverDetailIfNeeded(pr) },
+                                onTogglePin: { viewModel.togglePin(pr) },
+                                isPinned: true,
+                                isOpening: viewModel.isOpeningPR(pr),
+                                isUpdatingBranch: viewModel.isUpdatingBranch(pr),
+                                isLoadingHoverDetail: viewModel.isLoadingHoverDetail(pr),
+                                showCIStatus: true,
+                                showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
+                                onboardingManager: onboardingManager,
+                                approvalOnboardingPRID: firstVisibleApprovalPRID,
+                                reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
+                            )
+                        }
+                    }
+
                     ForEach(viewModel.groupedReviewPRs, id: \.0) { repo, prs in
-                        repoSection(repo: repo, prs: prs)
+                        repoSection(repo: repo, prs: prs, showPin: true)
                             .id("review-\(repo)")
                     }
                 }
@@ -224,15 +247,16 @@ struct MainView: View {
         prs: [PullRequest],
         showCIStatus: Bool = true,
         showPin: Bool = false,
-        showConflictStatus: Bool = true
+        showConflictStatus: Bool = true,
+        showReviewCommentActions: Bool = false
     ) -> some View {
         ForEach(prs) { pr in
             PRRowView(
                 pr: pr,
                 onOpen: { viewModel.openPR(pr) },
                 onCopyURL: { viewModel.copyURL(pr) },
-                onMarkReviewCommentsRead: { viewModel.markReviewCommentsRead(pr) },
-                onMarkReviewCommentsUnread: { viewModel.markReviewCommentsUnread(pr) },
+                onMarkReviewCommentsRead: showReviewCommentActions ? { viewModel.markReviewCommentsRead(pr) } : nil,
+                onMarkReviewCommentsUnread: showReviewCommentActions ? { viewModel.markReviewCommentsUnread(pr) } : nil,
                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                 onLoadHoverDetail: { viewModel.loadHoverDetailIfNeeded(pr) },
@@ -414,6 +438,7 @@ struct MainView: View {
     private var orderedVisiblePRs: [PullRequest] {
         viewModel.pinnedAuthoredPRs
             + viewModel.groupedAuthoredPRs.flatMap(\.1)
+            + viewModel.pinnedReviewRequestPRs
             + viewModel.groupedReviewPRs.flatMap(\.1)
             + viewModel.groupedMentionedPRs.flatMap(\.1)
             + viewModel.groupedMergedLast24hPRs.flatMap(\.1)

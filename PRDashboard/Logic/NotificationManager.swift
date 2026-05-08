@@ -107,6 +107,32 @@ final class NotificationManager: NSObject, ObservableObject {
         }
     }
 
+    func notifyPinnedMajorEvents(pr: PullRequest, events: [PinnedMajorPREvent]) {
+        guard isAuthorized else { return }
+        guard !mutedPRIds.contains(pr.id) else { return }
+        guard !events.isEmpty else { return }
+
+        let content = UNMutableNotificationContent()
+        content.title = "\(pr.repoFullName) #\(pr.number)"
+        let eventSummary = events.map(\.notificationText).joined(separator: ", ")
+        content.body = String(localized: "Pinned PR has major events: \(eventSummary) on \"\(pr.title)\"")
+        content.sound = .default
+        content.userInfo = ["pr_url": pr.url.absoluteString, "pr_id": pr.id]
+        content.categoryIdentifier = "PR_NOTIFICATION"
+
+        let request = UNNotificationRequest(
+            identifier: "pinned-pr-\(pr.id)-\(Date().timeIntervalSince1970)",
+            content: content,
+            trigger: nil
+        )
+
+        notificationCenter.add(request) { error in
+            if let error = error {
+                print("Failed to schedule pinned PR notification: \(error.localizedDescription)")
+            }
+        }
+    }
+
     func mutePR(_ prId: Int) {
         mutedPRIds.insert(prId)
         saveMutedPRs()
