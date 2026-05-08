@@ -8,8 +8,11 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
     private var popover: NSPopover
     private weak var prManager: PRManagerType?
     private let onCheckForUpdates: () -> Void
+    private let defaultPopoverBehavior: NSPopover.Behavior
 
     private var eventMonitor: Any?
+    private var hoverDetailVisibilityObserver: NSObjectProtocol?
+    private var isHoverDetailPanelVisible = false
 
     init(popover: NSPopover, prManager: PRManagerType, onCheckForUpdates: @escaping () -> Void) {
         self.statusBar = NSStatusBar.system
@@ -17,17 +20,22 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         self.popover = popover
         self.prManager = prManager
         self.onCheckForUpdates = onCheckForUpdates
+        self.defaultPopoverBehavior = popover.behavior
 
         super.init()
 
         setupStatusBarButton()
         popover.delegate = self
         setupEventMonitor()
+        observeHoverDetailVisibility()
     }
 
     deinit {
         if let monitor = eventMonitor {
             NSEvent.removeMonitor(monitor)
+        }
+        if let hoverDetailVisibilityObserver {
+            NotificationCenter.default.removeObserver(hoverDetailVisibilityObserver)
         }
     }
 
@@ -117,6 +125,27 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
         }
     }
 
+    private func observeHoverDetailVisibility() {
+        hoverDetailVisibilityObserver = NotificationCenter.default.addObserver(
+            forName: .prHoverDetailPanelVisibilityDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let isVisible = notification.userInfo?[PRHoverDetailPanelVisibilityKey.isVisible] as? Bool == true
+            Task { @MainActor [weak self] in
+                self?.isHoverDetailPanelVisible = isVisible
+                self?.updatePopoverBehaviorForHoverDetail()
+            }
+        }
+    }
+
+    private func updatePopoverBehaviorForHoverDetail() {
+        let behavior: NSPopover.Behavior = isHoverDetailPanelVisible ? .semitransient : defaultPopoverBehavior
+        if popover.behavior != behavior {
+            popover.behavior = behavior
+        }
+    }
+
     func updateBadge(count: Int) {
         guard let button = statusItem.button else { return }
 
@@ -161,11 +190,14 @@ final class StatusBarController: NSObject, NSPopoverDelegate {
 
     func popoverWillShow(_ notification: Notification) {
         prManager?.enablePolling(true)
+        updatePopoverBehaviorForHoverDetail()
     }
 
     func popoverWillClose(_ notification: Notification) {
         // Keep polling active in background for notifications
         // prManager?.enablePolling(false)
+        isHoverDetailPanelVisible = false
+        updatePopoverBehaviorForHoverDetail()
         statusItem.button?.highlight(false)
     }
 }

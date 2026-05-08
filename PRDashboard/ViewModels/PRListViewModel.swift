@@ -20,6 +20,8 @@ final class PRListViewModel: ObservableObject {
     @Published private(set) var patError: Error?
     @Published private(set) var rateLimitInfo: RateLimitInfo = .empty
     @Published private(set) var openingPRIDs: Set<Int> = []
+    @Published private(set) var updatingBranchPRIDs: Set<Int> = []
+    @Published private(set) var loadingHoverDetailPRIDs: Set<Int> = []
 
     private let prManager: PRManager
     private let oauthManager: GitHubOAuthManager
@@ -113,6 +115,20 @@ final class PRListViewModel: ObservableObject {
         prManager.$ciRetryTracking
             .sink { [weak self] tracking in
                 self?.ciRetryTracking = tracking
+            }
+            .store(in: &cancellables)
+
+        prManager.$updatingBranchPRIDs
+            .removeDuplicates()
+            .sink { [weak self] updatingIDs in
+                self?.updatingBranchPRIDs = updatingIDs
+            }
+            .store(in: &cancellables)
+
+        prManager.$loadingHoverDetailPRIDs
+            .removeDuplicates()
+            .sink { [weak self] loadingIDs in
+                self?.loadingHoverDetailPRIDs = loadingIDs
             }
             .store(in: &cancellables)
     }
@@ -300,6 +316,14 @@ final class PRListViewModel: ObservableObject {
         openingPRIDs.contains(pr.id)
     }
 
+    func isUpdatingBranch(_ pr: PullRequest) -> Bool {
+        updatingBranchPRIDs.contains(pr.id)
+    }
+
+    func isLoadingHoverDetail(_ pr: PullRequest) -> Bool {
+        loadingHoverDetailPRIDs.contains(pr.id)
+    }
+
     func togglePin(_ pr: PullRequest) {
         let identifier = pr.pinIdentifier
         prManager.togglePinPR(identifier)
@@ -347,6 +371,21 @@ final class PRListViewModel: ObservableObject {
                 logger.error("Failed to rerun CI for PR #\(pr.number): \(error.localizedDescription)")
             }
         }
+    }
+
+    func updateBranchWithRebase(_ pr: PullRequest) {
+        Task {
+            do {
+                try await prManager.updateBranchWithRebase(for: pr)
+                logger.info("Requested branch rebase update for PR #\(pr.number)")
+            } catch {
+                logger.error("Failed to update branch for PR #\(pr.number): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func loadHoverDetailIfNeeded(_ pr: PullRequest) {
+        prManager.loadHoverDetailIfNeeded(for: pr)
     }
 
     // MARK: - Private

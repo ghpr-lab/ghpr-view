@@ -147,6 +147,7 @@ struct CachedPRDetail: Codable {
     func isUsable(against snapshot: IndexSnapshot, now: Date, ttl: TimeInterval) -> Bool {
         guard indexSnapshot == snapshot else { return false }
         guard now.timeIntervalSince(detailFetchedAt) < ttl else { return false }
+        guard detail.hasHoverDetailMetadata else { return false }
         return !detail.ciIsInFlight
     }
 }

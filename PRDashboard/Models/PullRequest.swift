@@ -78,6 +78,7 @@ struct PullRequestReference: Hashable, Codable {
 
 struct PullRequest: Identifiable, Codable, Equatable {
     let id: Int
+    var graphqlNodeId: String? = nil
     let number: Int
     let title: String
     let author: String
@@ -92,8 +93,13 @@ struct PullRequest: Identifiable, Codable, Equatable {
     let mergedAt: Date?
     let body: String?
     let conversationComments: [IssueCommentSummary]
-    let lastCommitAt: Date?
-    let headCommitOid: String?
+    var lastCommitAt: Date?
+    var headCommitOid: String?
+    var baseRefName: String? = nil
+    var headRefName: String? = nil
+    var baseNeedsUpdate: Bool? = nil
+    var approvalAuthors: [String]? = nil
+    var changesRequestedAuthors: [String]? = nil
     var reviewThreads: [ReviewThread]
     let category: PRCategory
     let hasBaseConflicts: Bool
@@ -113,6 +119,15 @@ struct PullRequest: Identifiable, Codable, Equatable {
 
     var ciIsRunning: Bool { ciExtendedInfo?.isRunning ?? false }
     var ciWorkflows: [CIWorkflowInfo] { ciExtendedInfo?.workflows ?? [] }
+    var failedWorkflowNames: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for workflow in ciWorkflows where workflow.isWorkflow && workflow.status == .failure {
+            guard seen.insert(workflow.name.lowercased()).inserted else { continue }
+            result.append(workflow.name)
+        }
+        return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
     var ciIsInFlight: Bool {
         ciStatus == .pending || checkPendingCount > 0 || ciIsRunning
     }
@@ -135,6 +150,12 @@ struct PullRequest: Identifiable, Codable, Equatable {
 
     var repoFullName: String {
         "\(repositoryOwner)/\(repositoryName)"
+    }
+
+    var hasHoverDetailMetadata: Bool {
+        graphqlNodeId != nil &&
+            baseRefName != nil &&
+            headRefName != nil
     }
 
     /// Stable identifier used for pinning (e.g. "owner/repo#123")

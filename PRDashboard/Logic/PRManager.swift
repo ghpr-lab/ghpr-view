@@ -28,6 +28,8 @@ final class PRManager: PRManagerType, ObservableObject {
     @Published private(set) var pinnedPRIdentifiers: Set<String>
     @Published private(set) var readReviewThreadIDs: Set<String>
     @Published private(set) var ciRetryTracking: [String: CIRetryState] = [:]
+    @Published private(set) var updatingBranchPRIDs: Set<Int> = []
+    @Published private(set) var loadingHoverDetailPRIDs: Set<Int> = []
 
     enum RefreshState {
         case idle
@@ -59,10 +61,25 @@ final class PRManager: PRManagerType, ObservableObject {
     private var consecutiveTransientFailures = 0
     private var previousPRs: [Int: PullRequest] = [:]
     private var pendingAutoRetryPRIds: Set<Int> = []
+    private var hoverDetailTasks: [Int: Task<Void, Never>] = [:]
+    private var hoverDetailCache: [Int: HoverDetailCacheEntry] = [:]
     private var cancellables = Set<AnyCancellable>()
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isOnExpensiveNetwork: Bool = false
     private let networkMonitor = NWPathMonitor()
+
+    private struct HoverDetailCacheEntry {
+        let metadata: GitHubAPIClient.PRHoverMetadata
+        let prUpdatedAt: Date
+        let headCommitOid: String?
+        let fetchedAt: Date
+
+        func isUsable(for pr: PullRequest) -> Bool {
+            prUpdatedAt == pr.updatedAt &&
+                headCommitOid == pr.headCommitOid &&
+                Date().timeIntervalSince(fetchedAt) < 10 * 60
+        }
+    }
 
     init(
         apiClient: GitHubAPIClient,
@@ -89,6 +106,7 @@ final class PRManager: PRManagerType, ObservableObject {
     deinit {
         activeRefreshTask?.cancel()
         recoveryRetryTask?.cancel()
+        hoverDetailTasks.values.forEach { $0.cancel() }
     }
 
     private func setupBindings() {
@@ -173,6 +191,10 @@ final class PRManager: PRManagerType, ObservableObject {
             cancelRefreshWork(reason: "sign_out")
             prList = .empty
             previousPRs = [:]
+            hoverDetailTasks.values.forEach { $0.cancel() }
+            hoverDetailTasks = [:]
+            hoverDetailCache = [:]
+            loadingHoverDetailPRIDs = []
             // Clear caches on sign-out
             PRCache.shared.clear()
             PRDetailCache.shared.clear()
@@ -586,6 +608,75 @@ final class PRManager: PRManagerType, ObservableObject {
         return count
     }
 
+    func updateBranchWithRebase(for pr: PullRequest) async throws {
+        guard !updatingBranchPRIDs.contains(pr.id) else { return }
+        guard pr.baseNeedsUpdate == true else { return }
+        guard let pullRequestId = pr.graphqlNodeId else {
+            throw APIError.unknown(String(localized: "No GitHub node ID available for PR #\(pr.number)"))
+        }
+
+        setBranchUpdating(true, for: pr.id)
+        defer {
+            setBranchUpdating(false, for: pr.id)
+        }
+
+        let result = try await apiClient.updatePullRequestBranchWithRebase(
+            pullRequestId: pullRequestId,
+            expectedHeadOid: pr.headCommitOid
+        )
+        updateBranchMetadata(for: pr.id, result: result)
+        logger.info("Requested rebase branch update for PR #\(pr.number)")
+
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            self?.requestRefresh(trigger: .manual)
+        }
+    }
+
+    func loadHoverDetailIfNeeded(for pr: PullRequest) {
+        guard needsHoverDetailFetch(pr) else { return }
+        let includeCI = needsHoverCIFetch(pr)
+
+        if let cached = hoverDetailCache[pr.id], cached.isUsable(for: pr) {
+            applyHoverMetadata(cached.metadata)
+            return
+        }
+
+        guard hoverDetailTasks[pr.id] == nil else { return }
+        guard rateLimitInfo.hasHeadroomForHoverDetails else {
+            logger.warning(
+                "Skipping hover detail fetch due to rate-limit floor: remaining=\(self.rateLimitInfo.remaining, privacy: .public)/\(self.rateLimitInfo.limit, privacy: .public)"
+            )
+            return
+        }
+
+        setHoverDetailLoading(true, for: pr.id)
+        hoverDetailTasks[pr.id] = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.hoverDetailTasks[pr.id] = nil
+                self.setHoverDetailLoading(false, for: pr.id)
+            }
+
+            do {
+                let metadata = try await self.apiClient.fetchHoverMetadata(for: pr, includeCI: includeCI)
+                self.hoverDetailCache[pr.id] = HoverDetailCacheEntry(
+                    metadata: metadata,
+                    prUpdatedAt: pr.updatedAt,
+                    headCommitOid: pr.headCommitOid,
+                    fetchedAt: Date()
+                )
+                self.applyHoverMetadata(metadata)
+                logger.info("Loaded hover detail metadata for \(pr.repoFullName)#\(pr.number, privacy: .public)")
+            } catch {
+                if error is CancellationError || ((error as? APIError)?.isCancellation == true) {
+                    return
+                }
+                logger.error("Failed to load hover detail metadata for \(pr.repoFullName)#\(pr.number, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
     func refreshSinglePRCI(for pr: PullRequest) async {
         do {
             let result = try await apiClient.fetchSinglePRCIStatus(
@@ -601,6 +692,105 @@ final class PRManager: PRManagerType, ObservableObject {
             }
         } catch {
             logger.error("Failed to refresh single PR CI for #\(pr.number): \(error.localizedDescription)")
+        }
+    }
+
+    private func updateBranchMetadata(
+        for prID: Int,
+        result: GitHubAPIClient.UpdatePullRequestBranchResult
+    ) {
+        func apply(to prs: inout [PullRequest]) {
+            guard let index = prs.firstIndex(where: { $0.id == prID }) else { return }
+            if let headCommitOid = result.headCommitOid {
+                prs[index].headCommitOid = headCommitOid
+            }
+            if let lastCommitAt = result.lastCommitAt {
+                prs[index].lastCommitAt = lastCommitAt
+            }
+            prs[index].baseNeedsUpdate = result.baseNeedsUpdate
+        }
+
+        apply(to: &prList.pullRequests)
+        apply(to: &prList.mentionedPullRequests)
+        apply(to: &prList.mergedPullRequests)
+    }
+
+    private func needsHoverDetailFetch(_ pr: PullRequest) -> Bool {
+        if pr.approvalAuthors == nil || pr.changesRequestedAuthors == nil {
+            return true
+        }
+        if pr.baseNeedsUpdate == nil || pr.baseRefName == nil || pr.headRefName == nil {
+            return true
+        }
+        if needsHoverCIFetch(pr) {
+            return true
+        }
+        return false
+    }
+
+    private func needsHoverCIFetch(_ pr: PullRequest) -> Bool {
+        (pr.ciStatus == .failure || pr.ciStatus == .unknown || pr.checkFailureCount > 0) &&
+            pr.failedWorkflowNames.isEmpty
+    }
+
+    private func applyHoverMetadata(_ metadata: GitHubAPIClient.PRHoverMetadata) {
+        func apply(to prs: inout [PullRequest]) {
+            guard let index = prs.firstIndex(where: { $0.id == metadata.databaseId }) else { return }
+            prs[index].graphqlNodeId = metadata.graphqlNodeId ?? prs[index].graphqlNodeId
+            prs[index].baseRefName = metadata.baseRefName ?? prs[index].baseRefName
+            prs[index].headRefName = metadata.headRefName ?? prs[index].headRefName
+            prs[index].baseNeedsUpdate = metadata.baseNeedsUpdate
+            prs[index].approvalAuthors = metadata.approvalAuthors
+            prs[index].changesRequestedAuthors = metadata.changesRequestedAuthors
+            prs[index].approvalCount = metadata.approvalCount
+            prs[index].changesRequestedCount = metadata.changesRequestedCount
+            if let headCommitOid = metadata.headCommitOid {
+                prs[index].headCommitOid = headCommitOid
+            }
+            if let lastCommitAt = metadata.lastCommitAt {
+                prs[index].lastCommitAt = lastCommitAt
+            }
+            if let ciStatus = metadata.ciStatus {
+                prs[index].ciStatus = ciStatus
+            }
+            if let checkSuccessCount = metadata.checkSuccessCount {
+                prs[index].checkSuccessCount = checkSuccessCount
+            }
+            if let checkFailureCount = metadata.checkFailureCount {
+                prs[index].checkFailureCount = checkFailureCount
+            }
+            if let checkPendingCount = metadata.checkPendingCount {
+                prs[index].checkPendingCount = checkPendingCount
+            }
+            if let githubCIState = metadata.githubCIState {
+                prs[index].githubCIState = githubCIState
+            }
+            if let ciExtendedInfo = metadata.ciExtendedInfo {
+                prs[index].ciExtendedInfo = ciExtendedInfo
+            }
+        }
+
+        apply(to: &prList.pullRequests)
+        apply(to: &prList.mentionedPullRequests)
+        apply(to: &prList.mergedPullRequests)
+        PRCache.shared.save(prList)
+    }
+
+    private func setBranchUpdating(_ isUpdating: Bool, for prID: Int) {
+        guard isUpdating != updatingBranchPRIDs.contains(prID) else { return }
+        if isUpdating {
+            updatingBranchPRIDs.insert(prID)
+        } else {
+            updatingBranchPRIDs.remove(prID)
+        }
+    }
+
+    private func setHoverDetailLoading(_ isLoading: Bool, for prID: Int) {
+        guard isLoading != loadingHoverDetailPRIDs.contains(prID) else { return }
+        if isLoading {
+            loadingHoverDetailPRIDs.insert(prID)
+        } else {
+            loadingHoverDetailPRIDs.remove(prID)
         }
     }
 

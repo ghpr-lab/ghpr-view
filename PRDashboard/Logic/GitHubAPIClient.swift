@@ -20,6 +20,10 @@ struct RateLimitInfo: Equatable {
         remaining >= 200
     }
 
+    var hasHeadroomForHoverDetails: Bool {
+        remaining >= 100
+    }
+
     static var empty: RateLimitInfo {
         RateLimitInfo(limit: 5000, remaining: 5000, resetDate: Date())
     }
@@ -29,6 +33,7 @@ struct RateLimitInfo: Equatable {
 /// we need to decide whether a cached detail can be reused.
 struct IndexedPR {
     let databaseId: Int
+    let graphqlNodeId: String?
     let number: Int
     let title: String
     let url: URL
@@ -41,6 +46,9 @@ struct IndexedPR {
     let authorAvatarURL: URL?
     let repositoryOwner: String
     let repositoryName: String
+    let baseRefName: String?
+    let headRefName: String?
+    let baseNeedsUpdate: Bool?
     let hasBaseConflicts: Bool
     let category: PRCategory
     let isMerged: Bool
@@ -56,6 +64,7 @@ struct IndexedPR {
     func placeholderPullRequest(using existing: PullRequest? = nil) -> PullRequest {
         return PullRequest(
             id: databaseId,
+            graphqlNodeId: graphqlNodeId ?? existing?.graphqlNodeId,
             number: number,
             title: title,
             author: author,
@@ -72,6 +81,11 @@ struct IndexedPR {
             conversationComments: existing?.conversationComments ?? [],
             lastCommitAt: existing?.lastCommitAt,
             headCommitOid: snapshot.headOid ?? existing?.headCommitOid,
+            baseRefName: baseRefName ?? existing?.baseRefName,
+            headRefName: headRefName ?? existing?.headRefName,
+            baseNeedsUpdate: baseNeedsUpdate,
+            approvalAuthors: existing?.approvalAuthors,
+            changesRequestedAuthors: existing?.changesRequestedAuthors,
             reviewThreads: existing?.reviewThreads ?? [],
             category: category,
             hasBaseConflicts: hasBaseConflicts,
@@ -654,6 +668,408 @@ final class GitHubAPIClient: ObservableObject {
         }
     }
 
+    struct UpdatePullRequestBranchResult {
+        let headCommitOid: String?
+        let lastCommitAt: Date?
+        let baseNeedsUpdate: Bool?
+    }
+
+    func updatePullRequestBranchWithRebase(
+        pullRequestId: String,
+        expectedHeadOid: String?
+    ) async throws -> UpdatePullRequestBranchResult {
+        let mutation = """
+        mutation UpdatePullRequestBranchWithRebase(
+            $pullRequestId: ID!,
+            $expectedHeadOid: GitObjectID,
+            $updateMethod: PullRequestBranchUpdateMethod!
+        ) {
+            updatePullRequestBranch(input: {
+                pullRequestId: $pullRequestId,
+                expectedHeadOid: $expectedHeadOid,
+                updateMethod: $updateMethod
+            }) {
+                pullRequest {
+                    mergeStateStatus
+                    commits(last: 1) {
+                        nodes {
+                            commit {
+                                oid
+                                committedDate
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        """
+
+        var variables: [String: Any] = [
+            "pullRequestId": pullRequestId,
+            "updateMethod": "REBASE"
+        ]
+        if let expectedHeadOid {
+            variables["expectedHeadOid"] = expectedHeadOid
+        }
+
+        let responseData = try await executeGraphQL(
+            query: mutation,
+            operation: "updatePullRequestBranchWithRebase",
+            variables: variables
+        )
+        return try parseUpdatePullRequestBranchResponse(data: responseData)
+    }
+
+    private func parseUpdatePullRequestBranchResponse(data: Data) throws -> UpdatePullRequestBranchResult {
+        struct Response: Decodable {
+            let data: DataContainer?
+
+            struct DataContainer: Decodable {
+                let updatePullRequestBranch: UpdatePullRequestBranchPayload?
+            }
+
+            struct UpdatePullRequestBranchPayload: Decodable {
+                let pullRequest: PRNode?
+            }
+
+            struct PRNode: Decodable {
+                let mergeStateStatus: String?
+                let commits: CommitsContainer?
+            }
+
+            struct CommitsContainer: Decodable {
+                let nodes: [CommitNode]
+            }
+
+            struct CommitNode: Decodable {
+                let commit: CommitInfo
+            }
+
+            struct CommitInfo: Decodable {
+                let oid: String?
+                let committedDate: Date?
+            }
+        }
+
+        let decoder = JSONDecoder.githubDecoder
+        let response: Response
+        do {
+            response = try decoder.decode(Response.self, from: data)
+        } catch {
+            throw APIError.decoding(error)
+        }
+
+        guard let pr = response.data?.updatePullRequestBranch?.pullRequest else {
+            throw APIError.invalidResponse
+        }
+        let commit = pr.commits?.nodes.first?.commit
+        return UpdatePullRequestBranchResult(
+            headCommitOid: commit?.oid,
+            lastCommitAt: commit?.committedDate,
+            baseNeedsUpdate: Self.deriveBaseNeedsUpdate(mergeStateStatus: pr.mergeStateStatus)
+        )
+    }
+
+    struct PRHoverMetadata {
+        let databaseId: Int
+        let graphqlNodeId: String?
+        let baseRefName: String?
+        let headRefName: String?
+        let baseNeedsUpdate: Bool?
+        let approvalAuthors: [String]
+        let changesRequestedAuthors: [String]
+        let approvalCount: Int
+        let changesRequestedCount: Int
+        let headCommitOid: String?
+        let lastCommitAt: Date?
+        let ciStatus: CIStatus?
+        let githubCIState: String?
+        let checkSuccessCount: Int?
+        let checkFailureCount: Int?
+        let checkPendingCount: Int?
+        let ciExtendedInfo: CIExtendedInfo?
+    }
+
+    func fetchHoverMetadata(for pr: PullRequest, includeCI: Bool) async throws -> PRHoverMetadata {
+        let ciContextSection = includeCI ? """
+                            contexts(first: 20) {
+                                nodes {
+                                    ... on CheckRun {
+                                        name
+                                        conclusion
+                                        completedAt
+                                        checkSuite {
+                                            workflowRun {
+                                                workflow {
+                                                    name
+                                                }
+                                            }
+                                        }
+                                    }
+                                    ... on StatusContext {
+                                        context
+                                        state
+                                    }
+                                }
+                                pageInfo {
+                                    hasNextPage
+                                    endCursor
+                                }
+                            }
+        """ : ""
+
+        let query = """
+        query {
+            repository(owner: "\(pr.repositoryOwner)", name: "\(pr.repositoryName)") {
+                pullRequest(number: \(pr.number)) {
+                    id
+                    databaseId
+                    baseRefName
+                    headRefName
+                    mergeable
+                    mergeStateStatus
+                    latestReviews(first: 20) {
+                        nodes {
+                            state
+                            author {
+                                login
+                            }
+                        }
+                    }
+                    commits(last: 1) {
+                        nodes {
+                            commit {
+                                oid
+                                committedDate
+                                statusCheckRollup {
+                                    state
+        \(ciContextSection)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            rateLimit {
+                cost
+                remaining
+                resetAt
+            }
+        }
+        """
+
+        let responseData = try await executeGraphQL(query: query, operation: "fetchHoverMetadata")
+
+        let decoder = JSONDecoder.githubDecoder
+        let response: HoverMetadataResponse
+        do {
+            response = try decoder.decode(HoverMetadataResponse.self, from: responseData)
+        } catch {
+            throw APIError.decoding(error)
+        }
+
+        if let rl = response.data.rateLimit {
+            logger.info("Hover metadata cost=\(rl.cost, privacy: .public) remaining=\(rl.remaining, privacy: .public) pr=\(pr.repoFullName)#\(pr.number, privacy: .public)")
+        }
+
+        guard let node = response.data.repository?.pullRequest,
+              let databaseId = node.databaseId else {
+            throw APIError.unknown(String(localized: "Failed to load PR hover details"))
+        }
+
+        let latestReviews = node.latestReviews?.nodes ?? []
+        let reviewAgg = Self.aggregateReviews(latestReviews, state: { $0.state }, login: { $0.author?.login })
+        let approvalAuthors = reviewAgg.approvalAuthors
+        let changesRequestedAuthors = reviewAgg.changesRequestedAuthors
+        let approvalCount = reviewAgg.approvalCount
+        let changesRequestedCount = reviewAgg.changesRequestedCount
+
+        let commit = node.commits?.nodes.first?.commit
+        var ciStatus: CIStatus?
+        var githubCIState: String?
+        var checkSuccessCount: Int?
+        var checkFailureCount: Int?
+        var checkPendingCount: Int?
+        var ciExtendedInfo: CIExtendedInfo?
+
+        if includeCI, let statusCheckRollup = commit?.statusCheckRollup {
+            let excludeFilter = Self.loadCIStatusExcludeFilter()
+            var ciResult = Self.parseCIContexts(
+                Self.contextNodes(from: statusCheckRollup.contexts?.nodes ?? []),
+                excludeFilter: excludeFilter
+            )
+            let upperRollup = statusCheckRollup.state.uppercased()
+
+            if upperRollup == "FAILURE",
+               ciResult.failureCount == 0,
+               let pageInfo = statusCheckRollup.contexts?.pageInfo,
+               pageInfo.hasNextPage,
+               let endCursor = pageInfo.endCursor,
+               let commitOid = commit?.oid {
+                do {
+                    let additional = try await fetchAdditionalCIContexts(
+                        owner: pr.repositoryOwner,
+                        repo: pr.repositoryName,
+                        commitOid: commitOid,
+                        after: endCursor
+                    )
+                    ciResult = Self.parseCIContexts(
+                        additional.contexts,
+                        excludeFilter: excludeFilter,
+                        existing: ciResult
+                    )
+                } catch {
+                    logger.warning("Failed to enrich hover CI metadata for \(pr.repoFullName)#\(pr.number, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
+
+            if ciResult.failureCount > 0 {
+                ciStatus = .failure
+            } else if ciResult.pendingCount > 0 {
+                ciStatus = .pending
+            } else if ciResult.successCount > 0 {
+                ciStatus = .success
+            } else {
+                ciStatus = .expected
+            }
+
+            var effectivePendingCount = ciResult.pendingCount
+            var effectiveIsRunning = ciResult.isRunning
+            if ciStatus == .success, upperRollup == "PENDING" {
+                ciStatus = .pending
+                effectivePendingCount = max(effectivePendingCount, 1)
+                effectiveIsRunning = true
+            }
+
+            githubCIState = statusCheckRollup.state
+            checkSuccessCount = ciResult.successCount
+            checkFailureCount = ciResult.failureCount
+            checkPendingCount = effectivePendingCount
+            ciExtendedInfo = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
+                isRunning: effectiveIsRunning,
+                workflows: Array(ciResult.workflows.values)
+            )
+        }
+
+        let graphQLBaseNeedsUpdate = Self.deriveBaseNeedsUpdate(mergeStateStatus: node.mergeStateStatus)
+        let baseNeedsUpdate = await resolveBaseNeedsUpdateForHover(
+            owner: pr.repositoryOwner,
+            repo: pr.repositoryName,
+            base: node.baseRefName,
+            head: node.headRefName,
+            mergeable: node.mergeable,
+            mergeStateStatus: node.mergeStateStatus,
+            graphQLBaseNeedsUpdate: graphQLBaseNeedsUpdate
+        )
+
+        return PRHoverMetadata(
+            databaseId: databaseId,
+            graphqlNodeId: node.id,
+            baseRefName: node.baseRefName,
+            headRefName: node.headRefName,
+            baseNeedsUpdate: baseNeedsUpdate,
+            approvalAuthors: approvalAuthors,
+            changesRequestedAuthors: changesRequestedAuthors,
+            approvalCount: approvalCount,
+            changesRequestedCount: changesRequestedCount,
+            headCommitOid: commit?.oid,
+            lastCommitAt: commit?.committedDate,
+            ciStatus: ciStatus,
+            githubCIState: githubCIState,
+            checkSuccessCount: checkSuccessCount,
+            checkFailureCount: checkFailureCount,
+            checkPendingCount: checkPendingCount,
+            ciExtendedInfo: ciExtendedInfo
+        )
+    }
+
+    private func resolveBaseNeedsUpdateForHover(
+        owner: String,
+        repo: String,
+        base: String?,
+        head: String?,
+        mergeable: String?,
+        mergeStateStatus: String?,
+        graphQLBaseNeedsUpdate: Bool?
+    ) async -> Bool? {
+        if graphQLBaseNeedsUpdate == true {
+            return true
+        }
+        if Self.deriveBaseConflicts(mergeable: mergeable, mergeStateStatus: mergeStateStatus) {
+            return graphQLBaseNeedsUpdate
+        }
+        guard Self.shouldCompareBaseUpdateStatus(mergeStateStatus: mergeStateStatus),
+              let base,
+              let head else {
+            return graphQLBaseNeedsUpdate
+        }
+
+        do {
+            return try await fetchBaseNeedsUpdateByCompare(
+                owner: owner,
+                repo: repo,
+                base: base,
+                head: head
+            )
+        } catch {
+            logger.warning(
+                "Failed to compare base/head for \(owner, privacy: .public)/\(repo, privacy: .public):\(base, privacy: .public)...\(head, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return graphQLBaseNeedsUpdate
+        }
+    }
+
+    private func fetchBaseNeedsUpdateByCompare(
+        owner: String,
+        repo: String,
+        base: String,
+        head: String
+    ) async throws -> Bool? {
+        let comparePath = "\(base)...\(head)"
+        guard let encodedComparePath = comparePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/compare/\(encodedComparePath)") else {
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw APIError.network(error)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        updateRateLimitInfo(from: httpResponse)
+
+        guard httpResponse.statusCode == 200 else {
+            if httpResponse.statusCode == 401 {
+                throw APIError.unauthorized
+            }
+            return nil
+        }
+
+        struct CompareResponse: Decodable {
+            let behindBy: Int
+
+            enum CodingKeys: String, CodingKey {
+                case behindBy = "behind_by"
+            }
+        }
+
+        do {
+            let decoded = try JSONDecoder.githubDecoder.decode(CompareResponse.self, from: data)
+            return decoded.behindBy > 0
+        } catch {
+            throw APIError.decoding(error)
+        }
+    }
+
     /// Fetches additional CI contexts for a commit when pagination is needed
     func fetchAdditionalCIContexts(owner: String, repo: String, commitOid: String, after: String) async throws -> CIContextsResult {
         let query = """
@@ -730,9 +1146,81 @@ final class GitHubAPIClient: ObservableObject {
     // GraphQL enum values for PR mergeable/mergeStateStatus indicating base-branch conflicts
     private static let mergeableConflicting = "CONFLICTING"
     private static let mergeStateDirty = "DIRTY"
+    private static let mergeStateBehind = "BEHIND"
+    private static let mergeStateClean = "CLEAN"
+    private static let reviewStateApproved = "APPROVED"
+    private static let reviewStateChangesRequested = "CHANGES_REQUESTED"
+
+    struct ReviewAggregate {
+        var approvalCount = 0
+        var changesRequestedCount = 0
+        var approvalAuthors: [String] = []
+        var changesRequestedAuthors: [String] = []
+    }
+
+    private static func aggregateReviews<T>(
+        _ reviews: [T],
+        state: (T) -> String,
+        login: (T) -> String?,
+        collectAuthors: Bool = true
+    ) -> ReviewAggregate {
+        var agg = ReviewAggregate()
+        var approvalSeen = Set<String>()
+        var changesSeen = Set<String>()
+        for review in reviews {
+            switch state(review) {
+            case reviewStateApproved:
+                agg.approvalCount += 1
+                if collectAuthors, let l = login(review), approvalSeen.insert(l.lowercased()).inserted {
+                    agg.approvalAuthors.append(l)
+                }
+            case reviewStateChangesRequested:
+                agg.changesRequestedCount += 1
+                if collectAuthors, let l = login(review), changesSeen.insert(l.lowercased()).inserted {
+                    agg.changesRequestedAuthors.append(l)
+                }
+            default:
+                break
+            }
+        }
+        return agg
+    }
 
     private static func deriveBaseConflicts(mergeable: String?, mergeStateStatus: String?) -> Bool {
         mergeable == mergeableConflicting || mergeStateStatus == mergeStateDirty
+    }
+
+    private static func deriveBaseNeedsUpdate(mergeStateStatus: String?) -> Bool? {
+        guard let mergeStateStatus else { return nil }
+        switch mergeStateStatus {
+        case mergeStateBehind:
+            return true
+        case mergeStateClean, mergeStateDirty:
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private static func shouldCompareBaseUpdateStatus(mergeStateStatus: String?) -> Bool {
+        guard let mergeStateStatus else { return true }
+        switch mergeStateStatus {
+        case mergeStateBehind, mergeStateClean, mergeStateDirty:
+            return false
+        default:
+            return true
+        }
+    }
+
+    private static func orderedUnique(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values {
+            let key = value.lowercased()
+            guard seen.insert(key).inserted else { continue }
+            result.append(value)
+        }
+        return result
     }
 
     private static let explicitPRReferenceRegex = compileRegex(
@@ -796,9 +1284,16 @@ final class GitHubAPIClient: ObservableObject {
         username: String? = nil,
         includeReviewMetadata: Bool,
         includeCrossReferences: Bool,
-        includeMentionBodies: Bool
+        includeMentionBodies: Bool,
+        includeReviewAuthors: Bool = false
     ) -> String {
         let reviewCommentBodyField = includeMentionBodies ? "\n                            body" : ""
+        let reviewAuthorField = includeReviewAuthors ? """
+
+                    author {
+                        login
+                    }
+        """ : ""
         let bodySection = includeMentionBodies ? """
             body
             comments(last: 20) {
@@ -815,12 +1310,15 @@ final class GitHubAPIClient: ObservableObject {
 
         var sections: [String] = [
             """
+            id
             databaseId
             number
             title
             url
             state
             isDraft
+            baseRefName
+            headRefName
             createdAt
             updatedAt
             mergedAt
@@ -896,7 +1394,7 @@ final class GitHubAPIClient: ObservableObject {
             }
             latestReviews(first: 20) {
                 nodes {
-                    state
+                    state\(reviewAuthorField)
                 }
             }
             """
@@ -971,6 +1469,7 @@ final class GitHubAPIClient: ObservableObject {
 
     private func buildMentionSourceFieldSelection() -> String {
         """
+        id
         databaseId
         number
         updatedAt
@@ -1104,6 +1603,19 @@ final class GitHubAPIClient: ObservableObject {
         var seenCheckNames: Set<String> = []
     }
 
+    private static func contextNodes(from nodes: [GraphQLResponse.ContextNode]) -> [CIContextNode] {
+        nodes.map { ctx in
+            CIContextNode(
+                name: ctx.name,
+                conclusion: ctx.conclusion,
+                state: ctx.state,
+                context: ctx.context,
+                workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
+                completedAt: ctx.completedAt
+            )
+        }
+    }
+
     /// Shared CI context parsing logic used by parseSearchResponse, parseNodes, and fetchFullCIContexts
     private static func parseCIContexts<T: CIContextLike>(_ contexts: [T], excludeFilter: String, existing: CIParseResult = CIParseResult()) -> CIParseResult {
         var result = existing
@@ -1204,12 +1716,15 @@ final class GitHubAPIClient: ObservableObject {
 
     private func buildPRIndexFieldSelection() -> String {
         """
+        id
         databaseId
         number
         title
         url
         state
         isDraft
+        baseRefName
+        headRefName
         createdAt
         updatedAt
         mergedAt
@@ -1361,6 +1876,7 @@ final class GitHubAPIClient: ObservableObject {
             )
             return IndexedPR(
                 databaseId: databaseId,
+                graphqlNodeId: node.id,
                 number: node.number,
                 title: node.title,
                 url: node.url,
@@ -1373,6 +1889,9 @@ final class GitHubAPIClient: ObservableObject {
                 authorAvatarURL: node.author?.avatarUrl,
                 repositoryOwner: node.repository.owner.login,
                 repositoryName: node.repository.name,
+                baseRefName: node.baseRefName,
+                headRefName: node.headRefName,
+                baseNeedsUpdate: Self.deriveBaseNeedsUpdate(mergeStateStatus: node.mergeStateStatus),
                 hasBaseConflicts: Self.deriveBaseConflicts(
                     mergeable: node.mergeable,
                     mergeStateStatus: node.mergeStateStatus
@@ -1442,14 +1961,21 @@ final class GitHubAPIClient: ObservableObject {
         """
     }
 
-    private func executeGraphQL(query: String, operation: String) async throws -> Data {
+    private func executeGraphQL(
+        query: String,
+        operation: String,
+        variables: [String: Any]? = nil
+    ) async throws -> Data {
         var request = URLRequest(url: graphQLURL)
         request.httpMethod = "POST"
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
 
-        let body = ["query": query]
+        var body: [String: Any] = ["query": query]
+        if let variables, !variables.isEmpty {
+            body["variables"] = variables
+        }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         for attempt in 1...Self.maxGraphQLAttempts {
@@ -1618,7 +2144,8 @@ final class GitHubAPIClient: ObservableObject {
     private static func makeSearchPullRequest(
         from node: GraphQLResponse.PRNode,
         category: PRCategory,
-        excludeFilter: String
+        excludeFilter: String,
+        includeReviewAuthors: Bool = false
     ) -> PullRequest? {
         guard let databaseId = node.databaseId else { return nil }
 
@@ -1690,13 +2217,16 @@ final class GitHubAPIClient: ObservableObject {
             effectiveIsRunning = true
         }
 
-        let approvalCount = node.latestReviews?.nodes
-            .filter { $0.state == "APPROVED" }
-            .count ?? 0
-
-        let changesRequestedCount = node.latestReviews?.nodes
-            .filter { $0.state == "CHANGES_REQUESTED" }
-            .count ?? 0
+        let reviewAgg = Self.aggregateReviews(
+            node.latestReviews?.nodes ?? [],
+            state: { $0.state },
+            login: { $0.author?.login },
+            collectAuthors: includeReviewAuthors
+        )
+        let approvalCount = reviewAgg.approvalCount
+        let changesRequestedCount = reviewAgg.changesRequestedCount
+        let approvalAuthors: [String]? = includeReviewAuthors ? reviewAgg.approvalAuthors : nil
+        let changesRequestedAuthors: [String]? = includeReviewAuthors ? reviewAgg.changesRequestedAuthors : nil
 
         let hasBaseConflicts = deriveBaseConflicts(
             mergeable: node.mergeable,
@@ -1710,6 +2240,7 @@ final class GitHubAPIClient: ObservableObject {
 
         return PullRequest(
             id: databaseId,
+            graphqlNodeId: node.id,
             number: node.number,
             title: node.title,
             author: node.author?.login ?? "unknown",
@@ -1726,6 +2257,11 @@ final class GitHubAPIClient: ObservableObject {
             conversationComments: conversationComments,
             lastCommitAt: lastCommitAt,
             headCommitOid: lastCommit?.oid,
+            baseRefName: node.baseRefName,
+            headRefName: node.headRefName,
+            baseNeedsUpdate: deriveBaseNeedsUpdate(mergeStateStatus: node.mergeStateStatus),
+            approvalAuthors: approvalAuthors,
+            changesRequestedAuthors: changesRequestedAuthors,
             reviewThreads: reviewThreads,
             category: category,
             hasBaseConflicts: hasBaseConflicts,
@@ -2396,7 +2932,8 @@ final class GitHubAPIClient: ObservableObject {
         username: String?,
         excludeFilter: String,
         enrichmentInfos: inout [CIEnrichmentInfo],
-        reviewThreadEnrichmentInfos: inout [ReviewThreadEnrichmentInfo]
+        reviewThreadEnrichmentInfos: inout [ReviewThreadEnrichmentInfo],
+        includeReviewAuthors: Bool = false
     ) -> PullRequest? {
         guard let databaseId = node.databaseId else { return nil }
         let usernameLower = username?.lowercased()
@@ -2517,13 +3054,16 @@ final class GitHubAPIClient: ObservableObject {
             .compactMap { $0.createdAt }
             .max()
 
-        let approvalCount = node.latestReviews?.nodes
-            .filter { $0.state == "APPROVED" }
-            .count ?? 0
-
-        let changesRequestedCount = node.latestReviews?.nodes
-            .filter { $0.state == "CHANGES_REQUESTED" }
-            .count ?? 0
+        let reviewAgg = Self.aggregateReviews(
+            node.latestReviews?.nodes ?? [],
+            state: { $0.state },
+            login: { $0.author?.login },
+            collectAuthors: includeReviewAuthors
+        )
+        let approvalCount = reviewAgg.approvalCount
+        let changesRequestedCount = reviewAgg.changesRequestedCount
+        let approvalAuthors: [String]? = includeReviewAuthors ? reviewAgg.approvalAuthors : nil
+        let changesRequestedAuthors: [String]? = includeReviewAuthors ? reviewAgg.changesRequestedAuthors : nil
 
         let myThreadsAllResolved: Bool = {
             guard let usernameLower else { return false }
@@ -2535,6 +3075,7 @@ final class GitHubAPIClient: ObservableObject {
 
         return PullRequest(
             id: databaseId,
+            graphqlNodeId: node.id,
             number: node.number,
             title: node.title,
             author: node.author?.login ?? "unknown",
@@ -2551,6 +3092,11 @@ final class GitHubAPIClient: ObservableObject {
             conversationComments: conversationComments,
             lastCommitAt: lastCommitAt,
             headCommitOid: lastCommit?.oid,
+            baseRefName: node.baseRefName,
+            headRefName: node.headRefName,
+            baseNeedsUpdate: Self.deriveBaseNeedsUpdate(mergeStateStatus: node.mergeStateStatus),
+            approvalAuthors: approvalAuthors,
+            changesRequestedAuthors: changesRequestedAuthors,
             reviewThreads: reviewThreads,
             category: category,
             hasBaseConflicts: hasBaseConflicts,
@@ -3028,6 +3574,7 @@ private struct MentionSourceBatchResponse: Decodable {
     }
 
     struct PRNode: Decodable {
+        let id: String?
         let databaseId: Int?
         let number: Int
         let updatedAt: Date
@@ -3218,12 +3765,15 @@ private struct IndexGraphQLResponse: Decodable {
     }
 
     struct PRNode: Decodable {
+        let id: String?
         let databaseId: Int?
         let number: Int
         let title: String
         let url: URL
         let state: String
         let isDraft: Bool
+        let baseRefName: String?
+        let headRefName: String?
         let createdAt: Date
         let updatedAt: Date
         let mergedAt: Date?
@@ -3304,6 +3854,7 @@ private struct GraphQLResponse: Decodable {
     }
 
     struct PRNode: Decodable {
+        let id: String?
         let databaseId: Int?
         let number: Int
         let title: String
@@ -3311,6 +3862,8 @@ private struct GraphQLResponse: Decodable {
         let url: URL
         let state: String
         let isDraft: Bool
+        let baseRefName: String?
+        let headRefName: String?
         let createdAt: Date
         let updatedAt: Date
         let mergedAt: Date?
@@ -3344,6 +3897,7 @@ private struct GraphQLResponse: Decodable {
 
     struct LatestReviewNode: Decodable {
         let state: String
+        let author: Author?
     }
 
     struct IssueCommentsContainer: Decodable {
@@ -3430,6 +3984,36 @@ private struct GraphQLResponse: Decodable {
     }
 }
 
+private struct HoverMetadataResponse: Decodable {
+    let data: DataContainer
+
+    struct DataContainer: Decodable {
+        let repository: RepositoryContainer?
+        let rateLimit: RateLimit?
+    }
+
+    struct RepositoryContainer: Decodable {
+        let pullRequest: PullRequestNode?
+    }
+
+    struct PullRequestNode: Decodable {
+        let id: String?
+        let databaseId: Int?
+        let baseRefName: String?
+        let headRefName: String?
+        let mergeable: String?
+        let mergeStateStatus: String?
+        let latestReviews: GraphQLResponse.LatestReviewsContainer?
+        let commits: GraphQLResponse.CommitsContainer?
+    }
+
+    struct RateLimit: Decodable {
+        let cost: Int
+        let remaining: Int
+        let resetAt: String?
+    }
+}
+
 // MARK: - Combined GraphQL Response Models (for single-query fetch)
 
 private struct CombinedGraphQLResponse: Decodable {
@@ -3447,6 +4031,7 @@ private struct CombinedGraphQLResponse: Decodable {
     }
 
     struct PRNode: Decodable {
+        let id: String?
         let databaseId: Int?
         let number: Int
         let title: String
@@ -3454,6 +4039,8 @@ private struct CombinedGraphQLResponse: Decodable {
         let url: URL
         let state: String
         let isDraft: Bool
+        let baseRefName: String?
+        let headRefName: String?
         let createdAt: Date
         let updatedAt: Date
         let mergedAt: Date?
@@ -3490,6 +4077,7 @@ private struct CombinedGraphQLResponse: Decodable {
 
     struct LatestReviewNode: Decodable {
         let state: String
+        let author: Author?
     }
 
     struct IssueCommentsContainer: Decodable {
