@@ -55,6 +55,10 @@ struct PRList: Codable {
         !pullRequests.isEmpty || !mentionedPullRequests.isEmpty || !mergedPullRequests.isEmpty
     }
 
+    var allPRs: [PullRequest] {
+        pullRequests + mentionedPullRequests + mergedPullRequests
+    }
+
     /// Unresolved comment count for authored PRs only (used for menu bar badge)
     var authoredUnresolvedCount: Int {
         authoredPRs.reduce(0) { $0 + $1.unresolvedCount }

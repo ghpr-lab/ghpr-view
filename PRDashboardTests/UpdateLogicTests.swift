@@ -645,6 +645,71 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(placeholder.baseNeedsUpdate, false)
     }
 
+    func testPlaceholderPreservesVisibleJiraAndApprovalsWithoutDetailCache() {
+        var visible = makePullRequest(id: 18001, number: 18001, category: .authored)
+        visible.jiraTicket = "AG-1234"
+        visible.approvalCount = 2
+        visible.approvalAuthors = ["alice", "bob"]
+        visible.reviewThreads = [makeReviewThread(id: "thread-1", isRead: true)]
+
+        let indexed = makeIndexedPR(
+            id: visible.id,
+            number: visible.number,
+            baseNeedsUpdate: nil
+        )
+
+        let placeholder = indexed.placeholderPullRequest(preserving: visible)
+
+        XCTAssertEqual(placeholder.jiraTicket, "AG-1234")
+        XCTAssertEqual(placeholder.approvalCount, 2)
+        XCTAssertEqual(placeholder.approvalAuthors, ["alice", "bob"])
+        XCTAssertEqual(placeholder.reviewThreads.count, 1)
+        XCTAssertEqual(placeholder.reviewThreads.first?.id, "thread-1")
+        XCTAssertEqual(placeholder.reviewThreads.first?.isRead, true)
+    }
+
+    func testPlaceholderUsesVisibleJiraWhenDetailCacheHasNoJiraTicket() {
+        var cached = makePullRequest(id: 18002, number: 18002, category: .authored)
+        cached.approvalCount = 1
+        cached.approvalAuthors = nil
+
+        var visible = makePullRequest(id: cached.id, number: cached.number, category: .authored)
+        visible.jiraTicket = "KAG-456"
+        visible.approvalCount = 2
+        visible.approvalAuthors = ["reviewer"]
+
+        let indexed = makeIndexedPR(
+            id: cached.id,
+            number: cached.number,
+            baseNeedsUpdate: nil
+        )
+
+        let placeholder = indexed.placeholderPullRequest(using: cached, preserving: visible)
+
+        XCTAssertEqual(placeholder.jiraTicket, "KAG-456")
+        XCTAssertEqual(placeholder.approvalCount, 2)
+        XCTAssertEqual(placeholder.approvalAuthors, ["reviewer"])
+    }
+
+    func testPlaceholderFallsBackToCachedDetailWhenVisibleStateIsMissing() {
+        var cached = makePullRequest(id: 18003, number: 18003, category: .authored)
+        cached.jiraTicket = "CACHE-789"
+        cached.approvalCount = 1
+        cached.approvalAuthors = ["cached-reviewer"]
+
+        let indexed = makeIndexedPR(
+            id: cached.id,
+            number: cached.number,
+            baseNeedsUpdate: nil
+        )
+
+        let placeholder = indexed.placeholderPullRequest(using: cached)
+
+        XCTAssertEqual(placeholder.jiraTicket, "CACHE-789")
+        XCTAssertEqual(placeholder.approvalCount, 1)
+        XCTAssertEqual(placeholder.approvalAuthors, ["cached-reviewer"])
+    }
+
     func testCompareURLEncodesBranchSlashAsSinglePathComponent() throws {
         let url = try XCTUnwrap(
             GitHubAPIClient.compareURL(

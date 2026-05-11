@@ -58,13 +58,39 @@ struct IndexedPR {
         PullRequestReference(owner: repositoryOwner, repo: repositoryName, number: number)
     }
 
-    /// Produce a `PullRequest` suitable for optimistic UI rendering. When a cached
-    /// detail is supplied we keep its heavy fields (reviewThreads, CI contexts,
-    /// comments) and patch only the header fields from the fresh index scalars.
-    func placeholderPullRequest(using existing: PullRequest? = nil) -> PullRequest {
+    /// Produce a `PullRequest` suitable for optimistic UI rendering. Heavy fields
+    /// (reviewThreads, CI contexts, comments) are taken from `existing` (cache)
+    /// when available, falling back to `visible` (currently-displayed UI state)
+    /// to avoid flicker when the cache is cold but the UI already has data.
+    /// Header fields are patched from the fresh index scalars.
+    func placeholderPullRequest(
+        using existing: PullRequest? = nil,
+        preserving visible: PullRequest? = nil
+    ) -> PullRequest {
+        let approvalAuthors = Self.retainedOptionalList(existing?.approvalAuthors, visible?.approvalAuthors)
+        let changesRequestedAuthors = Self.retainedOptionalList(
+            existing?.changesRequestedAuthors,
+            visible?.changesRequestedAuthors
+        )
+        let approvalCount = max(existing?.approvalCount ?? 0, visible?.approvalCount ?? 0)
+        let changesRequestedCount = Self.retainedOptionalCount(
+            existing?.changesRequestedCount,
+            visible?.changesRequestedCount
+        )
+        let checkSuccessCount = max(existing?.checkSuccessCount ?? 0, visible?.checkSuccessCount ?? 0)
+        let checkFailureCount = max(existing?.checkFailureCount ?? 0, visible?.checkFailureCount ?? 0)
+        let checkPendingCount = max(existing?.checkPendingCount ?? 0, visible?.checkPendingCount ?? 0)
+        let ciStatus = Self.retainedCIStatus(
+            existing?.ciStatus,
+            visible?.ciStatus,
+            failureCount: checkFailureCount,
+            pendingCount: checkPendingCount,
+            successCount: checkSuccessCount
+        )
+
         return PullRequest(
             id: databaseId,
-            graphqlNodeId: graphqlNodeId ?? existing?.graphqlNodeId,
+            graphqlNodeId: graphqlNodeId ?? existing?.graphqlNodeId ?? visible?.graphqlNodeId,
             number: number,
             title: title,
             author: author,
@@ -77,32 +103,70 @@ struct IndexedPR {
             createdAt: createdAt,
             updatedAt: updatedAt,
             mergedAt: mergedAt,
-            body: existing?.body,
-            conversationComments: existing?.conversationComments ?? [],
-            lastCommitAt: existing?.lastCommitAt,
-            headCommitOid: snapshot.headOid ?? existing?.headCommitOid,
-            baseRefName: baseRefName ?? existing?.baseRefName,
-            headRefName: headRefName ?? existing?.headRefName,
-            baseNeedsUpdate: baseNeedsUpdate ?? existing?.baseNeedsUpdate,
-            approvalAuthors: existing?.approvalAuthors,
-            changesRequestedAuthors: existing?.changesRequestedAuthors,
-            reviewThreads: existing?.reviewThreads ?? [],
+            body: existing?.body ?? visible?.body,
+            conversationComments: Self.retainedList(
+                existing?.conversationComments,
+                visible?.conversationComments
+            ),
+            lastCommitAt: existing?.lastCommitAt ?? visible?.lastCommitAt,
+            headCommitOid: snapshot.headOid ?? existing?.headCommitOid ?? visible?.headCommitOid,
+            baseRefName: baseRefName ?? existing?.baseRefName ?? visible?.baseRefName,
+            headRefName: headRefName ?? existing?.headRefName ?? visible?.headRefName,
+            baseNeedsUpdate: baseNeedsUpdate ?? existing?.baseNeedsUpdate ?? visible?.baseNeedsUpdate,
+            approvalAuthors: approvalAuthors,
+            changesRequestedAuthors: changesRequestedAuthors,
+            reviewThreads: Self.retainedList(existing?.reviewThreads, visible?.reviewThreads),
             category: category,
             hasBaseConflicts: hasBaseConflicts,
-            ciStatus: existing?.ciStatus,
-            checkSuccessCount: existing?.checkSuccessCount ?? 0,
-            checkFailureCount: existing?.checkFailureCount ?? 0,
-            checkPendingCount: existing?.checkPendingCount ?? 0,
-            githubCIState: existing?.githubCIState,
-            myLastReviewState: existing?.myLastReviewState,
-            myLastReviewAt: existing?.myLastReviewAt,
-            reviewRequestedAt: existing?.reviewRequestedAt,
-            myThreadsAllResolved: existing?.myThreadsAllResolved ?? false,
-            approvalCount: existing?.approvalCount ?? 0,
-            changesRequestedCount: existing?.changesRequestedCount,
-            ciExtendedInfo: existing?.ciExtendedInfo,
-            jiraTicket: existing?.jiraTicket
+            ciStatus: ciStatus,
+            checkSuccessCount: checkSuccessCount,
+            checkFailureCount: checkFailureCount,
+            checkPendingCount: checkPendingCount,
+            githubCIState: existing?.githubCIState ?? visible?.githubCIState,
+            myLastReviewState: existing?.myLastReviewState ?? visible?.myLastReviewState,
+            myLastReviewAt: existing?.myLastReviewAt ?? visible?.myLastReviewAt,
+            reviewRequestedAt: existing?.reviewRequestedAt ?? visible?.reviewRequestedAt,
+            myThreadsAllResolved: (existing?.myThreadsAllResolved ?? false) || (visible?.myThreadsAllResolved ?? false),
+            approvalCount: approvalCount,
+            changesRequestedCount: changesRequestedCount,
+            ciExtendedInfo: existing?.ciExtendedInfo ?? visible?.ciExtendedInfo,
+            jiraTicket: existing?.jiraTicket ?? visible?.jiraTicket
         )
+    }
+
+    private static func retainedList<T>(_ existing: [T]?, _ visible: [T]?) -> [T] {
+        if let existing, !existing.isEmpty {
+            return existing
+        }
+        return visible ?? []
+    }
+
+    private static func retainedOptionalList<T>(_ existing: [T]?, _ visible: [T]?) -> [T]? {
+        if let existing, !existing.isEmpty {
+            return existing
+        }
+        if let visible, !visible.isEmpty {
+            return visible
+        }
+        return nil
+    }
+
+    private static func retainedOptionalCount(_ existing: Int?, _ visible: Int?) -> Int? {
+        guard existing != nil || visible != nil else { return nil }
+        return max(existing ?? 0, visible ?? 0)
+    }
+
+    private static func retainedCIStatus(
+        _ existing: CIStatus?,
+        _ visible: CIStatus?,
+        failureCount: Int,
+        pendingCount: Int,
+        successCount: Int
+    ) -> CIStatus? {
+        if failureCount > 0 { return .failure }
+        if pendingCount > 0 { return .pending }
+        if successCount > 0 { return .success }
+        return existing ?? visible
     }
 }
 
@@ -364,12 +428,14 @@ final class GitHubAPIClient: ObservableObject {
     /// each detail batch.
     func fetchIncremental(
         username: String,
+        existingPRs: [PullRequest] = [],
         onProgress: (@Sendable ([PullRequest], [PullRequest], IncrementalStage) async -> Void)? = nil
     ) async throws -> CombinedPRResult {
         let indexed = try await fetchIndex(username: username)
         logger.info("Index returned \(indexed.count, privacy: .public) PRs (authored+reviewed+merged)")
 
         let cache = PRDetailCache.shared.loadEntries()
+        let visibleByID = Dictionary(existingPRs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let now = Date()
         var snapshotByID: [Int: IndexSnapshot] = [:]
         var hits: [Int: PullRequest] = [:]
@@ -379,12 +445,26 @@ final class GitHubAPIClient: ObservableObject {
             snapshotByID[ip.databaseId] = ip.snapshot
             if let cached = cache[ip.databaseId],
                cached.isUsable(against: ip.snapshot, now: now, ttl: PRDetailCache.ttl) {
-                hits[ip.databaseId] = ip.placeholderPullRequest(using: cached.detail)
+                hits[ip.databaseId] = ip.placeholderPullRequest(
+                    using: cached.detail,
+                    preserving: visibleByID[ip.databaseId]
+                )
             } else {
                 misses.append(ip)
             }
         }
         logger.info("Cache diff: \(hits.count, privacy: .public) hits, \(misses.count, privacy: .public) misses")
+
+        // Build placeholders once; reused across the initial frame, rate-limit
+        // fallback, mid-batch progress frames, and the final fill.
+        var missPlaceholders: [Int: PullRequest] = [:]
+        missPlaceholders.reserveCapacity(misses.count)
+        for ip in misses {
+            missPlaceholders[ip.databaseId] = ip.placeholderPullRequest(
+                using: cache[ip.databaseId]?.detail,
+                preserving: visibleByID[ip.databaseId]
+            )
+        }
 
         func splitOpenMerged(byID: [Int: PullRequest]) -> (open: [PullRequest], merged: [PullRequest]) {
             var open: [PullRequest] = []
@@ -411,9 +491,7 @@ final class GitHubAPIClient: ObservableObject {
         // can paint titles/CI colors immediately on cold start.
         if let onProgress {
             var optimistic: [Int: PullRequest] = hits
-            for ip in misses {
-                optimistic[ip.databaseId] = ip.placeholderPullRequest(using: cache[ip.databaseId]?.detail)
-            }
+            optimistic.merge(missPlaceholders) { _, new in new }
             let split = splitOpenMerged(byID: optimistic)
             await onProgress(split.open, split.merged, .placeholders)
         }
@@ -426,13 +504,7 @@ final class GitHubAPIClient: ObservableObject {
             logger.warning(
                 "Detail fetch skipped due to rate-limit floor: remaining=\(rateLimitSnapshot.remaining, privacy: .public)/\(rateLimitSnapshot.limit, privacy: .public)"
             )
-            for ip in misses {
-                if let cached = cache[ip.databaseId] {
-                    fetched[ip.databaseId] = ip.placeholderPullRequest(using: cached.detail)
-                } else {
-                    fetched[ip.databaseId] = ip.placeholderPullRequest()
-                }
-            }
+            fetched.merge(missPlaceholders) { _, new in new }
         } else if !misses.isEmpty {
             // Run detail batches with a bounded concurrency cap. After each batch
             // completes we (a) merge its results into the running accumulator,
@@ -497,10 +569,8 @@ final class GitHubAPIClient: ObservableObject {
 
                     if let onProgress {
                         var byID: [Int: PullRequest] = hits
+                        byID.merge(missPlaceholders) { _, new in new }
                         byID.merge(fetched) { _, new in new }
-                        for ip in misses where byID[ip.databaseId] == nil {
-                            byID[ip.databaseId] = ip.placeholderPullRequest(using: cache[ip.databaseId]?.detail)
-                        }
                         let split = splitOpenMerged(byID: byID)
                         await onProgress(split.open, split.merged, .detailProgress)
                     }
@@ -532,8 +602,8 @@ final class GitHubAPIClient: ObservableObject {
 
             // Fill in placeholders for any miss that wasn't fetched (either
             // rate-limited mid-flight or never dispatched at all).
-            for ip in misses where fetched[ip.databaseId] == nil {
-                fetched[ip.databaseId] = ip.placeholderPullRequest(using: cache[ip.databaseId]?.detail)
+            for (id, placeholder) in missPlaceholders where fetched[id] == nil {
+                fetched[id] = placeholder
             }
 
             // Only persist entries we actually fetched fresh; placeholders would

@@ -379,6 +379,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
     private func startRefresh(username: String, trigger: RefreshTrigger) {
         let hadUsableData = prList.hasUsableData
+        let visiblePRs = prList.allPRs
         refreshState = .loading
         prList.isLoading = true
         prList.error = nil
@@ -403,7 +404,11 @@ final class PRManager: PRManagerType, ObservableObject {
                     await self.applyIncrementalProgress(openPRs: openPRs, mergedPRs: mergedPRs, stage: stage)
                 }
 
-                let result = try await self.apiClient.fetchIncremental(username: username, onProgress: onProgress)
+                let result = try await self.apiClient.fetchIncremental(
+                    username: username,
+                    existingPRs: visiblePRs,
+                    onProgress: onProgress
+                )
                 var prs = self.filterByConfiguration(result.openPRs)
                 var mentionedPRs = self.filterByConfiguration(result.mentionedPRs)
                 var mergedPRs = self.filterByConfiguration(result.mergedPRs)
