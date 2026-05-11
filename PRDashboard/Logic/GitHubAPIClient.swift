@@ -83,7 +83,7 @@ struct IndexedPR {
             headCommitOid: snapshot.headOid ?? existing?.headCommitOid,
             baseRefName: baseRefName ?? existing?.baseRefName,
             headRefName: headRefName ?? existing?.headRefName,
-            baseNeedsUpdate: baseNeedsUpdate,
+            baseNeedsUpdate: baseNeedsUpdate ?? existing?.baseNeedsUpdate,
             approvalAuthors: existing?.approvalAuthors,
             changesRequestedAuthors: existing?.changesRequestedAuthors,
             reviewThreads: existing?.reviewThreads ?? [],
@@ -1025,9 +1025,7 @@ final class GitHubAPIClient: ObservableObject {
         base: String,
         head: String
     ) async throws -> Bool? {
-        let comparePath = "\(base)...\(head)"
-        guard let encodedComparePath = comparePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
-              let url = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/compare/\(encodedComparePath)") else {
+        guard let url = Self.compareURL(owner: owner, repo: repo, base: base, head: head) else {
             return nil
         }
 
@@ -1051,7 +1049,7 @@ final class GitHubAPIClient: ObservableObject {
             if httpResponse.statusCode == 401 {
                 throw APIError.unauthorized
             }
-            return nil
+            throw APIError.http(statusCode: httpResponse.statusCode)
         }
 
         struct CompareResponse: Decodable {
@@ -1068,6 +1066,16 @@ final class GitHubAPIClient: ObservableObject {
         } catch {
             throw APIError.decoding(error)
         }
+    }
+
+    static func compareURL(owner: String, repo: String, base: String, head: String) -> URL? {
+        let comparePath = "\(base)...\(head)"
+        var allowedCharacters = CharacterSet.urlPathAllowed
+        allowedCharacters.remove(charactersIn: "/")
+        guard let encodedComparePath = comparePath.addingPercentEncoding(withAllowedCharacters: allowedCharacters) else {
+            return nil
+        }
+        return URL(string: "https://api.github.com/repos/\(owner)/\(repo)/compare/\(encodedComparePath)")
     }
 
     /// Fetches additional CI contexts for a commit when pagination is needed

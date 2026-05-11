@@ -1101,6 +1101,9 @@ private struct PRHoverDetailInfoTable: View {
         case .some(false):
             return ("Up to date", "checkmark.circle.fill", .green)
         case .none:
+            if isLoadingHoverDetail {
+                return ("Checking", "clock", .secondary)
+            }
             return ("Unknown", "questionmark.circle", .secondary)
         }
     }

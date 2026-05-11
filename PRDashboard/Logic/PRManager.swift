@@ -144,7 +144,8 @@ final class PRManager: PRManagerType, ObservableObject {
         func isUsable(for pr: PullRequest) -> Bool {
             prUpdatedAt == pr.updatedAt &&
                 headCommitOid == pr.headCommitOid &&
-                Date().timeIntervalSince(fetchedAt) < 10 * 60
+                Date().timeIntervalSince(fetchedAt) < 10 * 60 &&
+                (pr.baseNeedsUpdate != nil || metadata.baseNeedsUpdate != nil)
         }
     }
 
@@ -808,7 +809,7 @@ final class PRManager: PRManagerType, ObservableObject {
             prs[index].graphqlNodeId = metadata.graphqlNodeId ?? prs[index].graphqlNodeId
             prs[index].baseRefName = metadata.baseRefName ?? prs[index].baseRefName
             prs[index].headRefName = metadata.headRefName ?? prs[index].headRefName
-            prs[index].baseNeedsUpdate = metadata.baseNeedsUpdate
+            prs[index].baseNeedsUpdate = metadata.baseNeedsUpdate ?? prs[index].baseNeedsUpdate
             prs[index].approvalAuthors = metadata.approvalAuthors
             prs[index].changesRequestedAuthors = metadata.changesRequestedAuthors
             prs[index].approvalCount = metadata.approvalCount

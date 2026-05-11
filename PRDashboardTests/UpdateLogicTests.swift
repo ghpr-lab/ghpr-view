@@ -610,6 +610,57 @@ final class UpdateLogicTests: XCTestCase {
         )
     }
 
+    func testPlaceholderPreservesKnownBaseNeedsUpdateWhenIndexStatusIsUnknown() {
+        var existing = makePullRequest(id: 17937, number: 17937, category: .authored)
+        existing.graphqlNodeId = "PR_node_17937"
+        existing.baseRefName = "master"
+        existing.headRefName = "fix/mcp-oauth2-jwt"
+        existing.baseNeedsUpdate = true
+
+        let indexed = makeIndexedPR(
+            id: existing.id,
+            number: existing.number,
+            baseNeedsUpdate: nil
+        )
+
+        let placeholder = indexed.placeholderPullRequest(using: existing)
+
+        XCTAssertEqual(placeholder.baseNeedsUpdate, true)
+        XCTAssertEqual(placeholder.baseRefName, "master")
+        XCTAssertEqual(placeholder.headRefName, "fix/mcp-oauth2-jwt")
+    }
+
+    func testPlaceholderUsesFreshBaseNeedsUpdateWhenIndexHasKnownStatus() {
+        var existing = makePullRequest(id: 17912, number: 17912, category: .authored)
+        existing.baseNeedsUpdate = true
+
+        let indexed = makeIndexedPR(
+            id: existing.id,
+            number: existing.number,
+            baseNeedsUpdate: false
+        )
+
+        let placeholder = indexed.placeholderPullRequest(using: existing)
+
+        XCTAssertEqual(placeholder.baseNeedsUpdate, false)
+    }
+
+    func testCompareURLEncodesBranchSlashAsSinglePathComponent() throws {
+        let url = try XCTUnwrap(
+            GitHubAPIClient.compareURL(
+                owner: "Kong",
+                repo: "kong-ee",
+                base: "master",
+                head: "fix/mcp-oauth2-jwt"
+            )
+        )
+
+        XCTAssertEqual(
+            url.absoluteString,
+            "https://api.github.com/repos/Kong/kong-ee/compare/master...fix%2Fmcp-oauth2-jwt"
+        )
+    }
+
     @MainActor
     func testPRListViewModelSuppressesDuplicateCmuxFirstOpenUntilCompletion() async {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
@@ -681,6 +732,37 @@ final class UpdateLogicTests: XCTestCase {
             commentTotal: commentTotal,
             reviewTotal: reviewTotal,
             unresolvedReviewThreadCount: unresolvedReviewThreadCount
+        )
+    }
+
+    private func makeIndexedPR(
+        id: Int,
+        number: Int,
+        baseNeedsUpdate: Bool?,
+        hasBaseConflicts: Bool = false
+    ) -> IndexedPR {
+        IndexedPR(
+            databaseId: id,
+            graphqlNodeId: "PR_node_\(id)",
+            number: number,
+            title: "PR #\(number)",
+            url: URL(string: "https://github.com/owner/repo/pull/\(number)")!,
+            state: .open,
+            isDraft: false,
+            createdAt: Date(timeIntervalSince1970: 1_713_666_000),
+            updatedAt: Date(timeIntervalSince1970: 1_713_666_108),
+            mergedAt: nil,
+            author: "tester",
+            authorAvatarURL: nil,
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            baseRefName: "master",
+            headRefName: "fix/mcp-oauth2-jwt",
+            baseNeedsUpdate: baseNeedsUpdate,
+            hasBaseConflicts: hasBaseConflicts,
+            category: .authored,
+            isMerged: false,
+            snapshot: makeIndexSnapshot()
         )
     }
 
