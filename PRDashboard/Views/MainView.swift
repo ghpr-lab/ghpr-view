@@ -141,6 +141,7 @@ struct MainView: View {
                                 ciAutoRetryRound: viewModel.ciAutoRetryRound(for: pr),
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
+                                showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
                                 onboardingManager: onboardingManager,
                                 approvalOnboardingPRID: firstVisibleApprovalPRID,
                                 reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
@@ -175,6 +176,7 @@ struct MainView: View {
                                 isLoadingHoverDetail: viewModel.isLoadingHoverDetail(pr),
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
+                                showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
                                 onboardingManager: onboardingManager,
                                 approvalOnboardingPRID: firstVisibleApprovalPRID,
                                 reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
@@ -268,6 +270,7 @@ struct MainView: View {
                 showCIStatus: showCIStatus,
                 showConflictStatus: showConflictStatus,
                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
+                showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
                 onboardingManager: onboardingManager,
                 approvalOnboardingPRID: firstVisibleApprovalPRID,
                 reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID

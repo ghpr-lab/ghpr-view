@@ -38,12 +38,17 @@ struct PRRowView: View {
     var showCIStatus: Bool = true
     var showConflictStatus: Bool = true
     var showMyReviewStatus: Bool = false
+    var showCmuxStatus: Bool = false
     var onboardingManager: OnboardingManager? = nil
     var approvalOnboardingPRID: Int? = nil
     var reviewStatusOnboardingPRID: Int? = nil
 
     @ObservedObject private var menuTracker = MenuTracker.shared
     @State private var isHovered = false
+
+    private var updateBranchWithRebaseAction: (() -> Void)? {
+        pr.category == .authored ? onUpdateBranchWithRebase : nil
+    }
 
     private var timeDisplay: String {
         let displayDate = pr.lastCommitAt ?? pr.updatedAt
@@ -92,6 +97,19 @@ struct PRRowView: View {
                                 String(localized: "This is the Jira ticket linked to this PR.")
                             )
                     }
+
+                    if showCmuxStatus, pr.isOpenInCmux == true {
+                        Text("cmux")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.purple)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Color.purple.opacity(0.13))
+                            .cornerRadius(4)
+                            .delayedHoverTooltip(
+                                String(localized: "This PR is currently open as a tab in cmux.")
+                            )
+                    }
                 }
 
                 // PR title
@@ -101,7 +119,7 @@ struct PRRowView: View {
                     .foregroundColor(.primary)
                     .prHoverDetail(
                         pr,
-                        onUpdateBranchWithRebase: onUpdateBranchWithRebase,
+                        onUpdateBranchWithRebase: updateBranchWithRebaseAction,
                         onLoadHoverDetail: onLoadHoverDetail,
                         isUpdatingBranch: isUpdatingBranch,
                         isLoadingHoverDetail: isLoadingHoverDetail
@@ -1137,7 +1155,10 @@ private struct PRHoverDetailInfoTable: View {
     }
 
     private var canUpdateWithRebase: Bool {
-        pr.baseNeedsUpdate == true && pr.graphqlNodeId != nil && onUpdateBranchWithRebase != nil
+        pr.category == .authored &&
+            pr.baseNeedsUpdate == true &&
+            pr.graphqlNodeId != nil &&
+            onUpdateBranchWithRebase != nil
     }
 
     private var failedWorkflowText: String {

@@ -418,6 +418,7 @@ final class PRListViewModel: ObservableObject {
             pr.title.lowercased().contains(query) ||
             pr.repoFullName.lowercased().contains(query) ||
             pr.author.lowercased().contains(query) ||
+            pr.jiraTicket?.lowercased().contains(query) == true ||
             String(pr.number).contains(query)
         }
     }

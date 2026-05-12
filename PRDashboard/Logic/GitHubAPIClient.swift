@@ -130,7 +130,8 @@ struct IndexedPR {
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
             ciExtendedInfo: existing?.ciExtendedInfo ?? visible?.ciExtendedInfo,
-            jiraTicket: existing?.jiraTicket ?? visible?.jiraTicket
+            jiraTicket: existing?.jiraTicket ?? visible?.jiraTicket,
+            isOpenInCmux: visible?.isOpenInCmux ?? existing?.isOpenInCmux
         )
     }
 
@@ -1089,7 +1090,7 @@ final class GitHubAPIClient: ObservableObject {
         }
     }
 
-    private func fetchBaseNeedsUpdateByCompare(
+    func fetchBaseNeedsUpdateByCompare(
         owner: String,
         repo: String,
         base: String,

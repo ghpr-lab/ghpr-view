@@ -130,6 +130,8 @@ final class PRManager: PRManagerType, ObservableObject {
     private var pendingAutoRetryPRIds: Set<Int> = []
     private var hoverDetailTasks: [Int: Task<Void, Never>] = [:]
     private var hoverDetailCache: [Int: HoverDetailCacheEntry] = [:]
+    private let cmuxStatusProvider: CmuxPRStatusProviding?
+    private static let maxBaseUpdateStatusRefreshes = 20
     private var cancellables = Set<AnyCancellable>()
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isOnExpensiveNetwork: Bool = false
@@ -152,11 +154,13 @@ final class PRManager: PRManagerType, ObservableObject {
     init(
         apiClient: GitHubAPIClient,
         notificationManager: NotificationManager,
-        oauthManager: GitHubOAuthManager
+        oauthManager: GitHubOAuthManager,
+        cmuxStatusProvider: CmuxPRStatusProviding? = nil
     ) {
         self.apiClient = apiClient
         self.notificationManager = notificationManager
         self.oauthManager = oauthManager
+        self.cmuxStatusProvider = cmuxStatusProvider
         self.configuration = Self.loadConfiguration()
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
         self.readReviewThreadIDs = Self.loadReadReviewThreadIDs()
@@ -275,6 +279,7 @@ final class PRManager: PRManagerType, ObservableObject {
     /// Load cached PR data on startup for immediate display
     func loadCachedData() {
         if var cached = PRCache.shared.load() {
+            clearCmuxOpenStatus(in: &cached)
             applyReadState(to: &cached)
             self.prList = cached
             // Rebuild previousPRs for change detection
@@ -437,6 +442,13 @@ final class PRManager: PRManagerType, ObservableObject {
                     logger.error("Failed to enrich Jira tickets: \(error.localizedDescription)")
                 }
 
+                await refreshBaseUpdateStatuses(prs: &prs)
+                await refreshCmuxOpenStatuses(
+                    openPRs: &prs,
+                    mentionedPRs: &mentionedPRs,
+                    mergedPRs: &mergedPRs
+                )
+
                 // Auto-retry CI for pinned PRs with retry tracking
                 checkCIAutoRetries(newPRs: prs)
 
@@ -475,7 +487,8 @@ final class PRManager: PRManagerType, ObservableObject {
 
                 // Try to fallback to stale cache on API error
                 if !self.prList.hasUsableData,
-                   let cached = PRCache.shared.load() {
+                   var cached = PRCache.shared.load() {
+                    self.clearCmuxOpenStatus(in: &cached)
                     self.prList = cached
                     self.prList.error = error  // Still show error to indicate stale data
                     self.previousPRs = Dictionary(uniqueKeysWithValues: cached.pullRequests.map { ($0.id, $0) })
@@ -770,6 +783,108 @@ final class PRManager: PRManagerType, ObservableObject {
         }
     }
 
+    private func refreshBaseUpdateStatuses(prs: inout [PullRequest]) async {
+        guard rateLimitInfo.hasHeadroomForHoverDetails else {
+            logger.warning(
+                "Skipping base update status refresh due to rate-limit floor: remaining=\(self.rateLimitInfo.remaining, privacy: .public)/\(self.rateLimitInfo.limit, privacy: .public)"
+            )
+            return
+        }
+
+        let candidateIndices = prs.indices.filter { index in
+            let pr = prs[index]
+            return pr.category == .authored &&
+                pr.state == .open &&
+                !pr.hasBaseConflicts &&
+                pr.baseRefName?.isEmpty == false &&
+                pr.headRefName?.isEmpty == false
+        }.prefix(Self.maxBaseUpdateStatusRefreshes)
+
+        guard !candidateIndices.isEmpty else { return }
+
+        var refreshed = 0
+        for index in candidateIndices {
+            let pr = prs[index]
+            guard let base = pr.baseRefName,
+                  let head = pr.headRefName else {
+                continue
+            }
+
+            do {
+                prs[index].baseNeedsUpdate = try await apiClient.fetchBaseNeedsUpdateByCompare(
+                    owner: pr.repositoryOwner,
+                    repo: pr.repositoryName,
+                    base: base,
+                    head: head
+                )
+                refreshed += 1
+            } catch {
+                logger.warning(
+                    "Failed to refresh base update status for \(pr.repoFullName)#\(pr.number, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+
+        if refreshed > 0 {
+            logger.info("Refreshed base update status for \(refreshed, privacy: .public) authored PRs")
+        }
+    }
+
+    private func refreshCmuxOpenStatuses(
+        openPRs: inout [PullRequest],
+        mentionedPRs: inout [PullRequest],
+        mergedPRs: inout [PullRequest]
+    ) async {
+        guard configuration.openAtCmuxFirst, let cmuxStatusProvider else {
+            clearCmuxOpenStatus(openPRs: &openPRs, mentionedPRs: &mentionedPRs, mergedPRs: &mergedPRs)
+            return
+        }
+
+        let openIdentities = await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                continuation.resume(returning: cmuxStatusProvider.openPRIdentities())
+            }
+        }
+
+        func apply(to prs: inout [PullRequest]) {
+            for index in prs.indices {
+                guard let identity = GitHubPRIdentity(url: prs[index].url) else {
+                    prs[index].isOpenInCmux = false
+                    continue
+                }
+                prs[index].isOpenInCmux = openIdentities.contains(identity)
+            }
+        }
+
+        apply(to: &openPRs)
+        apply(to: &mentionedPRs)
+        apply(to: &mergedPRs)
+        logger.info("Refreshed cmux open status: openPRIdentities=\(openIdentities.count, privacy: .public)")
+    }
+
+    private func clearCmuxOpenStatus(
+        openPRs: inout [PullRequest],
+        mentionedPRs: inout [PullRequest],
+        mergedPRs: inout [PullRequest]
+    ) {
+        func clear(_ prs: inout [PullRequest]) {
+            for index in prs.indices {
+                prs[index].isOpenInCmux = nil
+            }
+        }
+        clear(&openPRs)
+        clear(&mentionedPRs)
+        clear(&mergedPRs)
+    }
+
+    private func clearCmuxOpenStatus(in prList: inout PRList) {
+        clearCmuxOpenStatus(
+            openPRs: &prList.pullRequests,
+            mentionedPRs: &prList.mentionedPullRequests,
+            mergedPRs: &prList.mergedPullRequests
+        )
+    }
+
     private func updateBranchMetadata(
         for prID: Int,
         result: GitHubAPIClient.UpdatePullRequestBranchResult
@@ -870,6 +985,7 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     func updateConfiguration(_ config: Configuration) {
+        let previousOpenAtCmuxFirst = configuration.openAtCmuxFirst
         configuration = config
         Self.saveConfiguration(config)
 
@@ -883,6 +999,15 @@ final class PRManager: PRManagerType, ObservableObject {
         // Restart polling with new interval if currently polling
         if timer != nil {
             enablePolling(true)
+        }
+
+        if previousOpenAtCmuxFirst != config.openAtCmuxFirst {
+            var updated = prList
+            clearCmuxOpenStatus(in: &updated)
+            prList = updated
+            if config.openAtCmuxFirst {
+                requestRefresh(trigger: .manual)
+            }
         }
     }
 

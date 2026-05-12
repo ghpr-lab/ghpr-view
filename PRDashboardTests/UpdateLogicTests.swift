@@ -727,6 +727,51 @@ final class UpdateLogicTests: XCTestCase {
     }
 
     @MainActor
+    func testPRListViewModelSearchMatchesJiraTicketsAcrossOpenAndMergedPRs() {
+        let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
+        let prManager = PRManager(
+            apiClient: GitHubAPIClient(token: ""),
+            notificationManager: NotificationManager(),
+            oauthManager: oauthManager
+        )
+        let viewModel = PRListViewModel(
+            prManager: prManager,
+            oauthManager: oauthManager,
+            linkOpener: FakePRLinkOpening(opensAtCmuxFirst: false)
+        )
+        var matchingOpen = makePullRequest(id: 18004, number: 101, category: .authored)
+        matchingOpen.jiraTicket = "AG-1234"
+        var nonMatchingOpen = makePullRequest(id: 18005, number: 102, category: .authored)
+        nonMatchingOpen.jiraTicket = "KAG-456"
+        var matchingMerged = makePullRequest(
+            id: 18006,
+            number: 103,
+            category: .authored,
+            mergedAt: Date().addingTimeInterval(-60)
+        )
+        matchingMerged.jiraTicket = "AG-1234"
+        var nonMatchingMerged = makePullRequest(
+            id: 18007,
+            number: 104,
+            category: .authored,
+            mergedAt: Date().addingTimeInterval(-60)
+        )
+        nonMatchingMerged.jiraTicket = "NOPE-999"
+
+        viewModel.prList = PRList(
+            lastUpdated: Date(),
+            pullRequests: [matchingOpen, nonMatchingOpen],
+            mergedPullRequests: [matchingMerged, nonMatchingMerged],
+            isLoading: false,
+            error: nil
+        )
+        viewModel.searchText = "ag-1234"
+
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [matchingOpen.id])
+        XCTAssertEqual(viewModel.mergedLast24hPRs.map(\.id), [matchingMerged.id])
+    }
+
+    @MainActor
     func testPRListViewModelSuppressesDuplicateCmuxFirstOpenUntilCompletion() async {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
@@ -853,7 +898,8 @@ final class UpdateLogicTests: XCTestCase {
         number: Int,
         category: PRCategory,
         reviewThreads: [ReviewThread] = [],
-        hasBaseConflicts: Bool = false
+        hasBaseConflicts: Bool = false,
+        mergedAt: Date? = nil
     ) -> PullRequest {
         PullRequest(
             id: id,
@@ -864,11 +910,11 @@ final class UpdateLogicTests: XCTestCase {
             repositoryOwner: "owner",
             repositoryName: "repo",
             url: URL(string: "https://github.com/owner/repo/pull/\(number)")!,
-            state: .open,
+            state: mergedAt == nil ? .open : .merged,
             isDraft: false,
             createdAt: Date(),
             updatedAt: Date(),
-            mergedAt: nil,
+            mergedAt: mergedAt,
             body: nil,
             conversationComments: [],
             lastCommitAt: Date(),
@@ -922,6 +968,21 @@ final class CmuxBrowserRouterTests: XCTestCase {
         )
 
         XCTAssertNil(match)
+    }
+
+    func testOpenPRIdentitiesParsesTreeWithoutFocusingCmux() throws {
+        let runner = FakeCmuxCommandRunner(results: [
+            .success(stdout: Self.treeJSON(surfaceURL: "https://github.com/owner/repo/pull/123/files"))
+        ])
+        let router = CmuxBrowserRouter(commandRunner: runner, timeout: 0.1)
+        let target = try XCTUnwrap(GitHubPRIdentity(url: URL(string: "https://github.com/owner/repo/pull/123")!))
+
+        let identities = router.openPRIdentities()
+
+        XCTAssertEqual(identities, Set([target]))
+        XCTAssertEqual(runner.commands, [
+            ["--json", "--id-format", "uuids", "tree", "--all"]
+        ])
     }
 
     func testOpenExistingPRFocusesMatchingTabWithoutReloading() {

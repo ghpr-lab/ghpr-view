@@ -63,7 +63,11 @@ protocol CmuxBrowserRouting: Sendable {
     func openExistingPR(_ url: URL) -> Bool
 }
 
-struct GitHubPRIdentity: Equatable {
+protocol CmuxPRStatusProviding: Sendable {
+    func openPRIdentities() -> Set<GitHubPRIdentity>
+}
+
+struct GitHubPRIdentity: Equatable, Hashable {
     let host: String
     let owner: String
     let repo: String
@@ -105,7 +109,7 @@ protocol CmuxCommandRunning: Sendable {
     func run(arguments: [String], timeout: TimeInterval) -> CmuxCommandResult
 }
 
-final class CmuxBrowserRouter: CmuxBrowserRouting {
+final class CmuxBrowserRouter: CmuxBrowserRouting, CmuxPRStatusProviding {
     private struct Tree: Decodable {
         let windows: [Window]
     }
@@ -133,6 +137,8 @@ final class CmuxBrowserRouter: CmuxBrowserRouting {
         let url: String?
     }
 
+    private static let browserSurfaceType = "browser"
+
     struct BrowserMatch: Equatable {
         let windowHandle: String?
         let workspaceHandle: String
@@ -151,27 +157,17 @@ final class CmuxBrowserRouter: CmuxBrowserRouting {
     }
 
     func openExistingPR(_ url: URL) -> Bool {
-        guard let commandRunner else {
-            prLinkLogger.debug("cmux CLI is unavailable; falling back to default browser")
-            return false
-        }
         guard let target = GitHubPRIdentity(url: url) else {
             prLinkLogger.debug("URL is not a GitHub PR URL: \(url.absoluteString, privacy: .public)")
             return false
         }
-
-        // Use UUIDs everywhere — `focus-window` rejects short refs (`window:1`)
-        // and indexes despite its --help claiming otherwise.
-        let tree = commandRunner.run(
-            arguments: ["--json", "--id-format", "uuids", "tree", "--all"],
-            timeout: timeout
-        )
-        guard tree.succeeded else {
-            prLinkLogger.debug("cmux tree failed: exit=\(tree.exitCode) timeout=\(tree.timedOut) stderr=\(tree.stderr, privacy: .public)")
+        guard let commandRunner else {
+            prLinkLogger.debug("cmux CLI is unavailable; falling back to default browser")
             return false
         }
 
-        guard let match = Self.findMatchingSurface(in: tree.stdout, target: target) else {
+        guard let treeJSON = fetchTreeJSON(commandRunner: commandRunner),
+              let match = Self.findMatchingSurface(in: treeJSON, target: target) else {
             prLinkLogger.debug("No matching cmux browser tab found for \(url.absoluteString, privacy: .public)")
             return false
         }
@@ -212,6 +208,30 @@ final class CmuxBrowserRouter: CmuxBrowserRouting {
         return true
     }
 
+    func openPRIdentities() -> Set<GitHubPRIdentity> {
+        guard let commandRunner else {
+            prLinkLogger.debug("cmux CLI is unavailable")
+            return []
+        }
+        guard let treeJSON = fetchTreeJSON(commandRunner: commandRunner) else { return [] }
+        return Self.findOpenPRIdentities(in: treeJSON)
+    }
+
+    private func fetchTreeJSON(commandRunner: CmuxCommandRunning) -> String? {
+        // Use UUIDs everywhere — `focus-window` rejects short refs (`window:1`)
+        // and indexes despite its --help claiming otherwise.
+        let tree = commandRunner.run(
+            arguments: ["--json", "--id-format", "uuids", "tree", "--all"],
+            timeout: timeout
+        )
+        guard tree.succeeded else {
+            prLinkLogger.debug("cmux tree failed: exit=\(tree.exitCode) timeout=\(tree.timedOut) stderr=\(tree.stderr, privacy: .public)")
+            return nil
+        }
+
+        return tree.stdout
+    }
+
     static func findMatchingSurface(in json: String, target: GitHubPRIdentity) -> BrowserMatch? {
         guard let data = json.data(using: .utf8),
               let tree = try? JSONDecoder().decode(Tree.self, from: data) else {
@@ -226,7 +246,7 @@ final class CmuxBrowserRouter: CmuxBrowserRouting {
 
                 for pane in workspace.panes {
                     for surface in pane.surfaces {
-                        guard surface.type?.lowercased() == "browser",
+                        guard surface.type?.lowercased() == Self.browserSurfaceType,
                               let surfaceHandle = surface.ref ?? surface.id,
                               let urlString = surface.url,
                               let surfaceURL = URL(string: urlString),
@@ -245,6 +265,31 @@ final class CmuxBrowserRouter: CmuxBrowserRouting {
         }
 
         return nil
+    }
+
+    static func findOpenPRIdentities(in json: String) -> Set<GitHubPRIdentity> {
+        guard let data = json.data(using: .utf8),
+              let tree = try? JSONDecoder().decode(Tree.self, from: data) else {
+            return []
+        }
+
+        var identities = Set<GitHubPRIdentity>()
+        for window in tree.windows {
+            for workspace in window.workspaces {
+                for pane in workspace.panes {
+                    for surface in pane.surfaces {
+                        guard surface.type?.lowercased() == Self.browserSurfaceType,
+                              let urlString = surface.url,
+                              let surfaceURL = URL(string: urlString),
+                              let identity = GitHubPRIdentity(url: surfaceURL) else {
+                            continue
+                        }
+                        identities.insert(identity)
+                    }
+                }
+            }
+        }
+        return identities
     }
 }
 

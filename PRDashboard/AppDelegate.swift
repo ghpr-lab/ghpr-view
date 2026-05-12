@@ -31,7 +31,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         prManager = PRManager(
             apiClient: apiClient,
             notificationManager: notificationManager!,
-            oauthManager: oauthManager!
+            oauthManager: oauthManager!,
+            cmuxStatusProvider: CmuxBrowserRouter()
         )
         updateManager = UpdateManager(configuration: prManager!.configuration)
         updateManager?.onRequestPresentation = { [weak self] in
