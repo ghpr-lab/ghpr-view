@@ -40,6 +40,21 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(configuration.openAtCmuxFirst)
     }
 
+    func testFailureAndPendingCIRollupsFetchRemainingContextPages() {
+        XCTAssertTrue(
+            GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "FAILURE", hasNextPage: true)
+        )
+        XCTAssertTrue(
+            GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "PENDING", hasNextPage: true)
+        )
+        XCTAssertFalse(
+            GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "SUCCESS", hasNextPage: true)
+        )
+        XCTAssertFalse(
+            GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "FAILURE", hasNextPage: false)
+        )
+    }
+
     @MainActor
     func testPRLinkOpenerWithoutCmuxFirstOpensDefaultAndSkipsCmuxRouter() async {
         var configuration = Configuration.default
@@ -573,6 +588,35 @@ final class UpdateLogicTests: XCTestCase {
         )
 
         XCTAssertTrue(cached.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
+    }
+
+    func testCachedPRDetailWithoutCIContextParserVersionForcesCacheMiss() throws {
+        struct LegacyCachedPRDetail: Codable {
+            let prId: Int
+            let indexSnapshot: IndexSnapshot
+            let detail: PullRequest
+            let detailFetchedAt: Date
+        }
+
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        let snapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "FAILURE")
+        var pr = makePullRequest(id: 8, number: 8, category: .authored)
+        pr.ciStatus = .failure
+        pr.checkFailureCount = 1
+        pr.githubCIState = "FAILURE"
+        pr.graphqlNodeId = "PR_node_8"
+        pr.baseRefName = "main"
+        pr.headRefName = "feature"
+
+        let legacy = LegacyCachedPRDetail(
+            prId: pr.id,
+            indexSnapshot: snapshot,
+            detail: pr,
+            detailFetchedAt: now
+        )
+        let cached = try JSONDecoder().decode(CachedPRDetail.self, from: JSONEncoder().encode(legacy))
+
+        XCTAssertFalse(cached.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
     }
 
     func testKongStyleRunningToFailureSnapshotChangeCausesCacheMiss() {

@@ -406,18 +406,37 @@ private enum PRHoverDetailMetrics {
     static let rowHeight: CGFloat = 26
     static let rowSpacing: CGFloat = 4
     static let verticalPadding: CGFloat = 10
+    static let maxFailedWorkflowRows: Int = 3
+    static let failedWorkflowLineHeight: CGFloat = 17
+    static let failedWorkflowLineSpacing: CGFloat = 2
     static let arrowWidth: CGFloat = 8
     static let arrowHeight: CGFloat = 16
     static let outsideGap: CGFloat = 0
     static let screenMargin: CGFloat = 8
 
-    static func rowCount(for pr: PullRequest) -> Int {
-        2 + (pr.failedWorkflowNames.isEmpty ? 0 : 1)
+    static func visibleFailedWorkflowCount(for pr: PullRequest) -> Int {
+        min(pr.failedWorkflowNames.count, maxFailedWorkflowRows)
+    }
+
+    static func failedWorkflowLineCount(for pr: PullRequest) -> Int {
+        let visibleCount = visibleFailedWorkflowCount(for: pr)
+        guard visibleCount > 0 else { return 0 }
+        return visibleCount + (pr.failedWorkflowNames.count > visibleCount ? 1 : 0)
+    }
+
+    static func checksRowHeight(for pr: PullRequest) -> CGFloat {
+        let lineCount = failedWorkflowLineCount(for: pr)
+        guard lineCount > 0 else { return 0 }
+        let contentHeight = CGFloat(lineCount) * failedWorkflowLineHeight +
+            CGFloat(max(lineCount - 1, 0)) * failedWorkflowLineSpacing
+        return max(rowHeight, contentHeight)
     }
 
     static func cardHeight(for pr: PullRequest) -> CGFloat {
-        let rows = rowCount(for: pr)
-        return CGFloat(rows) * rowHeight + CGFloat(max(rows - 1, 0)) * rowSpacing + verticalPadding * 2
+        let checksHeight = checksRowHeight(for: pr)
+        let rowCount = 2 + (checksHeight > 0 ? 1 : 0)
+        let rowsHeight = rowHeight * 2 + checksHeight
+        return rowsHeight + CGFloat(max(rowCount - 1, 0)) * rowSpacing + verticalPadding * 2
     }
 
     static func windowSize(for pr: PullRequest) -> CGSize {
@@ -975,7 +994,7 @@ private struct PRHoverDetailInfoTable: View {
         VStack(alignment: .leading, spacing: PRHoverDetailMetrics.rowSpacing) {
             baseRow
             reviewsRow
-            if !failedWorkflowText.isEmpty {
+            if !pr.failedWorkflowNames.isEmpty {
                 checksRow
             }
         }
@@ -1063,12 +1082,30 @@ private struct PRHoverDetailInfoTable: View {
     }
 
     private var checksRow: some View {
-        PRHoverDetailRow(label: "Checks") {
-            PRHoverDetailInlineStatus(
-                icon: "xmark.circle.fill",
-                text: failedWorkflowText,
-                color: .red
-            )
+        PRHoverDetailRow(
+            label: "Checks",
+            height: PRHoverDetailMetrics.checksRowHeight(for: pr),
+            topAligned: true
+        ) {
+            VStack(alignment: .leading, spacing: PRHoverDetailMetrics.failedWorkflowLineSpacing) {
+                ForEach(visibleFailedWorkflowNames, id: \.self) { workflowName in
+                    PRHoverDetailInlineStatus(
+                        icon: "xmark.circle.fill",
+                        text: workflowName,
+                        color: .red
+                    )
+                    .frame(height: PRHoverDetailMetrics.failedWorkflowLineHeight, alignment: .leading)
+                }
+
+                if hiddenFailedWorkflowCount > 0 {
+                    PRHoverDetailInlineStatus(
+                        icon: "ellipsis.circle",
+                        text: "+\(hiddenFailedWorkflowCount) more failed",
+                        color: .secondary
+                    )
+                    .frame(height: PRHoverDetailMetrics.failedWorkflowLineHeight, alignment: .leading)
+                }
+            }
         }
     }
 
@@ -1161,32 +1198,45 @@ private struct PRHoverDetailInfoTable: View {
             onUpdateBranchWithRebase != nil
     }
 
-    private var failedWorkflowText: String {
-        guard !pr.failedWorkflowNames.isEmpty else { return "" }
-        return "Failing: \(pr.failedWorkflowNames.joined(separator: ", "))"
+    private var visibleFailedWorkflowNames: [String] {
+        Array(pr.failedWorkflowNames.prefix(PRHoverDetailMetrics.maxFailedWorkflowRows))
+    }
+
+    private var hiddenFailedWorkflowCount: Int {
+        max(pr.failedWorkflowNames.count - PRHoverDetailMetrics.maxFailedWorkflowRows, 0)
     }
 }
 
 private struct PRHoverDetailRow<Content: View>: View {
     let label: String
+    let height: CGFloat
+    let topAligned: Bool
     let content: Content
 
-    init(label: String, @ViewBuilder content: () -> Content) {
+    init(
+        label: String,
+        height: CGFloat = PRHoverDetailMetrics.rowHeight,
+        topAligned: Bool = false,
+        @ViewBuilder content: () -> Content
+    ) {
         self.label = label
+        self.height = height
+        self.topAligned = topAligned
         self.content = content()
     }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
+        HStack(alignment: topAligned ? .top : .center, spacing: 8) {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
                 .frame(width: 52, alignment: .leading)
+                .padding(.top, topAligned ? 1 : 0)
 
             content
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(height: PRHoverDetailMetrics.rowHeight)
+        .frame(height: height, alignment: topAligned ? .topLeading : .center)
     }
 }
 

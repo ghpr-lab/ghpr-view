@@ -971,24 +971,20 @@ final class GitHubAPIClient: ObservableObject {
             )
             let upperRollup = statusCheckRollup.state.uppercased()
 
-            if upperRollup == "FAILURE",
-               ciResult.failureCount == 0,
-               let pageInfo = statusCheckRollup.contexts?.pageInfo,
-               pageInfo.hasNextPage,
+            if let pageInfo = statusCheckRollup.contexts?.pageInfo,
+               Self.shouldFetchRemainingCIContexts(rollupState: upperRollup, hasNextPage: pageInfo.hasNextPage),
                let endCursor = pageInfo.endCursor,
                let commitOid = commit?.oid {
                 do {
-                    let additional = try await fetchAdditionalCIContexts(
+                    let (combined, _) = try await fetchFullCIContexts(
                         owner: pr.repositoryOwner,
                         repo: pr.repositoryName,
                         commitOid: commitOid,
-                        after: endCursor
+                        startCursor: endCursor,
+                        initialCount: statusCheckRollup.contexts?.nodes.count ?? 0,
+                        seed: ciResult
                     )
-                    ciResult = Self.parseCIContexts(
-                        additional.contexts,
-                        excludeFilter: excludeFilter,
-                        existing: ciResult
-                    )
+                    ciResult = combined
                 } catch {
                     logger.warning("Failed to enrich hover CI metadata for \(pr.repoFullName)#\(pr.number, privacy: .public): \(error.localizedDescription, privacy: .public)")
                 }
@@ -1300,6 +1296,16 @@ final class GitHubAPIClient: ObservableObject {
             result.append(value)
         }
         return result
+    }
+
+    static func shouldFetchRemainingCIContexts(rollupState: String, hasNextPage: Bool) -> Bool {
+        guard hasNextPage else { return false }
+        switch rollupState.uppercased() {
+        case "FAILURE", "PENDING":
+            return true
+        default:
+            return false
+        }
     }
 
     private static let explicitPRReferenceRegex = compileRegex(
@@ -2921,12 +2927,20 @@ final class GitHubAPIClient: ObservableObject {
 
         for info in enrichmentInfos {
             do {
-                let counts = try await fetchFullCIContexts(
+                let (parseResult, limitReached) = try await fetchFullCIContexts(
                     owner: info.owner,
                     repo: info.repo,
                     commitOid: info.commitOid,
                     startCursor: info.endCursor,
                     initialCount: info.initialContextCount
+                )
+                let counts = CICounts(
+                    success: parseResult.successCount,
+                    failure: parseResult.failureCount,
+                    pending: parseResult.pendingCount,
+                    limitReached: limitReached,
+                    isRunning: parseResult.isRunning,
+                    workflows: parseResult.workflows
                 )
                 results[info.prId] = counts
                 logger.info("Enriched CI for PR \(info.prId): \(counts.success) success, \(counts.failure) failure, \(counts.pending) pending, limitReached=\(counts.limitReached)")
@@ -2938,10 +2952,19 @@ final class GitHubAPIClient: ObservableObject {
         return results
     }
 
-    /// Fetches all remaining CI contexts for a commit, paginating as needed
-    /// Returns counts and whether the limit was reached before exhausting all pages
-    private func fetchFullCIContexts(owner: String, repo: String, commitOid: String, startCursor: String, initialCount: Int) async throws -> CICounts {
-        var parseResult = CIParseResult()
+    /// Fetches all remaining CI contexts for a commit, paginating as needed.
+    /// The caller passes its first-page `CIParseResult` as `seed` so cross-page
+    /// dedup (via `seenCheckNames`) is preserved. Returns the combined parse
+    /// result plus whether the per-commit fetch limit was reached.
+    private func fetchFullCIContexts(
+        owner: String,
+        repo: String,
+        commitOid: String,
+        startCursor: String,
+        initialCount: Int,
+        seed: CIParseResult = CIParseResult()
+    ) async throws -> (parseResult: CIParseResult, limitReached: Bool) {
+        var parseResult = seed
         var cursor: String? = startCursor
         let excludeFilter = Self.loadCIStatusExcludeFilter()
         var totalFetched = initialCount
@@ -2953,7 +2976,6 @@ final class GitHubAPIClient: ObservableObject {
 
             parseResult = Self.parseCIContexts(result.contexts, excludeFilter: excludeFilter, existing: parseResult)
 
-            // Check if we've reached the limit
             if totalFetched >= Self.maxCIContextsToFetch {
                 if result.hasNextPage {
                     logger.warning("Reached CI context limit (\(Self.maxCIContextsToFetch)) for \(owner)/\(repo)@\(commitOid), more pages available")
@@ -2965,14 +2987,7 @@ final class GitHubAPIClient: ObservableObject {
             cursor = result.hasNextPage ? result.endCursor : nil
         }
 
-        return CICounts(
-            success: parseResult.successCount,
-            failure: parseResult.failureCount,
-            pending: parseResult.pendingCount,
-            limitReached: limitReached,
-            isRunning: parseResult.isRunning,
-            workflows: parseResult.workflows
-        )
+        return (parseResult, limitReached)
     }
 
     private func parseNodes(
@@ -3076,10 +3091,8 @@ final class GitHubAPIClient: ObservableObject {
         let rollupState = statusCheckRollup?.state ?? ""
         let upperRollup = rollupState.uppercased()
         let initialContextCount = statusCheckRollup?.contexts?.nodes.count ?? 0
-        if ((upperRollup == "FAILURE" && ciResult.failureCount == 0) ||
-            (upperRollup == "PENDING" && ciResult.pendingCount == 0)),
-           let pageInfo = statusCheckRollup?.contexts?.pageInfo,
-           pageInfo.hasNextPage,
+        if let pageInfo = statusCheckRollup?.contexts?.pageInfo,
+           Self.shouldFetchRemainingCIContexts(rollupState: upperRollup, hasNextPage: pageInfo.hasNextPage),
            let endCursor = pageInfo.endCursor,
            let commitOid = lastCommit?.oid {
             enrichmentInfos.append(CIEnrichmentInfo(

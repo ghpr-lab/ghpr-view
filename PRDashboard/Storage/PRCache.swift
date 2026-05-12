@@ -135,16 +135,34 @@ extension IndexSnapshot {
 }
 
 struct CachedPRDetail: Codable {
+    private static let currentCIContextParserVersion = 2
+
     let prId: Int
     let indexSnapshot: IndexSnapshot
     let detail: PullRequest
     let detailFetchedAt: Date
+    let ciContextParserVersion: Int?
+
+    init(
+        prId: Int,
+        indexSnapshot: IndexSnapshot,
+        detail: PullRequest,
+        detailFetchedAt: Date,
+        ciContextParserVersion: Int? = Self.currentCIContextParserVersion
+    ) {
+        self.prId = prId
+        self.indexSnapshot = indexSnapshot
+        self.detail = detail
+        self.detailFetchedAt = detailFetchedAt
+        self.ciContextParserVersion = ciContextParserVersion
+    }
 
     /// Cache hit when index scalars match, the entry is still within TTL, and
     /// the cached CI state is terminal. GitHub PR `updatedAt` is not a reliable
     /// signal for CI-only changes, so in-flight CI results are always refreshed
     /// on the next normal poll instead of being reused for the full TTL.
     func isUsable(against snapshot: IndexSnapshot, now: Date, ttl: TimeInterval) -> Bool {
+        guard ciContextParserVersion == Self.currentCIContextParserVersion else { return false }
         guard indexSnapshot == snapshot else { return false }
         guard now.timeIntervalSince(detailFetchedAt) < ttl else { return false }
         guard detail.hasHoverDetailMetadata else { return false }
