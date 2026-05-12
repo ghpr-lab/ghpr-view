@@ -49,7 +49,7 @@ struct IndexedPR {
     let baseRefName: String?
     let headRefName: String?
     let baseNeedsUpdate: Bool?
-    let hasBaseConflicts: Bool
+    let hasBaseConflicts: Bool?
     let category: PRCategory
     let isMerged: Bool
     let snapshot: IndexSnapshot
@@ -117,7 +117,7 @@ struct IndexedPR {
             changesRequestedAuthors: changesRequestedAuthors,
             reviewThreads: Self.retainedList(existing?.reviewThreads, visible?.reviewThreads),
             category: category,
-            hasBaseConflicts: hasBaseConflicts,
+            hasBaseConflicts: hasBaseConflicts ?? existing?.hasBaseConflicts ?? visible?.hasBaseConflicts ?? false,
             ciStatus: ciStatus,
             checkSuccessCount: checkSuccessCount,
             checkFailureCount: checkFailureCount,
@@ -1813,8 +1813,6 @@ final class GitHubAPIClient: ObservableObject {
         createdAt
         updatedAt
         mergedAt
-        mergeable
-        mergeStateStatus
         author {
             login
             avatarUrl
@@ -1976,11 +1974,8 @@ final class GitHubAPIClient: ObservableObject {
                 repositoryName: node.repository.name,
                 baseRefName: node.baseRefName,
                 headRefName: node.headRefName,
-                baseNeedsUpdate: Self.deriveBaseNeedsUpdate(mergeStateStatus: node.mergeStateStatus),
-                hasBaseConflicts: Self.deriveBaseConflicts(
-                    mergeable: node.mergeable,
-                    mergeStateStatus: node.mergeStateStatus
-                ),
+                baseNeedsUpdate: nil,
+                hasBaseConflicts: nil,
                 category: category,
                 isMerged: isMerged,
                 snapshot: snapshot
@@ -3869,8 +3864,6 @@ private struct IndexGraphQLResponse: Decodable {
         let createdAt: Date
         let updatedAt: Date
         let mergedAt: Date?
-        let mergeable: String?
-        let mergeStateStatus: String?
         let author: Author?
         let repository: Repository
         let reviewThreads: ReviewThreadsSummary?
