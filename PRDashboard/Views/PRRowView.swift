@@ -432,10 +432,15 @@ private enum PRHoverDetailMetrics {
         return max(rowHeight, contentHeight)
     }
 
+    static func unresolvedRowHeight(for pr: PullRequest) -> CGFloat {
+        pr.unresolvedCount > 0 ? rowHeight : 0
+    }
+
     static func cardHeight(for pr: PullRequest) -> CGFloat {
         let checksHeight = checksRowHeight(for: pr)
-        let rowCount = 2 + (checksHeight > 0 ? 1 : 0)
-        let rowsHeight = rowHeight * 2 + checksHeight
+        let unresolvedHeight = unresolvedRowHeight(for: pr)
+        let rowCount = 2 + (unresolvedHeight > 0 ? 1 : 0) + (checksHeight > 0 ? 1 : 0)
+        let rowsHeight = rowHeight * 2 + unresolvedHeight + checksHeight
         return rowsHeight + CGFloat(max(rowCount - 1, 0)) * rowSpacing + verticalPadding * 2
     }
 
@@ -680,13 +685,23 @@ private final class PRHoverDetailPanelController {
             isUpdatingBranch: isUpdatingBranch,
             isLoadingHoverDetail: isLoadingHoverDetail
         )
-        let hostingView = PRHoverDetailHostingView(rootView: AnyView(rootView))
-        hostingView.ownerID = ownerID
-        hostingView.frame = NSRect(origin: .zero, size: placement.frame.size)
 
         let panel = panel ?? makePanel()
         self.panel = panel
-        panel.contentView = hostingView
+
+        let frameSize = placement.frame.size
+        if let existing = panel.contentView as? PRHoverDetailHostingView,
+           existing.ownerID == ownerID {
+            existing.rootView = AnyView(rootView)
+            if existing.frame.size != frameSize {
+                existing.frame = NSRect(origin: .zero, size: frameSize)
+            }
+        } else {
+            let hostingView = PRHoverDetailHostingView(rootView: AnyView(rootView))
+            hostingView.ownerID = ownerID
+            hostingView.frame = NSRect(origin: .zero, size: frameSize)
+            panel.contentView = hostingView
+        }
         panel.setFrame(placement.frame, display: true)
 
         if !panel.isVisible {
@@ -947,6 +962,8 @@ private struct PRHoverDetailPanelView: View {
     let isUpdatingBranch: Bool
     let isLoadingHoverDetail: Bool
 
+    @StateObject private var tooltipPresenter = HoverTooltipPresenter()
+
     private var cardOffsetX: CGFloat {
         side == .right ? PRHoverDetailMetrics.arrowWidth : 0
     }
@@ -970,6 +987,11 @@ private struct PRHoverDetailPanelView: View {
                 .offset(x: cardOffsetX)
         }
         .frame(width: size.width, height: size.height)
+        .coordinateSpace(name: HoverTooltipCoordinateSpace.name)
+        .environment(\.hoverTooltipPresenter, tooltipPresenter)
+        .overlay(alignment: .topLeading) {
+            HoverTooltipOverlay(presenter: tooltipPresenter)
+        }
     }
 
     private var content: some View {
@@ -994,6 +1016,9 @@ private struct PRHoverDetailInfoTable: View {
         VStack(alignment: .leading, spacing: PRHoverDetailMetrics.rowSpacing) {
             baseRow
             reviewsRow
+            if pr.unresolvedCount > 0 {
+                unresolvedRow
+            }
             if !pr.failedWorkflowNames.isEmpty {
                 checksRow
             }
@@ -1059,25 +1084,41 @@ private struct PRHoverDetailInfoTable: View {
                 }
             } else {
                 HStack(spacing: 8) {
-                    PRHoverDetailInlineStatus(
+                    PRHoverDetailAvatars(
                         icon: approvalIcon,
-                        text: approvalText,
                         color: approvalColor,
+                        usernames: pr.approvalAuthors ?? [],
+                        fallbackText: approvalText,
                         maxWidth: 206
                     )
+                    .delayedHoverTooltip(approvalTooltipText)
 
                     Text("·")
                         .font(valueFont)
                         .foregroundColor(.secondary)
 
-                    PRHoverDetailInlineStatus(
+                    PRHoverDetailAvatars(
                         icon: changesIcon,
-                        text: changesRequestedText,
                         color: changesColor,
+                        usernames: pr.changesRequestedAuthors ?? [],
+                        fallbackText: changesRequestedText,
                         maxWidth: 108
                     )
+                    .delayedHoverTooltip(changesRequestedTooltipText)
                 }
             }
+        }
+    }
+
+    private var unresolvedRow: some View {
+        PRHoverDetailRow(label: "Unresolved") {
+            PRHoverDetailAvatars(
+                icon: "bubble.left.and.bubble.right.fill",
+                color: .orange,
+                usernames: unresolvedThreadDetails.map(\.sourceAuthor),
+                fallbackText: unresolvedSummaryText
+            )
+            .delayedHoverTooltip(unresolvedTooltipText)
         }
     }
 
@@ -1127,6 +1168,16 @@ private struct PRHoverDetailInfoTable: View {
 
     private var approvalText: String {
         if let authors = pr.approvalAuthors, !authors.isEmpty {
+            return authors.joined(separator: ", ")
+        }
+        if pr.approvalCount > 0 {
+            return "\(pr.approvalCount) approved"
+        }
+        return "No approvals"
+    }
+
+    private var approvalTooltipText: String {
+        if let authors = pr.approvalAuthors, !authors.isEmpty {
             return "Approved by \(authors.joined(separator: ", "))"
         }
         if pr.approvalCount > 0 {
@@ -1137,13 +1188,63 @@ private struct PRHoverDetailInfoTable: View {
 
     private var changesRequestedText: String {
         if let authors = pr.changesRequestedAuthors, !authors.isEmpty {
-            return "Changes by \(authors.joined(separator: ", "))"
+            return authors.joined(separator: ", ")
         }
         let count = pr.changesRequestedCount ?? 0
         if count > 0 {
             return "\(count) requested"
         }
         return "No changes"
+    }
+
+    private var changesRequestedTooltipText: String {
+        if let authors = pr.changesRequestedAuthors, !authors.isEmpty {
+            return "Changes requested by \(authors.joined(separator: ", "))"
+        }
+        let count = pr.changesRequestedCount ?? 0
+        if count > 0 {
+            return "\(count) changes requested"
+        }
+        return "No changes requested"
+    }
+
+    private var unresolvedThreadDetails: [PRHoverUnresolvedThreadDetail] {
+        pr.reviewThreads
+            .filter(\.isUnresolved)
+            .map(PRHoverUnresolvedThreadDetail.init(thread:))
+    }
+
+    private var unresolvedSummaryText: String {
+        authorCountText(from: unresolvedThreadDetails.map(\.sourceAuthor))
+    }
+
+    private var unresolvedTooltipText: String {
+        let count = unresolvedThreadDetails.count
+        let authors = authorCountText(from: unresolvedThreadDetails.map(\.sourceAuthor))
+        let header = "\(count) unresolved \(count == 1 ? "thread" : "threads") by \(authors)"
+        let lines = unresolvedThreadDetails.map { detail in
+            "\(detail.sourceAuthor) - \(detail.locationText)"
+        }
+
+        return ([header] + lines).joined(separator: "\n")
+    }
+
+    private func authorCountText(from authors: [String]) -> String {
+        var orderedAuthors: [String] = []
+        var counts: [String: Int] = [:]
+
+        for author in authors {
+            if counts[author] == nil {
+                orderedAuthors.append(author)
+            }
+            counts[author, default: 0] += 1
+        }
+
+        return orderedAuthors.map { author in
+            let count = counts[author] ?? 0
+            return count > 1 ? "\(author) (\(count))" : author
+        }
+        .joined(separator: ", ")
     }
 
     private var baseStatus: (text: String, icon: String, color: Color) {
@@ -1207,6 +1308,29 @@ private struct PRHoverDetailInfoTable: View {
     }
 }
 
+private struct PRHoverUnresolvedThreadDetail {
+    let sourceAuthor: String
+    let locationText: String
+
+    init(thread: ReviewThread) {
+        sourceAuthor = thread.comments.first?.author.nonEmpty ?? "unknown"
+
+        if let path = thread.path?.nonEmpty, let line = thread.line {
+            locationText = "\(path):\(line)"
+        } else if let path = thread.path?.nonEmpty {
+            locationText = path
+        } else {
+            locationText = "unknown location"
+        }
+    }
+}
+
+private extension String {
+    var nonEmpty: String? {
+        isEmpty ? nil : self
+    }
+}
+
 private struct PRHoverDetailRow<Content: View>: View {
     let label: String
     let height: CGFloat
@@ -1230,6 +1354,8 @@ private struct PRHoverDetailRow<Content: View>: View {
             Text(label)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
                 .frame(width: 52, alignment: .leading)
                 .padding(.top, topAligned ? 1 : 0)
 
@@ -1260,6 +1386,93 @@ private struct PRHoverDetailInlineStatus: View {
                 .truncationMode(.tail)
         }
         .frame(maxWidth: maxWidth, alignment: .leading)
+    }
+}
+
+private struct PRHoverDetailAvatars: View {
+    let icon: String
+    let color: Color
+    let usernames: [String]
+    let fallbackText: String
+    var maxWidth: CGFloat?
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(color)
+                .frame(width: 12)
+
+            if usernames.isEmpty {
+                Text(fallbackText)
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
+                StackedAvatarsView(usernames: usernames)
+            }
+        }
+        .frame(maxWidth: maxWidth, alignment: .leading)
+    }
+}
+
+private struct StackedAvatarsView: View {
+    let usernames: [String]
+    var avatarSize: CGFloat = 14
+    var maxVisible: Int = 5
+
+    @State private var isHovered = false
+
+    private var deduped: [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for u in usernames where seen.insert(u).inserted {
+            out.append(u)
+        }
+        return out
+    }
+
+    private var visible: [String] {
+        Array(deduped.prefix(maxVisible))
+    }
+
+    private var extraCount: Int {
+        max(0, deduped.count - maxVisible)
+    }
+
+    private var spacing: CGFloat {
+        isHovered ? 2 : -(avatarSize * 0.3)
+    }
+
+    private func avatarURL(for username: String) -> URL? {
+        URL(string: "https://github.com/\(username).png?size=40")
+    }
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            ForEach(Array(visible.enumerated()), id: \.element) { index, username in
+                CachedAvatarView(
+                    url: avatarURL(for: username),
+                    authorInitial: username
+                )
+                .frame(width: avatarSize, height: avatarSize)
+                .clipShape(Circle())
+                .overlay(
+                    Circle().stroke(Color(NSColor.windowBackgroundColor), lineWidth: 1)
+                )
+                .zIndex(Double(visible.count - index))
+                .delayedHoverTooltip(username)
+            }
+            if extraCount > 0 {
+                Text("+\(extraCount)")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+                    .padding(.leading, 2)
+            }
+        }
+        .animation(.easeInOut(duration: 0.15), value: isHovered)
+        .onHover { isHovered = $0 }
     }
 }
 
