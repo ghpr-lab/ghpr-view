@@ -185,7 +185,7 @@ struct SettingsView: View {
                         } label: {
                             Label(updateCheckButtonTitle, systemImage: "arrow.clockwise")
                         }
-                        .disabled(isUpdateCheckInProgress || isInstallingUpdate)
+                        .disabled(isUpdateBusy)
 
                         if isUpdateCheckInProgress {
                             ProgressView()
@@ -386,11 +386,18 @@ struct SettingsView: View {
     }
 
     private var updateCheckButtonTitle: LocalizedStringKey {
-        if isUpdateCheckInProgress {
+        switch updateManager.state {
+        case .checking:
             return "Checking…"
+        case .downloading:
+            return "Downloading…"
+        case .readyToInstall:
+            return "Ready to Install"
+        case .installing:
+            return "Installing…"
+        case .idle, .upToDate, .available, .unsupportedInstallLocation, .error:
+            return "Check for Updates…"
         }
-
-        return "Check for Updates…"
     }
 
     private var isUpdateCheckInProgress: Bool {
@@ -401,12 +408,13 @@ struct SettingsView: View {
         return false
     }
 
-    private var isInstallingUpdate: Bool {
-        if case .installing = updateManager.state {
+    private var isUpdateBusy: Bool {
+        switch updateManager.state {
+        case .checking, .downloading, .readyToInstall, .installing:
             return true
+        case .idle, .upToDate, .available, .unsupportedInstallLocation, .error:
+            return false
         }
-
-        return false
     }
 
     private func loadCurrentSettings() {
