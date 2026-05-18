@@ -145,15 +145,19 @@ final class CmuxBrowserRouter: CmuxBrowserRouting, CmuxPRStatusProviding {
         let surfaceHandle: String
     }
 
-    private let commandRunner: CmuxCommandRunning?
+    private let commandRunnerProvider: @Sendable () -> CmuxCommandRunning?
     private let timeout: TimeInterval
 
     init(
-        commandRunner: CmuxCommandRunning? = ProcessCmuxCommandRunner.makeDefault(),
+        commandRunnerProvider: @escaping @Sendable () -> CmuxCommandRunning? = { ProcessCmuxCommandRunner.makeDefault() },
         timeout: TimeInterval = 2
     ) {
-        self.commandRunner = commandRunner
+        self.commandRunnerProvider = commandRunnerProvider
         self.timeout = timeout
+    }
+
+    convenience init(commandRunner: CmuxCommandRunning?, timeout: TimeInterval = 2) {
+        self.init(commandRunnerProvider: { commandRunner }, timeout: timeout)
     }
 
     func openExistingPR(_ url: URL) -> Bool {
@@ -161,7 +165,7 @@ final class CmuxBrowserRouter: CmuxBrowserRouting, CmuxPRStatusProviding {
             prLinkLogger.debug("URL is not a GitHub PR URL: \(url.absoluteString, privacy: .public)")
             return false
         }
-        guard let commandRunner else {
+        guard let commandRunner = commandRunnerProvider() else {
             prLinkLogger.debug("cmux CLI is unavailable; falling back to default browser")
             return false
         }
@@ -209,7 +213,7 @@ final class CmuxBrowserRouter: CmuxBrowserRouting, CmuxPRStatusProviding {
     }
 
     func openPRIdentities() -> Set<GitHubPRIdentity> {
-        guard let commandRunner else {
+        guard let commandRunner = commandRunnerProvider() else {
             prLinkLogger.debug("cmux CLI is unavailable")
             return []
         }
