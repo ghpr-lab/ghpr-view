@@ -130,12 +130,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openSettingsWindow(viewModel: PRListViewModel) {
-        guard let onboardingManager else { return }
+        guard let onboardingManager, let updateManager else { return }
 
         if settingsWindow == nil {
             let settingsView = SettingsView(
                 viewModel: viewModel,
-                onboardingManager: onboardingManager
+                onboardingManager: onboardingManager,
+                updateManager: updateManager
             )
             let hostingController = NSHostingController(rootView: settingsView)
 
