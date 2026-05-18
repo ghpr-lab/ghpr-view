@@ -4,6 +4,7 @@ import ServiceManagement
 struct SettingsView: View {
     @ObservedObject var viewModel: PRListViewModel
     @ObservedObject var onboardingManager: OnboardingManager
+    @ObservedObject var updateManager: UpdateManager
     @Environment(\.dismiss) private var dismiss
 
     @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
@@ -168,7 +169,31 @@ struct SettingsView: View {
                 }
 
                 Section("Updates") {
+                    HStack {
+                        Text("Current version")
+                        Spacer()
+                        Text(currentVersionDescription)
+                            .foregroundColor(.secondary)
+                            .textSelection(.enabled)
+                    }
+
                     Toggle("Automatically check for updates", isOn: $automaticallyCheckForUpdates)
+
+                    HStack {
+                        Button {
+                            updateManager.checkForUpdates(userInitiated: true)
+                        } label: {
+                            Label(updateCheckButtonTitle, systemImage: "arrow.clockwise")
+                        }
+                        .disabled(isUpdateCheckInProgress || isInstallingUpdate)
+
+                        if isUpdateCheckInProgress {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+
+                        Spacer()
+                    }
                 }
 
                 Section("Developer Options") {
@@ -346,6 +371,42 @@ struct SettingsView: View {
                 dismiss()
             }
         }
+    }
+
+    private var currentVersionDescription: String {
+        let version = updateManager.currentVersionString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let build = updateManager.currentBuildString.trimmingCharacters(in: .whitespacesAndNewlines)
+        let versionPrefix = version.hasPrefix("v") ? version : "v\(version)"
+
+        if build.isEmpty {
+            return "\(versionPrefix) [\(GitVersion.displayString)]"
+        }
+
+        return "\(versionPrefix) (\(build)) [\(GitVersion.displayString)]"
+    }
+
+    private var updateCheckButtonTitle: LocalizedStringKey {
+        if isUpdateCheckInProgress {
+            return "Checking…"
+        }
+
+        return "Check for Updates…"
+    }
+
+    private var isUpdateCheckInProgress: Bool {
+        if case .checking = updateManager.state {
+            return true
+        }
+
+        return false
+    }
+
+    private var isInstallingUpdate: Bool {
+        if case .installing = updateManager.state {
+            return true
+        }
+
+        return false
     }
 
     private func loadCurrentSettings() {
