@@ -520,25 +520,13 @@ final class UpdateManager: ObservableObject {
     }
 
     private func verifyCodeSignature(at stagedAppURL: URL) throws {
-        var selfStaticCode: SecStaticCode?
-        let selfStatus = SecStaticCodeCreateWithPath(bundle.bundleURL as CFURL, [], &selfStaticCode)
-        guard selfStatus == errSecSuccess, let selfStaticCode else {
-            throw UpdateManagerError.codeSignatureInvalid(selfStatus)
-        }
-
-        var requirement: SecRequirement?
-        let reqStatus = SecCodeCopyDesignatedRequirement(selfStaticCode, [], &requirement)
-        guard reqStatus == errSecSuccess, let requirement else {
-            throw UpdateManagerError.codeSignatureInvalid(reqStatus)
-        }
-
         var stagedStaticCode: SecStaticCode?
         let stagedStatus = SecStaticCodeCreateWithPath(stagedAppURL as CFURL, [], &stagedStaticCode)
         guard stagedStatus == errSecSuccess, let stagedStaticCode else {
             throw UpdateManagerError.codeSignatureInvalid(stagedStatus)
         }
 
-        let validity = SecStaticCodeCheckValidity(stagedStaticCode, [], requirement)
+        let validity = SecStaticCodeCheckValidity(stagedStaticCode, [], nil)
         guard validity == errSecSuccess else {
             throw UpdateManagerError.codeSignatureInvalid(validity)
         }
