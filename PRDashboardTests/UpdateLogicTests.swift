@@ -264,6 +264,61 @@ final class UpdateLogicTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testAutomaticUpdateCheckFetchesReleaseWhenIdle() async throws {
+        let session = makeMockUpdateSession()
+        installMockReleaseResponses()
+        defer { MockUpdateURLProtocol.reset() }
+
+        let manager = UpdateManager(
+            configuration: .default,
+            session: session,
+            autoCheckInterval: 60,
+            initialAutoCheckDelay: 0.01
+        )
+        var presentationCount = 0
+        manager.onRequestPresentation = {
+            presentationCount += 1
+        }
+
+        manager.checkForUpdates(userInitiated: false)
+
+        await waitForCondition {
+            MockUpdateURLProtocol.requestedURLs.count >= 2 && presentationCount == 1
+        }
+        XCTAssertEqual(manager.displayedRelease?.displayVersion, "999.0.0")
+        XCTAssertTrue(MockUpdateURLProtocol.requestedURLs.contains(URL(string: "https://github.com/xiaocang/ghpr-view/releases.atom")!))
+        XCTAssertTrue(MockUpdateURLProtocol.requestedURLs.contains(URL(string: "https://api.github.com/repos/xiaocang/ghpr-view/releases/tags/v999.0.0")!))
+    }
+
+    @MainActor
+    func testStartPerformsLaunchUpdateCheckEvenWhenDailyCheckRecentlyRan() async throws {
+        let suiteName = "PRDashboard.UpdateLogicTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.set(Date(), forKey: "PRDashboard.LastAutoUpdateCheckAt")
+        defer {
+            defaults.removePersistentDomain(forName: suiteName)
+            MockUpdateURLProtocol.reset()
+        }
+
+        let session = makeMockUpdateSession()
+        installMockReleaseResponses()
+        let manager = UpdateManager(
+            configuration: .default,
+            userDefaults: defaults,
+            session: session,
+            autoCheckInterval: 24 * 60 * 60,
+            initialAutoCheckDelay: 0.01
+        )
+
+        manager.start()
+
+        await waitForCondition {
+            MockUpdateURLProtocol.requestedURLs.count >= 2
+        }
+        XCTAssertEqual(manager.displayedRelease?.displayVersion, "999.0.0")
+    }
+
     func testMentionParserRecognizesSameRepositoryReferences() {
         let references = GitHubAPIClient.extractMentionedPRReferences(
             from: "See #12, owner/repo#34, and https://github.com/owner/repo/pull/56 for context.",
@@ -869,6 +924,86 @@ final class UpdateLogicTests: XCTestCase {
         return try decoder.decode(ReleaseInfo.self, from: Data(json.utf8))
     }
 
+    private func makeMockUpdateSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockUpdateURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private func installMockReleaseResponses(tag: String = "v999.0.0") {
+        MockUpdateURLProtocol.reset { request in
+            let url = try XCTUnwrap(request.url)
+            let response = try XCTUnwrap(
+                HTTPURLResponse(
+                    url: url,
+                    statusCode: 200,
+                    httpVersion: nil,
+                    headerFields: nil
+                )
+            )
+
+            if url.absoluteString == "https://github.com/xiaocang/ghpr-view/releases.atom" {
+                return (response, Self.releaseAtomData(tag: tag))
+            }
+
+            if url.absoluteString == "https://api.github.com/repos/xiaocang/ghpr-view/releases/tags/\(tag)" {
+                return (response, Self.releaseAssetsData(version: AppVersion(tag).description))
+            }
+
+            XCTFail("Unexpected update request URL: \(url.absoluteString)")
+            return (response, Data("{}".utf8))
+        }
+    }
+
+    @MainActor
+    private func waitForCondition(
+        timeout: TimeInterval = 2,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        _ predicate: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if predicate() {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for condition", file: file, line: line)
+    }
+
+    private static func releaseAtomData(tag: String) -> Data {
+        Data(
+            """
+            <?xml version="1.0" encoding="UTF-8"?>
+            <feed xmlns="http://www.w3.org/2005/Atom">
+              <entry>
+                <title>PR Dashboard \(AppVersion(tag).description)</title>
+                <updated>2026-05-19T00:00:00Z</updated>
+                <link href="https://github.com/xiaocang/ghpr-view/releases/tag/\(tag)" />
+                <content type="html">Bug fixes</content>
+              </entry>
+            </feed>
+            """.utf8
+        )
+    }
+
+    private static func releaseAssetsData(version: String) -> Data {
+        Data(
+            """
+            {
+              "assets": [
+                {
+                  "name": "PRDashboard-\(version).zip",
+                  "browser_download_url": "https://example.com/PRDashboard-\(version).zip",
+                  "size": 42
+                }
+              ]
+            }
+            """.utf8
+        )
+    }
+
     private func makeIndexSnapshot(
         updatedAt: Date = Date(timeIntervalSince1970: 1_713_666_108),
         headOid: String? = "abc123",
@@ -1221,6 +1356,69 @@ private final class FakeCmuxCommandRunner: CmuxCommandRunning, @unchecked Sendab
             return CmuxCommandResult(exitCode: 1, stdout: "", stderr: "missing fake result", timedOut: false)
         }
         return results.removeFirst()
+    }
+}
+
+private final class MockUpdateURLProtocol: URLProtocol {
+    typealias RequestHandler = (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    private static var handler: RequestHandler?
+    private static var recordedURLs: [URL] = []
+
+    static var requestedURLs: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedURLs
+    }
+
+    static func reset(handler: RequestHandler? = nil) {
+        lock.lock()
+        self.handler = handler
+        recordedURLs = []
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.record(request.url)
+
+        guard let handler = Self.currentHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private static var currentHandler: RequestHandler? {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler
+    }
+
+    private static func record(_ url: URL?) {
+        guard let url else { return }
+
+        lock.lock()
+        recordedURLs.append(url)
+        lock.unlock()
     }
 }
 

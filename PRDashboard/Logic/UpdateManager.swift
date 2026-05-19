@@ -81,13 +81,14 @@ final class UpdateManager: ObservableObject {
     private let latestReleaseURL = URL(string: "https://github.com/xiaocang/ghpr-view/releases.atom")!
     private let repositoryReleasesURL = URL(string: "https://github.com/xiaocang/ghpr-view/releases")!
     private let apiReleasesURL = URL(string: "https://api.github.com/repos/xiaocang/ghpr-view/releases")!
-    private let autoCheckInterval: TimeInterval = 24 * 60 * 60
-    private let initialAutoCheckDelay: TimeInterval = 10
+    private let autoCheckInterval: TimeInterval
+    private let initialAutoCheckDelay: TimeInterval
     private let lastAutoCheckKey = "PRDashboard.LastAutoUpdateCheckAt"
     private let appName = "PRDashboard"
 
     private var configuration: Configuration
     private var launchDate = Date()
+    private var launchAutomaticCheckPending = false
     private var automaticCheckTimer: Timer?
     private var checkTask: Task<Void, Never>?
     private var downloadTask: URLSessionDownloadTask?
@@ -100,13 +101,17 @@ final class UpdateManager: ObservableObject {
         bundle: Bundle = .main,
         userDefaults: UserDefaults = .standard,
         fileManager: FileManager = .default,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        autoCheckInterval: TimeInterval = 24 * 60 * 60,
+        initialAutoCheckDelay: TimeInterval = 10
     ) {
         self.configuration = configuration
         self.bundle = bundle
         self.userDefaults = userDefaults
         self.fileManager = fileManager
         self.session = session
+        self.autoCheckInterval = autoCheckInterval
+        self.initialAutoCheckDelay = initialAutoCheckDelay
         self.lastAutoCheckAt = userDefaults.object(forKey: lastAutoCheckKey) as? Date
     }
 
@@ -147,11 +152,18 @@ final class UpdateManager: ObservableObject {
             onRequestPresentation?()
         }
 
-        guard downloadTask == nil else { return }
+        guard downloadTask == nil else {
+            if !userInitiated {
+                scheduleAutomaticCheck(at: Date().addingTimeInterval(60 * 60))
+            }
+            return
+        }
 
         guard checkTask == nil else {
             if userInitiated {
                 state = .checking(userInitiated: true)
+            } else {
+                scheduleAutomaticCheck(at: Date().addingTimeInterval(60 * 60))
             }
             return
         }
@@ -646,7 +658,7 @@ final class UpdateManager: ObservableObject {
     }
 
     private var isBusyForAutomaticCheck: Bool {
-        if checkTask != nil || downloadTask != nil {
+        if downloadTask != nil {
             return true
         }
 
@@ -771,6 +783,7 @@ final class UpdateManager: ObservableObject {
     private func scheduleAutomaticCheckIfNeeded(resetLaunchDate: Bool) {
         if resetLaunchDate {
             launchDate = Date()
+            launchAutomaticCheckPending = true
         }
 
         automaticCheckTimer?.invalidate()
@@ -778,9 +791,15 @@ final class UpdateManager: ObservableObject {
 
         guard configuration.automaticallyCheckForUpdates else { return }
 
-        let launchDueDate = launchDate.addingTimeInterval(initialAutoCheckDelay)
-        let persistedDueDate = lastAutoCheckAt?.addingTimeInterval(autoCheckInterval) ?? .distantPast
-        let nextDueDate = max(launchDueDate, persistedDueDate)
+        let nextDueDate: Date
+        if launchAutomaticCheckPending {
+            nextDueDate = launchDate.addingTimeInterval(initialAutoCheckDelay)
+        } else if let lastAutoCheckAt {
+            nextDueDate = lastAutoCheckAt.addingTimeInterval(autoCheckInterval)
+        } else {
+            nextDueDate = Date()
+        }
+
         scheduleAutomaticCheck(at: nextDueDate)
     }
 
@@ -791,11 +810,21 @@ final class UpdateManager: ObservableObject {
         guard configuration.automaticallyCheckForUpdates else { return }
 
         let interval = max(date.timeIntervalSinceNow, 0.1)
-        automaticCheckTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in
+        let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in
             Task { @MainActor [weak self] in
-                self?.checkForUpdates(userInitiated: false)
+                self?.runAutomaticCheck()
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        automaticCheckTimer = timer
+    }
+
+    private func runAutomaticCheck() {
+        if launchAutomaticCheckPending {
+            launchAutomaticCheckPending = false
+        }
+
+        checkForUpdates(userInitiated: false)
     }
 
     private func updatesRootDirectory() throws -> URL {
