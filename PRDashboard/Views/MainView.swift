@@ -6,6 +6,7 @@ struct MainView: View {
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
     @State private var firstVisibleReviewStatusPRID: Int?
+    @AppStorage("PRDashboard.JiraSetupTipDismissed") private var jiraSetupTipDismissed: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -60,7 +61,7 @@ struct MainView: View {
             HStack {
                 Image(systemName: "magnifyingglass")
                     .foregroundColor(.secondary)
-                TextField("Search PRs...", text: $viewModel.searchText)
+                TextField("Search PRs (try jira: for Jira fields)", text: $viewModel.searchText)
                     .textFieldStyle(.plain)
                 if !viewModel.searchText.isEmpty {
                     Button(action: { viewModel.searchText = "" }) {
@@ -95,6 +96,45 @@ struct MainView: View {
         .padding(10)
     }
 
+    // MARK: - Tips
+
+    private var shouldShowJiraSetupTip: Bool {
+        !viewModel.isJiraConfigured && !jiraSetupTipDismissed && viewModel.hasAnyJiraTicket
+    }
+
+    private var jiraSetupTip: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "lightbulb")
+                .font(.system(size: 10))
+                .foregroundColor(.yellow)
+            Button {
+                viewModel.showSettings()
+            } label: {
+                Text("Jira tickets detected — connect Jira in Settings for titles, status, and labels")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .buttonStyle(.plain)
+            .help("Open Settings to configure Jira")
+
+            Spacer(minLength: 0)
+
+            Button {
+                jiraSetupTipDismissed = true
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Dismiss tip")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+    }
+
     // MARK: - PR List
 
     private var prListView: some View {
@@ -111,6 +151,10 @@ struct MainView: View {
                     ciRunning: viewModel.summaryCIRunning,
                     toReview: viewModel.summaryWaitingForMyReview
                 )
+
+                if shouldShowJiraSetupTip {
+                    jiraSetupTip
+                }
 
                 // My PRs section
                 if !viewModel.authoredPRs.isEmpty {
@@ -142,6 +186,9 @@ struct MainView: View {
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                                 showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
+                                jiraServerURL: viewModel.configuration.jiraServerURL,
+                                jiraMetadataEnabled: viewModel.isJiraConfigured,
+                                searchText: viewModel.searchText,
                                 onboardingManager: onboardingManager,
                                 approvalOnboardingPRID: firstVisibleApprovalPRID,
                                 reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
@@ -177,6 +224,9 @@ struct MainView: View {
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                                 showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
+                                jiraServerURL: viewModel.configuration.jiraServerURL,
+                                jiraMetadataEnabled: viewModel.isJiraConfigured,
+                                searchText: viewModel.searchText,
                                 onboardingManager: onboardingManager,
                                 approvalOnboardingPRID: firstVisibleApprovalPRID,
                                 reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
@@ -271,6 +321,9 @@ struct MainView: View {
                 showConflictStatus: showConflictStatus,
                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                 showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
+                jiraServerURL: viewModel.configuration.jiraServerURL,
+                jiraMetadataEnabled: viewModel.isJiraConfigured,
+                searchText: viewModel.searchText,
                 onboardingManager: onboardingManager,
                 approvalOnboardingPRID: firstVisibleApprovalPRID,
                 reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID

@@ -5,6 +5,43 @@ import os
 
 private let logger = Logger(subsystem: "com.prdashboard", category: "PRListViewModel")
 
+/// Parses and matches PR search queries. Shared between the ViewModel (filtering)
+/// and PRRowView (highlight rendering) so a `jira:` scope and a typed term are
+/// interpreted identically in both places.
+enum PRSearchScope {
+    static let jiraPrefix = "jira:"
+
+    enum Kind {
+        case all
+        case jira
+    }
+
+    struct Parsed {
+        let kind: Kind
+        /// Trimmed, original-case term (may be empty when the user typed only the scope prefix).
+        let term: String
+    }
+
+    static func parse(_ rawSearchText: String) -> Parsed {
+        let trimmed = rawSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.lowercased().hasPrefix(jiraPrefix) {
+            let term = String(trimmed.dropFirst(jiraPrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Parsed(kind: .jira, term: term)
+        }
+        return Parsed(kind: .all, term: trimmed)
+    }
+
+    static func contains(_ term: String, in text: String) -> Bool {
+        guard !term.isEmpty else { return false }
+        return text.range(
+            of: term,
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: .current
+        ) != nil
+    }
+}
+
 @MainActor
 final class PRListViewModel: ObservableObject {
     @Published var prList: PRList = .empty
@@ -22,6 +59,7 @@ final class PRListViewModel: ObservableObject {
     @Published private(set) var openingPRIDs: Set<Int> = []
     @Published private(set) var updatingBranchPRIDs: Set<Int> = []
     @Published private(set) var loadingHoverDetailPRIDs: Set<Int> = []
+    @Published private(set) var isJiraConfigured: Bool = false
 
     private let prManager: PRManager
     private let oauthManager: GitHubOAuthManager
@@ -129,6 +167,13 @@ final class PRListViewModel: ObservableObject {
             .removeDuplicates()
             .sink { [weak self] loadingIDs in
                 self?.loadingHoverDetailPRIDs = loadingIDs
+            }
+            .store(in: &cancellables)
+
+        prManager.$isJiraConfigured
+            .removeDuplicates()
+            .sink { [weak self] configured in
+                self?.isJiraConfigured = configured
             }
             .store(in: &cancellables)
     }
@@ -245,6 +290,30 @@ final class PRListViewModel: ObservableObject {
         set { prManager.updateConfiguration(newValue) }
     }
 
+    var hasAnyJiraTicket: Bool {
+        let lists = [prList.pullRequests, prList.mentionedPullRequests, prList.mergedPullRequests]
+        for list in lists {
+            if list.contains(where: { $0.jiraTicket?.isEmpty == false }) {
+                return true
+            }
+        }
+        return false
+    }
+
+    func updateJiraCredentials(
+        serverURL: String,
+        email: String,
+        apiToken: String,
+        refreshInterval: TimeInterval
+    ) {
+        prManager.updateJiraCredentials(
+            serverURL: serverURL,
+            email: email,
+            apiToken: apiToken,
+            refreshInterval: refreshInterval
+        )
+    }
+
     // MARK: - Actions
 
     func refresh() {
@@ -256,6 +325,7 @@ final class PRListViewModel: ObservableObject {
         PRDetailCache.shared.clear()
         MentionCache.shared.clear()
         AvatarCache.shared.clear()
+        JiraMetadataCache.shared.clear()
         prManager.refresh()
     }
 
@@ -411,16 +481,40 @@ final class PRListViewModel: ObservableObject {
     }
 
     private func filterPRs(_ prs: [PullRequest]) -> [PullRequest] {
-        guard !searchText.isEmpty else { return prs }
-
-        let query = searchText.lowercased()
-        return prs.filter { pr in
-            pr.title.lowercased().contains(query) ||
-            pr.repoFullName.lowercased().contains(query) ||
-            pr.author.lowercased().contains(query) ||
-            pr.jiraTicket?.lowercased().contains(query) == true ||
-            String(pr.number).contains(query)
+        let parsed = PRSearchScope.parse(searchText)
+        switch parsed.kind {
+        case .all:
+            guard !parsed.term.isEmpty else { return prs }
+            let term = parsed.term
+            return prs.filter { pr in
+                PRSearchScope.contains(term, in: pr.title) ||
+                PRSearchScope.contains(term, in: pr.repoFullName) ||
+                PRSearchScope.contains(term, in: pr.author) ||
+                matchesJiraFields(pr, term: term) ||
+                String(pr.number).contains(term)
+            }
+        case .jira:
+            return prs.filter { pr in
+                parsed.term.isEmpty ? hasAnyJiraField(pr) : matchesJiraFields(pr, term: parsed.term)
+            }
         }
+    }
+
+    private func hasAnyJiraField(_ pr: PullRequest) -> Bool {
+        pr.jiraTicket?.isEmpty == false ||
+            pr.jiraTitle?.isEmpty == false ||
+            pr.jiraStatusName?.isEmpty == false ||
+            pr.jiraStatusCategoryKey?.isEmpty == false ||
+            pr.jiraLabels?.isEmpty == false
+    }
+
+    private func matchesJiraFields(_ pr: PullRequest, term: String) -> Bool {
+        if let ticket = pr.jiraTicket, PRSearchScope.contains(term, in: ticket) { return true }
+        if let title = pr.jiraTitle, PRSearchScope.contains(term, in: title) { return true }
+        if let status = pr.jiraStatusName, PRSearchScope.contains(term, in: status) { return true }
+        if let category = pr.jiraStatusCategoryKey, PRSearchScope.contains(term, in: category) { return true }
+        if let labels = pr.jiraLabels, labels.contains(where: { PRSearchScope.contains(term, in: $0) }) { return true }
+        return false
     }
 
     private func groupByRepo(_ prs: [PullRequest], sortByMergedDate: Bool = false) -> [(String, [PullRequest])] {

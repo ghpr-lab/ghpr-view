@@ -17,6 +17,7 @@ final class Keychain {
     private let service = "com.xiaocang.PRDashboard"
     private let authStateKey = "github_auth_state"
     private let proxyPasswordKey = "http_proxy_password"
+    private let jiraAPITokenKey = "jira_api_token"
 
     // Legacy keys for migration
     private let legacyTokenKey = "github_token"
@@ -90,6 +91,25 @@ final class Keychain {
 
     static func deleteProxyPassword() {
         try? shared.delete(key: shared.proxyPasswordKey)
+    }
+
+    // MARK: - Jira API Token
+
+    static func saveJiraAPIToken(_ token: String) {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            try? shared.delete(key: shared.jiraAPITokenKey)
+            return
+        }
+        try? shared.save(value: trimmed, key: shared.jiraAPITokenKey)
+    }
+
+    static func loadJiraAPIToken() -> String {
+        (try? shared.load(key: shared.jiraAPITokenKey)) ?? ""
+    }
+
+    static func deleteJiraAPIToken() {
+        try? shared.delete(key: shared.jiraAPITokenKey)
     }
 
     // MARK: - Private

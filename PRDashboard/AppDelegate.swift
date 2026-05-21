@@ -26,10 +26,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 3. Create API client
         let apiClient = GitHubAPIClient(token: oauthManager?.authState.accessToken ?? "")
+        let jiraClient = JiraAPIClient()
 
         // 4. Create PR manager
         prManager = PRManager(
             apiClient: apiClient,
+            jiraClient: jiraClient,
             notificationManager: notificationManager!,
             oauthManager: oauthManager!,
             cmuxStatusProvider: CmuxBrowserRouter()
@@ -143,7 +145,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: hostingController)
             window.title = String(localized: "Settings")
             window.styleMask = [.titled, .closable]
-            window.setContentSize(NSSize(width: 450, height: 520))
+            window.setContentSize(NSSize(width: 450, height: 620))
             window.center()
             settingsWindow = window
         }

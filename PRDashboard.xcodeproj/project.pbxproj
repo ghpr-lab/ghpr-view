@@ -17,6 +17,7 @@
 		A1000008 /* StatusBarController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000008 /* StatusBarController.swift */; };
 		A1000009 /* PRManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000009 /* PRManager.swift */; };
 		A100000A /* GitHubAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000A /* GitHubAPIClient.swift */; };
+		A1000071 /* JiraAPIClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000071 /* JiraAPIClient.swift */; };
 		A100000B /* NotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000B /* NotificationManager.swift */; };
 		A100000C /* PullRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000C /* PullRequest.swift */; };
 		A100000D /* ReviewThread.swift in Sources */ = {isa = PBXBuildFile; fileRef = A200000D /* ReviewThread.swift */; };
@@ -78,6 +79,7 @@
 		A2000008 /* StatusBarController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarController.swift; sourceTree = "<group>"; };
 		A2000009 /* PRManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRManager.swift; sourceTree = "<group>"; };
 		A200000A /* GitHubAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubAPIClient.swift; sourceTree = "<group>"; };
+		A2000071 /* JiraAPIClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JiraAPIClient.swift; sourceTree = "<group>"; };
 		A200000B /* NotificationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NotificationManager.swift; sourceTree = "<group>"; };
 		A200000C /* PullRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PullRequest.swift; sourceTree = "<group>"; };
 		A200000D /* ReviewThread.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReviewThread.swift; sourceTree = "<group>"; };
@@ -182,6 +184,7 @@
 				A2000008 /* StatusBarController.swift */,
 				A2000009 /* PRManager.swift */,
 				A200000A /* GitHubAPIClient.swift */,
+				A2000071 /* JiraAPIClient.swift */,
 				A200000B /* NotificationManager.swift */,
 				A2000070 /* PRLinkOpener.swift */,
 				A2000012 /* GitHubOAuthManager.swift */,
@@ -468,6 +471,7 @@
 				A1000008 /* StatusBarController.swift in Sources */,
 				A1000009 /* PRManager.swift in Sources */,
 				A100000A /* GitHubAPIClient.swift in Sources */,
+				A1000071 /* JiraAPIClient.swift in Sources */,
 				A100000B /* NotificationManager.swift in Sources */,
 				A1000070 /* PRLinkOpener.swift in Sources */,
 				C1000001 /* LocalAPIModels.swift in Sources */,

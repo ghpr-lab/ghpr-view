@@ -26,6 +26,9 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(configuration.ciStatusExcludeFilter, "lint")
         XCTAssertTrue(configuration.automaticallyCheckForUpdates)
         XCTAssertFalse(configuration.openAtCmuxFirst)
+        XCTAssertEqual(configuration.jiraServerURL, "")
+        XCTAssertEqual(configuration.jiraEmail, "")
+        XCTAssertEqual(configuration.jiraRefreshInterval, 1800)
     }
 
     func testConfigurationDecodesOpenAtCmuxFirst() throws {
@@ -674,7 +677,7 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertFalse(cached.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
     }
 
-    func testKongStyleRunningToFailureSnapshotChangeCausesCacheMiss() {
+    func testRunningToFailureSnapshotChangeCausesCacheMiss() {
         let updatedAt = Date(timeIntervalSince1970: 1_713_666_108)
         let headOid = "f574918fa04b0c7ac49de5b1f3876c430d16e81c"
         let pendingSnapshot = makeIndexSnapshot(
@@ -746,7 +749,7 @@ final class UpdateLogicTests: XCTestCase {
 
     func testPlaceholderPreservesVisibleJiraAndApprovalsWithoutDetailCache() {
         var visible = makePullRequest(id: 18001, number: 18001, category: .authored)
-        visible.jiraTicket = "AG-1234"
+        visible.jiraTicket = "EG-1234"
         visible.approvalCount = 2
         visible.approvalAuthors = ["alice", "bob"]
         visible.reviewThreads = [makeReviewThread(id: "thread-1", isRead: true)]
@@ -759,7 +762,7 @@ final class UpdateLogicTests: XCTestCase {
 
         let placeholder = indexed.placeholderPullRequest(preserving: visible)
 
-        XCTAssertEqual(placeholder.jiraTicket, "AG-1234")
+        XCTAssertEqual(placeholder.jiraTicket, "EG-1234")
         XCTAssertEqual(placeholder.approvalCount, 2)
         XCTAssertEqual(placeholder.approvalAuthors, ["alice", "bob"])
         XCTAssertEqual(placeholder.reviewThreads.count, 1)
@@ -773,7 +776,7 @@ final class UpdateLogicTests: XCTestCase {
         cached.approvalAuthors = nil
 
         var visible = makePullRequest(id: cached.id, number: cached.number, category: .authored)
-        visible.jiraTicket = "KAG-456"
+        visible.jiraTicket = "FOO-456"
         visible.approvalCount = 2
         visible.approvalAuthors = ["reviewer"]
 
@@ -785,7 +788,7 @@ final class UpdateLogicTests: XCTestCase {
 
         let placeholder = indexed.placeholderPullRequest(using: cached, preserving: visible)
 
-        XCTAssertEqual(placeholder.jiraTicket, "KAG-456")
+        XCTAssertEqual(placeholder.jiraTicket, "FOO-456")
         XCTAssertEqual(placeholder.approvalCount, 2)
         XCTAssertEqual(placeholder.approvalAuthors, ["reviewer"])
     }
@@ -812,8 +815,8 @@ final class UpdateLogicTests: XCTestCase {
     func testCompareURLEncodesBranchSlashAsSinglePathComponent() throws {
         let url = try XCTUnwrap(
             GitHubAPIClient.compareURL(
-                owner: "Kong",
-                repo: "kong-ee",
+                owner: "octocat",
+                repo: "example-repo",
                 base: "master",
                 head: "fix/mcp-oauth2-jwt"
             )
@@ -821,12 +824,12 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertEqual(
             url.absoluteString,
-            "https://api.github.com/repos/Kong/kong-ee/compare/master...fix%2Fmcp-oauth2-jwt"
+            "https://api.github.com/repos/octocat/example-repo/compare/master...fix%2Fmcp-oauth2-jwt"
         )
     }
 
     @MainActor
-    func testPRListViewModelSearchMatchesJiraTicketsAcrossOpenAndMergedPRs() {
+    func testPRListViewModelSearchMatchesJiraTicketsAndMetadataAcrossSections() {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
@@ -839,16 +842,21 @@ final class UpdateLogicTests: XCTestCase {
             linkOpener: FakePRLinkOpening(opensAtCmuxFirst: false)
         )
         var matchingOpen = makePullRequest(id: 18004, number: 101, category: .authored)
-        matchingOpen.jiraTicket = "AG-1234"
+        matchingOpen.jiraTicket = "EG-1234"
+        matchingOpen.jiraTitle = "Release dashboard cleanup"
+        matchingOpen.jiraLabels = ["2.0", "release"]
         var nonMatchingOpen = makePullRequest(id: 18005, number: 102, category: .authored)
-        nonMatchingOpen.jiraTicket = "KAG-456"
+        nonMatchingOpen.jiraTicket = "FOO-456"
+        var matchingMentioned = makePullRequest(id: 18008, number: 105, category: .mentioned)
+        matchingMentioned.jiraTicket = "EG-105"
+        matchingMentioned.jiraStatusName = "In Progress"
         var matchingMerged = makePullRequest(
             id: 18006,
             number: 103,
             category: .authored,
             mergedAt: Date().addingTimeInterval(-60)
         )
-        matchingMerged.jiraTicket = "AG-1234"
+        matchingMerged.jiraTicket = "EG-1234"
         var nonMatchingMerged = makePullRequest(
             id: 18007,
             number: 104,
@@ -860,6 +868,7 @@ final class UpdateLogicTests: XCTestCase {
         viewModel.prList = PRList(
             lastUpdated: Date(),
             pullRequests: [matchingOpen, nonMatchingOpen],
+            mentionedPullRequests: [matchingMentioned],
             mergedPullRequests: [matchingMerged, nonMatchingMerged],
             isLoading: false,
             error: nil
@@ -868,6 +877,224 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertEqual(viewModel.filteredPRs.map(\.id), [matchingOpen.id])
         XCTAssertEqual(viewModel.mergedLast24hPRs.map(\.id), [matchingMerged.id])
+
+        viewModel.searchText = "2.0"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [matchingOpen.id])
+
+        viewModel.searchText = "progress"
+        XCTAssertEqual(viewModel.mentionedPRs.map(\.id), [matchingMentioned.id])
+
+        viewModel.searchText = "jira:dashboard"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [matchingOpen.id])
+
+        viewModel.searchText = "jira:tester"
+        XCTAssertTrue(viewModel.filteredPRs.isEmpty)
+    }
+
+    func testPullRequestDecodesWhenJiraMetadataFieldsAreMissing() throws {
+        let pr = makePullRequest(id: 18100, number: 201, category: .authored)
+        let data = try JSONEncoder().encode(pr)
+
+        let decoded = try JSONDecoder().decode(PullRequest.self, from: data)
+
+        XCTAssertEqual(decoded.id, pr.id)
+        XCTAssertNil(decoded.jiraTitle)
+        XCTAssertNil(decoded.jiraLabels)
+        XCTAssertNil(decoded.jiraStatusName)
+        XCTAssertNil(decoded.jiraMetadataFetchedAt)
+    }
+
+    func testJiraAPIClientParsesLabelsStatusAndUpdated() async throws {
+        let suiteName = "PRDashboardTests.Jira.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let cache = JiraMetadataCache(defaults: defaults)
+        let client = JiraAPIClient(session: Self.makeMockJiraSession(), cache: cache)
+        let expectedAuth = "Basic \(Data("me@example.com:token".utf8).base64EncodedString())"
+        MockJiraURLProtocol.reset { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.url?.absoluteString, "https://example.atlassian.net/rest/api/3/search/jql")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), expectedAuth)
+
+            let data = """
+            {
+              "issues": [
+                {
+                  "key": "EG-123",
+                  "fields": {
+                    "summary": "Release dashboard cleanup",
+                    "labels": ["2.0", "release"],
+                    "status": {
+                      "name": "In Progress",
+                      "statusCategory": { "key": "indeterminate" }
+                    },
+                    "updated": "2026-05-20T13:14:15.123+0000"
+                  }
+                }
+              ]
+            }
+            """.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 200), data)
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        let metadata = try await client.fetchMetadata(
+            for: ["EG-123"],
+            serverURL: "https://example.atlassian.net",
+            email: "me@example.com",
+            apiToken: "token",
+            refreshInterval: 900
+        )
+
+        let issue = try XCTUnwrap(metadata["EG-123"])
+        XCTAssertEqual(issue.title, "Release dashboard cleanup")
+        XCTAssertEqual(issue.labels, ["2.0", "release"])
+        XCTAssertEqual(issue.statusName, "In Progress")
+        XCTAssertEqual(issue.statusCategoryKey, "indeterminate")
+        XCTAssertNotNil(issue.updatedAt)
+    }
+
+    func testJiraAPIClientTestConnectionUsesMyselfEndpoint() async throws {
+        let client = JiraAPIClient(session: Self.makeMockJiraSession())
+        let expectedAuth = "Basic \(Data("me@example.com:token".utf8).base64EncodedString())"
+        MockJiraURLProtocol.reset { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.absoluteString, "https://example.atlassian.net/rest/api/3/myself")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), expectedAuth)
+
+            let data = """
+            {
+              "displayName": "Jiahao Wang",
+              "emailAddress": "jiahao@example.com"
+            }
+            """.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 200), data)
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        let result = try await client.testConnection(
+            serverURL: "https://example.atlassian.net",
+            email: "me@example.com",
+            apiToken: "token"
+        )
+
+        XCTAssertEqual(result.displayName, "Jiahao Wang")
+        XCTAssertEqual(result.emailAddress, "jiahao@example.com")
+    }
+
+    func testJiraAPIClientTestConnectionRejectsUnauthorized() async throws {
+        let client = JiraAPIClient(session: Self.makeMockJiraSession())
+        MockJiraURLProtocol.reset { request in
+            (Self.httpResponse(for: request, statusCode: 401), Data())
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        do {
+            _ = try await client.testConnection(
+                serverURL: "https://example.atlassian.net",
+                email: "me@example.com",
+                apiToken: "bad-token"
+            )
+            XCTFail("Expected unauthorized Jira test connection to throw")
+        } catch JiraAPIError.unauthorized {
+            XCTAssertEqual(MockJiraURLProtocol.requestedURLs.count, 1)
+        } catch {
+            XCTFail("Expected JiraAPIError.unauthorized, got \(error)")
+        }
+    }
+
+    func testJiraAPIClientUsesFreshCacheWithoutNetworkRequest() async throws {
+        let suiteName = "PRDashboardTests.Jira.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let cache = JiraMetadataCache(defaults: defaults)
+        let now = Date()
+        let cached = JiraIssueMetadata(
+            key: "EG-123",
+            labels: ["2.0"],
+            statusName: "Done",
+            statusCategoryKey: "done",
+            updatedAt: nil,
+            fetchedAt: now
+        )
+        cache.save(["EG-123": cached], serverURL: "https://example.atlassian.net")
+
+        let client = JiraAPIClient(session: Self.makeMockJiraSession(), cache: cache)
+        MockJiraURLProtocol.reset { request in
+            XCTFail("Fresh Jira cache should avoid a network request: \(String(describing: request.url))")
+            return (Self.httpResponse(for: request, statusCode: 500), Data())
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        let metadata = try await client.fetchMetadata(
+            for: ["EG-123"],
+            serverURL: "https://example.atlassian.net",
+            email: "me@example.com",
+            apiToken: "token",
+            refreshInterval: 3600,
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(metadata["EG-123"], cached)
+        XCTAssertTrue(MockJiraURLProtocol.requestedURLs.isEmpty)
+    }
+
+    func testJiraAPIClientReturnsEmptyMetadataForMissingIssue() async throws {
+        let suiteName = "PRDashboardTests.Jira.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let client = JiraAPIClient(
+            session: Self.makeMockJiraSession(),
+            cache: JiraMetadataCache(defaults: defaults)
+        )
+        MockJiraURLProtocol.reset { request in
+            let data = #"{"issues":[]}"#.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 200), data)
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        let metadata = try await client.fetchMetadata(
+            for: ["EG-404"],
+            serverURL: "https://example.atlassian.net",
+            email: "me@example.com",
+            apiToken: "token",
+            refreshInterval: 900
+        )
+
+        let issue = try XCTUnwrap(metadata["EG-404"])
+        XCTAssertEqual(issue.labels, [])
+        XCTAssertNil(issue.statusName)
+        XCTAssertNil(issue.statusCategoryKey)
+    }
+
+    func testJiraAPIClientSkipsFetchWhenAuthIsIncomplete() async throws {
+        let suiteName = "PRDashboardTests.Jira.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let client = JiraAPIClient(
+            session: Self.makeMockJiraSession(),
+            cache: JiraMetadataCache(defaults: defaults)
+        )
+        MockJiraURLProtocol.reset { request in
+            XCTFail("Incomplete Jira auth should not hit the network: \(String(describing: request.url))")
+            return (Self.httpResponse(for: request, statusCode: 500), Data())
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        let metadata = try await client.fetchMetadata(
+            for: ["EG-123"],
+            serverURL: "https://example.atlassian.net",
+            email: "me@example.com",
+            apiToken: "",
+            refreshInterval: 900
+        )
+
+        XCTAssertTrue(metadata.isEmpty)
+        XCTAssertTrue(MockJiraURLProtocol.requestedURLs.isEmpty)
     }
 
     @MainActor
@@ -928,6 +1155,21 @@ final class UpdateLogicTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockUpdateURLProtocol.self]
         return URLSession(configuration: configuration)
+    }
+
+    private static func makeMockJiraSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockJiraURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private static func httpResponse(for request: URLRequest, statusCode: Int) -> HTTPURLResponse {
+        HTTPURLResponse(
+            url: request.url ?? URL(string: "https://example.com")!,
+            statusCode: statusCode,
+            httpVersion: nil,
+            headerFields: nil
+        )!
     }
 
     private func installMockReleaseResponses(tag: String = "v999.0.0") {
@@ -1360,6 +1602,69 @@ private final class FakeCmuxCommandRunner: CmuxCommandRunning, @unchecked Sendab
 }
 
 private final class MockUpdateURLProtocol: URLProtocol {
+    typealias RequestHandler = (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    private static var handler: RequestHandler?
+    private static var recordedURLs: [URL] = []
+
+    static var requestedURLs: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recordedURLs
+    }
+
+    static func reset(handler: RequestHandler? = nil) {
+        lock.lock()
+        self.handler = handler
+        recordedURLs = []
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.record(request.url)
+
+        guard let handler = Self.currentHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private static var currentHandler: RequestHandler? {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler
+    }
+
+    private static func record(_ url: URL?) {
+        guard let url else { return }
+
+        lock.lock()
+        recordedURLs.append(url)
+        lock.unlock()
+    }
+}
+
+private final class MockJiraURLProtocol: URLProtocol {
     typealias RequestHandler = (URLRequest) throws -> (HTTPURLResponse, Data)
 
     private static let lock = NSLock()

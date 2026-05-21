@@ -131,6 +131,12 @@ struct IndexedPR {
             changesRequestedCount: changesRequestedCount,
             ciExtendedInfo: existing?.ciExtendedInfo ?? visible?.ciExtendedInfo,
             jiraTicket: existing?.jiraTicket ?? visible?.jiraTicket,
+            jiraTitle: existing?.jiraTitle ?? visible?.jiraTitle,
+            jiraLabels: existing?.jiraLabels ?? visible?.jiraLabels,
+            jiraStatusName: existing?.jiraStatusName ?? visible?.jiraStatusName,
+            jiraStatusCategoryKey: existing?.jiraStatusCategoryKey ?? visible?.jiraStatusCategoryKey,
+            jiraUpdatedAt: existing?.jiraUpdatedAt ?? visible?.jiraUpdatedAt,
+            jiraMetadataFetchedAt: existing?.jiraMetadataFetchedAt ?? visible?.jiraMetadataFetchedAt,
             isOpenInCmux: visible?.isOpenInCmux ?? existing?.isOpenInCmux
         )
     }
@@ -3471,13 +3477,28 @@ final class GitHubAPIClient: ObservableObject {
             return cache
         }
 
-        logger.info("Fetching Jira tickets for \(uncached.count) uncached PRs")
+        var bodyLookupPRs: [PullRequest] = []
+        for pr in uncached {
+            let key = Self.jiraCacheKey(for: pr)
+            if let ticket = Self.extractJiraTicket(from: pr.title) {
+                cache[key] = ticket
+            } else {
+                bodyLookupPRs.append(pr)
+            }
+        }
+
+        if bodyLookupPRs.isEmpty {
+            Self.saveJiraCache(cache)
+            return cache
+        }
+
+        logger.info("Fetching Jira tickets for \(bodyLookupPRs.count) uncached PR bodies")
 
         // Batch into groups of 20 to avoid overly large queries
         let batchSize = 20
-        for batch in stride(from: 0, to: uncached.count, by: batchSize) {
-            let end = min(batch + batchSize, uncached.count)
-            let slice = Array(uncached[batch..<end])
+        for batch in stride(from: 0, to: bodyLookupPRs.count, by: batchSize) {
+            let end = min(batch + batchSize, bodyLookupPRs.count)
+            let slice = Array(bodyLookupPRs[batch..<end])
 
             // Build batched GraphQL query using aliases
             var queryParts: [String] = []

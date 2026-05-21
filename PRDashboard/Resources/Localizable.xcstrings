@@ -446,6 +446,36 @@
         }
       }
     },
+    "Jira tickets detected — connect Jira in Settings for titles, status, and labels": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "检测到 Jira ticket — 在设置中连接 Jira 可显示标题、状态和标签"
+          }
+        }
+      }
+    },
+    "Open Settings to configure Jira": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开设置配置 Jira"
+          }
+        }
+      }
+    },
+    "Dismiss tip": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭提示"
+          }
+        }
+      }
+    },
     "Auto-retry CI (3x)": {
       "localizations": {
         "zh-Hans": {
@@ -746,6 +776,16 @@
         }
       }
     },
+    "Failed to parse Jira response: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "解析 Jira 响应失败：%1$@"
+          }
+        }
+      }
+    },
     "Failure fallback (3/5)": {},
     "Failure running (2/3wf·5)": {},
     "If the same PR is already open in cmux, switch to it and reload it. Otherwise, open the PR in your default browser.\n\nRequires cmux → Settings → Socket Control set to “Automation” (the default “cmux only” rejects connections from other apps).": {
@@ -988,12 +1028,42 @@
         }
       }
     },
+    "Atlassian email": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Atlassian 邮箱"
+          }
+        }
+      }
+    },
     "Invalid GitHub token. Please check your settings.": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "GitHub 令牌无效，请检查设置。"
+          }
+        }
+      }
+    },
+    "Invalid Jira email or API token": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 邮箱或 API token 无效"
+          }
+        }
+      }
+    },
+    "Invalid Jira server URL": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 服务器 URL 无效"
           }
         }
       }
@@ -1008,12 +1078,122 @@
         }
       }
     },
+    "Invalid response from Jira": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 返回了无效响应"
+          }
+        }
+      }
+    },
+    "Jira": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira"
+          }
+        }
+      }
+    },
+    "Jira API token": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira API token"
+          }
+        }
+      }
+    },
+    "Jira Cloud server URL, for example https://company.atlassian.net. Leave empty to disable Jira label and status enrichment.": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira Cloud 服务器 URL，例如 https://company.atlassian.net。留空则关闭 Jira label 和状态补充。"
+          }
+        }
+      }
+    },
+    "Jira Refresh Interval": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 刷新间隔"
+          }
+        }
+      }
+    },
+    "Jira connected": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 已连接"
+          }
+        }
+      }
+    },
+    "Jira connection failed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 连接失败"
+          }
+        }
+      }
+    },
+    "Jira network error: %@": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 网络错误：%1$@"
+          }
+        }
+      }
+    },
+    "Jira request failed (HTTP %lld)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 请求失败（HTTP %1$lld）"
+          }
+        }
+      }
+    },
+    "Jira server": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira 服务器"
+          }
+        }
+      }
+    },
     "Launch at login": {
       "localizations": {
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
             "value": "登录时启动"
+          }
+        }
+      }
+    },
+    "Loading": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加载中"
           }
         }
       }
@@ -1164,6 +1344,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "在浏览器中打开"
+          }
+        }
+      }
+    },
+    "Open Jira issue": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开 Jira issue"
           }
         }
       }
@@ -1406,6 +1596,16 @@
         }
       }
     },
+    "Search PRs (try jira: for Jira fields)": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索 PR（可用 jira: 前缀搜索 Jira 字段）"
+          }
+        }
+      }
+    },
     "Settings": {
       "localizations": {
         "zh-Hans": {
@@ -1544,6 +1744,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "令牌无效或已过期"
+          }
+        }
+      }
+    },
+    "Test Jira Connection": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "测试 Jira 连接"
+          }
+        }
+      }
+    },
+    "Testing Jira connection...": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在测试 Jira 连接..."
           }
         }
       }

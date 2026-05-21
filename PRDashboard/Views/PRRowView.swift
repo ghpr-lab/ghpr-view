@@ -39,6 +39,9 @@ struct PRRowView: View {
     var showConflictStatus: Bool = true
     var showMyReviewStatus: Bool = false
     var showCmuxStatus: Bool = false
+    var jiraServerURL: String = ""
+    var jiraMetadataEnabled: Bool = false
+    var searchText: String = ""
     var onboardingManager: OnboardingManager? = nil
     var approvalOnboardingPRID: Int? = nil
     var reviewStatusOnboardingPRID: Int? = nil
@@ -48,6 +51,43 @@ struct PRRowView: View {
 
     private var updateBranchWithRebaseAction: (() -> Void)? {
         pr.category == .authored ? onUpdateBranchWithRebase : nil
+    }
+
+    private var searchHighlightQuery: String {
+        PRSearchScope.parse(searchText).term
+    }
+
+    private var searchMatchContext: PRSearchMatchContext? {
+        let query = searchHighlightQuery
+        guard !query.isEmpty else { return nil }
+
+        let visibleValues = [
+            pr.repoFullName,
+            "#\(pr.number)",
+            String(pr.number),
+            pr.title,
+            pr.author,
+            pr.jiraTicket ?? ""
+        ]
+        guard !visibleValues.contains(where: { PRSearchScope.contains(query, in: $0) }) else {
+            return nil
+        }
+
+        let hiddenCandidates: [(String, String?)] = [
+            ("Jira", pr.jiraTitle),
+            ("Jira status", pr.jiraStatusName),
+            ("Jira status category", pr.jiraStatusCategoryKey)
+        ]
+        for (label, value) in hiddenCandidates {
+            if let value, PRSearchScope.contains(query, in: value) {
+                return PRSearchMatchContext(label: label, value: value)
+            }
+        }
+        if let labelMatch = pr.jiraLabels?.first(where: { PRSearchScope.contains(query, in: $0) }) {
+            return PRSearchMatchContext(label: "Jira label", value: labelMatch)
+        }
+
+        return nil
     }
 
     private var timeDisplay: String {
@@ -77,16 +117,16 @@ struct PRRowView: View {
                             .foregroundColor(.orange)
                     }
 
-                    Text(pr.repoFullName)
+                    SearchHighlightedText(text: pr.repoFullName, query: searchHighlightQuery)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
 
-                    Text("#\(pr.number)")
+                    SearchHighlightedText(text: "#\(pr.number)", query: searchHighlightQuery)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.secondary)
 
                     if let ticket = pr.jiraTicket {
-                        Text(ticket)
+                        SearchHighlightedText(text: ticket, query: searchHighlightQuery)
                             .font(.system(size: 10, weight: .medium))
                             .foregroundColor(.blue)
                             .padding(.horizontal, 5)
@@ -113,7 +153,7 @@ struct PRRowView: View {
                 }
 
                 // PR title
-                Text(pr.title)
+                SearchHighlightedText(text: pr.title, query: searchHighlightQuery)
                     .font(.system(size: 13))
                     .lineLimit(2)
                     .foregroundColor(.primary)
@@ -122,12 +162,18 @@ struct PRRowView: View {
                         onUpdateBranchWithRebase: updateBranchWithRebaseAction,
                         onLoadHoverDetail: onLoadHoverDetail,
                         isUpdatingBranch: isUpdatingBranch,
-                        isLoadingHoverDetail: isLoadingHoverDetail
+                        isLoadingHoverDetail: isLoadingHoverDetail,
+                        jiraServerURL: jiraServerURL,
+                        jiraMetadataEnabled: jiraMetadataEnabled
                     )
+
+                if let searchMatchContext {
+                    SearchMatchContextView(context: searchMatchContext, query: searchHighlightQuery)
+                }
 
                 // Author and badges
                 HStack(spacing: 6) {
-                    Text(pr.author)
+                    SearchHighlightedText(text: pr.author, query: searchHighlightQuery)
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
 
@@ -309,6 +355,71 @@ struct PRRowView: View {
     }
 }
 
+private struct PRSearchMatchContext {
+    let label: String
+    let value: String
+}
+
+private struct SearchMatchContextView: View {
+    let context: PRSearchMatchContext
+    let query: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(.secondary)
+
+            Text("\(context.label):")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.secondary)
+
+            SearchHighlightedText(text: context.value, query: query)
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+    }
+}
+
+private struct SearchHighlightedText: View {
+    let text: String
+    let query: String
+
+    @ViewBuilder
+    var body: some View {
+        if query.isEmpty {
+            Text(text)
+        } else {
+            Text(PRSearchHighlight.attributedString(text, query: query))
+        }
+    }
+}
+
+private enum PRSearchHighlight {
+    static func attributedString(_ text: String, query: String) -> AttributedString {
+        var attributed = AttributedString(text)
+        guard !query.isEmpty else { return attributed }
+
+        var searchStart = text.startIndex
+        while searchStart < text.endIndex,
+              let range = text.range(
+                of: query,
+                options: [.caseInsensitive, .diacriticInsensitive],
+                range: searchStart..<text.endIndex,
+                locale: .current
+              ) {
+            if let attributedRange = Range(range, in: attributed) {
+                attributed[attributedRange].backgroundColor = Color.yellow.opacity(0.45)
+            }
+            searchStart = range.upperBound
+        }
+
+        return attributed
+    }
+}
+
 #if DEBUG
 struct PRRowView_Previews: PreviewProvider {
     static var previews: some View {
@@ -347,7 +458,7 @@ struct PRRowView_Previews: PreviewProvider {
                     myThreadsAllResolved: false,
                     approvalCount: 2,
                     changesRequestedCount: 0,
-                    jiraTicket: "AG-1234"
+                    jiraTicket: "EG-1234"
                 ),
                 onOpen: {},
                 onCopyURL: {}
@@ -436,11 +547,16 @@ private enum PRHoverDetailMetrics {
         pr.unresolvedCount > 0 ? rowHeight : 0
     }
 
+    static func jiraRowHeight(for pr: PullRequest) -> CGFloat {
+        pr.jiraTicket == nil ? 0 : rowHeight
+    }
+
     static func cardHeight(for pr: PullRequest) -> CGFloat {
         let checksHeight = checksRowHeight(for: pr)
         let unresolvedHeight = unresolvedRowHeight(for: pr)
-        let rowCount = 2 + (unresolvedHeight > 0 ? 1 : 0) + (checksHeight > 0 ? 1 : 0)
-        let rowsHeight = rowHeight * 2 + unresolvedHeight + checksHeight
+        let jiraHeight = jiraRowHeight(for: pr)
+        let rowCount = 2 + (jiraHeight > 0 ? 1 : 0) + (unresolvedHeight > 0 ? 1 : 0) + (checksHeight > 0 ? 1 : 0)
+        let rowsHeight = rowHeight * 2 + jiraHeight + unresolvedHeight + checksHeight
         return rowsHeight + CGFloat(max(rowCount - 1, 0)) * rowSpacing + verticalPadding * 2
     }
 
@@ -477,14 +593,18 @@ private extension View {
         onUpdateBranchWithRebase: (() -> Void)?,
         onLoadHoverDetail: (() -> Void)?,
         isUpdatingBranch: Bool,
-        isLoadingHoverDetail: Bool
+        isLoadingHoverDetail: Bool,
+        jiraServerURL: String,
+        jiraMetadataEnabled: Bool
     ) -> some View {
         background(PRHoverDetailTrackingArea(
             pr: pr,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             onLoadHoverDetail: onLoadHoverDetail,
             isUpdatingBranch: isUpdatingBranch,
-            isLoadingHoverDetail: isLoadingHoverDetail
+            isLoadingHoverDetail: isLoadingHoverDetail,
+            jiraServerURL: jiraServerURL,
+            jiraMetadataEnabled: jiraMetadataEnabled
         ))
     }
 }
@@ -495,6 +615,8 @@ private struct PRHoverDetailTrackingArea: NSViewRepresentable {
     let onLoadHoverDetail: (() -> Void)?
     let isUpdatingBranch: Bool
     let isLoadingHoverDetail: Bool
+    let jiraServerURL: String
+    let jiraMetadataEnabled: Bool
 
     func makeNSView(context: Context) -> PRHoverDetailTrackingView {
         let view = PRHoverDetailTrackingView()
@@ -503,7 +625,9 @@ private struct PRHoverDetailTrackingArea: NSViewRepresentable {
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             onLoadHoverDetail: onLoadHoverDetail,
             isUpdatingBranch: isUpdatingBranch,
-            isLoadingHoverDetail: isLoadingHoverDetail
+            isLoadingHoverDetail: isLoadingHoverDetail,
+            jiraServerURL: jiraServerURL,
+            jiraMetadataEnabled: jiraMetadataEnabled
         )
         return view
     }
@@ -514,7 +638,9 @@ private struct PRHoverDetailTrackingArea: NSViewRepresentable {
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             onLoadHoverDetail: onLoadHoverDetail,
             isUpdatingBranch: isUpdatingBranch,
-            isLoadingHoverDetail: isLoadingHoverDetail
+            isLoadingHoverDetail: isLoadingHoverDetail,
+            jiraServerURL: jiraServerURL,
+            jiraMetadataEnabled: jiraMetadataEnabled
         )
     }
 }
@@ -525,6 +651,8 @@ private final class PRHoverDetailTrackingView: NSView {
     private var onLoadHoverDetail: (() -> Void)?
     private var isUpdatingBranch = false
     private var isLoadingHoverDetail = false
+    private var jiraServerURL = ""
+    private var jiraMetadataEnabled = false
 
     private var trackingArea: NSTrackingArea?
     private var hoverTask: Task<Void, Never>?
@@ -536,7 +664,9 @@ private final class PRHoverDetailTrackingView: NSView {
         onUpdateBranchWithRebase: (() -> Void)?,
         onLoadHoverDetail: (() -> Void)?,
         isUpdatingBranch: Bool,
-        isLoadingHoverDetail: Bool
+        isLoadingHoverDetail: Bool,
+        jiraServerURL: String,
+        jiraMetadataEnabled: Bool
     ) {
         let prChanged = self.pr?.id != pr.id
         self.pr = pr
@@ -544,6 +674,8 @@ private final class PRHoverDetailTrackingView: NSView {
         self.onLoadHoverDetail = onLoadHoverDetail
         self.isUpdatingBranch = isUpdatingBranch
         self.isLoadingHoverDetail = isLoadingHoverDetail
+        self.jiraServerURL = jiraServerURL
+        self.jiraMetadataEnabled = jiraMetadataEnabled
 
         if prChanged, isHovered {
             didRequestHoverDetail = false
@@ -619,7 +751,9 @@ private final class PRHoverDetailTrackingView: NSView {
             ownerID: ownerID,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             isUpdatingBranch: isUpdatingBranch,
-            isLoadingHoverDetail: isLoadingHoverDetail
+            isLoadingHoverDetail: isLoadingHoverDetail,
+            jiraServerURL: jiraServerURL,
+            jiraMetadataEnabled: jiraMetadataEnabled
         )
     }
 
@@ -665,7 +799,9 @@ private final class PRHoverDetailPanelController {
         ownerID: ObjectIdentifier,
         onUpdateBranchWithRebase: (() -> Void)?,
         isUpdatingBranch: Bool,
-        isLoadingHoverDetail: Bool
+        isLoadingHoverDetail: Bool,
+        jiraServerURL: String,
+        jiraMetadataEnabled: Bool
     ) {
         guard let placement = placement(for: anchorView, pr: pr) else { return }
         let wasVisible = visibleOwnerID != nil
@@ -683,7 +819,9 @@ private final class PRHoverDetailPanelController {
             size: placement.frame.size,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             isUpdatingBranch: isUpdatingBranch,
-            isLoadingHoverDetail: isLoadingHoverDetail
+            isLoadingHoverDetail: isLoadingHoverDetail,
+            jiraServerURL: jiraServerURL,
+            jiraMetadataEnabled: jiraMetadataEnabled
         )
 
         let panel = panel ?? makePanel()
@@ -961,6 +1099,8 @@ private struct PRHoverDetailPanelView: View {
     let onUpdateBranchWithRebase: (() -> Void)?
     let isUpdatingBranch: Bool
     let isLoadingHoverDetail: Bool
+    let jiraServerURL: String
+    let jiraMetadataEnabled: Bool
 
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
 
@@ -999,7 +1139,9 @@ private struct PRHoverDetailPanelView: View {
             pr: pr,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             isUpdatingBranch: isUpdatingBranch,
-            isLoadingHoverDetail: isLoadingHoverDetail
+            isLoadingHoverDetail: isLoadingHoverDetail,
+            jiraServerURL: jiraServerURL,
+            jiraMetadataEnabled: jiraMetadataEnabled
         )
             .padding(.horizontal, 12)
             .padding(.vertical, PRHoverDetailMetrics.verticalPadding)
@@ -1011,10 +1153,15 @@ private struct PRHoverDetailInfoTable: View {
     let onUpdateBranchWithRebase: (() -> Void)?
     let isUpdatingBranch: Bool
     let isLoadingHoverDetail: Bool
+    let jiraServerURL: String
+    let jiraMetadataEnabled: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: PRHoverDetailMetrics.rowSpacing) {
             baseRow
+            if pr.jiraTicket != nil {
+                jiraRow
+            }
             reviewsRow
             if pr.unresolvedCount > 0 {
                 unresolvedRow
@@ -1066,6 +1213,37 @@ private struct PRHoverDetailInfoTable: View {
                     .help("Update with rebase")
                 }
             }
+        }
+    }
+
+    private var jiraRow: some View {
+        PRHoverDetailRow(label: "Jira") {
+            HStack(spacing: 6) {
+                jiraTicketView
+
+                if let statusName = pr.jiraStatusName?.nonEmpty {
+                    jiraStatusView(statusName)
+                } else if jiraMetadataIsLoading {
+                    HStack(spacing: 5) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .scaleEffect(0.45)
+                            .frame(width: 11, height: 11)
+                        Text("Loading")
+                            .font(valueFont)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                ForEach(visibleJiraLabels, id: \.self) { label in
+                    PRHoverDetailChip(text: label, color: .blue)
+                }
+
+                if hiddenJiraLabelCount > 0 {
+                    PRHoverDetailChip(text: "+\(hiddenJiraLabelCount)", color: .secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -1160,6 +1338,73 @@ private struct PRHoverDetailInfoTable: View {
 
     private var baseBranchText: String {
         pr.baseRefName?.isEmpty == false ? pr.baseRefName! : "unknown"
+    }
+
+    private var jiraIssueURL: URL? {
+        JiraAPIClient.issueURL(serverURL: jiraServerURL, issueKey: pr.jiraTicket)
+    }
+
+    private var jiraMetadataIsLoading: Bool {
+        jiraMetadataEnabled && pr.jiraTicket != nil && pr.jiraMetadataFetchedAt == nil
+    }
+
+    private var visibleJiraLabels: [String] {
+        Array((pr.jiraLabels ?? []).prefix(3))
+    }
+
+    private var hiddenJiraLabelCount: Int {
+        max((pr.jiraLabels ?? []).count - visibleJiraLabels.count, 0)
+    }
+
+    @ViewBuilder
+    private var jiraTicketView: some View {
+        if let url = jiraIssueURL {
+            Button {
+                NSWorkspace.shared.open(url)
+            } label: {
+                PRHoverDetailChip(text: pr.jiraTicket ?? "", color: .blue)
+            }
+            .buttonStyle(.plain)
+            .help("Open Jira issue")
+        } else {
+            PRHoverDetailChip(text: pr.jiraTicket ?? "", color: .blue)
+        }
+    }
+
+    @ViewBuilder
+    private func jiraStatusView(_ statusName: String) -> some View {
+        let presentation = jiraStatusPresentation
+        let content = PRHoverDetailChip(
+            text: statusName,
+            color: presentation.color,
+            icon: presentation.icon,
+            maxWidth: 112
+        )
+
+        if let url = jiraIssueURL {
+            Button {
+                NSWorkspace.shared.open(url)
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+            .help("Open Jira issue")
+        } else {
+            content
+        }
+    }
+
+    private var jiraStatusPresentation: (icon: String, color: Color) {
+        switch pr.jiraStatusCategoryKey?.lowercased() {
+        case "done":
+            return ("checkmark.circle.fill", .green)
+        case "indeterminate":
+            return ("clock.circle.fill", .orange)
+        case "new":
+            return ("circle", .secondary)
+        default:
+            return ("questionmark.circle", .secondary)
+        }
     }
 
     private var reviewsAreLoading: Bool {
@@ -1386,6 +1631,34 @@ private struct PRHoverDetailInlineStatus: View {
                 .truncationMode(.tail)
         }
         .frame(maxWidth: maxWidth, alignment: .leading)
+    }
+}
+
+private struct PRHoverDetailChip: View {
+    let text: String
+    let color: Color
+    var icon: String?
+    var maxWidth: CGFloat?
+
+    var body: some View {
+        HStack(spacing: 3) {
+            if let icon {
+                Image(systemName: icon)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(color)
+            }
+
+            Text(text)
+                .font(.system(size: 10.5, weight: .semibold))
+                .foregroundColor(color)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .padding(.horizontal, 5)
+        .padding(.vertical, 2)
+        .frame(maxWidth: maxWidth, alignment: .leading)
+        .background(color.opacity(0.12))
+        .cornerRadius(4)
     }
 }
 

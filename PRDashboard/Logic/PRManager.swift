@@ -96,6 +96,7 @@ final class PRManager: PRManagerType, ObservableObject {
     @Published private(set) var ciRetryTracking: [String: CIRetryState] = [:]
     @Published private(set) var updatingBranchPRIDs: Set<Int> = []
     @Published private(set) var loadingHoverDetailPRIDs: Set<Int> = []
+    @Published private(set) var isJiraConfigured: Bool = false
 
     enum RefreshState {
         case idle
@@ -117,6 +118,7 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     private var apiClient: GitHubAPIClient
+    private let jiraClient: JiraAPIClient
     private let notificationManager: NotificationManager
     private let oauthManager: GitHubOAuthManager
 
@@ -153,11 +155,13 @@ final class PRManager: PRManagerType, ObservableObject {
 
     init(
         apiClient: GitHubAPIClient,
+        jiraClient: JiraAPIClient = JiraAPIClient(),
         notificationManager: NotificationManager,
         oauthManager: GitHubOAuthManager,
         cmuxStatusProvider: CmuxPRStatusProviding? = nil
     ) {
         self.apiClient = apiClient
+        self.jiraClient = jiraClient
         self.notificationManager = notificationManager
         self.oauthManager = oauthManager
         self.cmuxStatusProvider = cmuxStatusProvider
@@ -172,7 +176,18 @@ final class PRManager: PRManagerType, ObservableObject {
             password: Keychain.loadProxyPassword()
         )
 
+        self.isJiraConfigured = Self.computeJiraConfigured(
+            config: self.configuration,
+            tokenPresent: !Keychain.loadJiraAPIToken().isEmpty
+        )
+
         setupBindings()
+    }
+
+    private static func computeJiraConfigured(config: Configuration, tokenPresent: Bool) -> Bool {
+        !config.jiraServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            !config.jiraEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+            tokenPresent
     }
 
     deinit {
@@ -442,6 +457,12 @@ final class PRManager: PRManagerType, ObservableObject {
                     logger.error("Failed to enrich Jira tickets: \(error.localizedDescription)")
                 }
 
+                await enrichJiraMetadata(
+                    openPRs: &prs,
+                    mentionedPRs: &mentionedPRs,
+                    mergedPRs: &mergedPRs
+                )
+
                 await refreshBaseUpdateStatuses(prs: &prs)
                 await refreshCmuxOpenStatuses(
                     openPRs: &prs,
@@ -555,6 +576,67 @@ final class PRManager: PRManagerType, ObservableObject {
             result = result.filter { !$0.isDraft }
         }
         return result
+    }
+
+    private func enrichJiraMetadata(
+        openPRs: inout [PullRequest],
+        mentionedPRs: inout [PullRequest],
+        mergedPRs: inout [PullRequest]
+    ) async {
+        var issueKeys: Set<String> = []
+        for list in [openPRs, mentionedPRs, mergedPRs] {
+            for pr in list {
+                if let ticket = pr.jiraTicket {
+                    issueKeys.insert(JiraMetadataCache.normalizeIssueKey(ticket))
+                }
+            }
+        }
+        guard !issueKeys.isEmpty else { return }
+
+        let serverURL = configuration.jiraServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = configuration.jiraEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = Keychain.loadJiraAPIToken()
+        guard !serverURL.isEmpty, !email.isEmpty, !token.isEmpty else { return }
+
+        var metadata: [String: JiraIssueMetadata] = [:]
+        do {
+            metadata = try await jiraClient.fetchMetadata(
+                for: issueKeys,
+                serverURL: serverURL,
+                email: email,
+                apiToken: token,
+                refreshInterval: configuration.jiraRefreshInterval
+            )
+        } catch {
+            logger.error("Failed to enrich Jira metadata: \(error.localizedDescription, privacy: .public)")
+        }
+
+        // Apply whatever metadata we got (may be empty on hard failure, partial on
+        // partial failure) and then mark every PR with a ticket as attempted, so the
+        // UI stops showing the "Loading" placeholder even when Jira is unreachable.
+        applyJiraMetadata(metadata, in: &openPRs)
+        applyJiraMetadata(metadata, in: &mentionedPRs)
+        applyJiraMetadata(metadata, in: &mergedPRs)
+    }
+
+    private func applyJiraMetadata(_ metadata: [String: JiraIssueMetadata], in prs: inout [PullRequest]) {
+        let now = Date()
+        for index in prs.indices {
+            guard let ticket = prs[index].jiraTicket.map(JiraMetadataCache.normalizeIssueKey) else {
+                continue
+            }
+            if let issue = metadata[ticket] {
+                prs[index].jiraLabels = issue.labels
+                prs[index].jiraTitle = issue.title
+                prs[index].jiraStatusName = issue.statusName
+                prs[index].jiraStatusCategoryKey = issue.statusCategoryKey
+                prs[index].jiraUpdatedAt = issue.updatedAt
+                prs[index].jiraMetadataFetchedAt = issue.fetchedAt
+            } else {
+                prs[index].jiraLabels = prs[index].jiraLabels ?? []
+                prs[index].jiraMetadataFetchedAt = prs[index].jiraMetadataFetchedAt ?? now
+            }
+        }
     }
 
     private func cancelRefreshWork(reason: String) {
@@ -985,7 +1067,33 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     func updateConfiguration(_ config: Configuration) {
+        updateConfiguration(config, jiraTokenChanged: false)
+    }
+
+    /// Atomically update the four Jira credential fields. Saves the token to the Keychain,
+    /// invalidates the Jira metadata cache if anything material changed, and triggers a single
+    /// refresh — coalescing what would otherwise be split between SettingsView and PRManager.
+    func updateJiraCredentials(
+        serverURL: String,
+        email: String,
+        apiToken: String,
+        refreshInterval: TimeInterval
+    ) {
+        let trimmedToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenChanged = Keychain.loadJiraAPIToken() != trimmedToken
+        Keychain.saveJiraAPIToken(apiToken)
+
+        var newConfig = configuration
+        newConfig.jiraServerURL = serverURL
+        newConfig.jiraEmail = email
+        newConfig.jiraRefreshInterval = refreshInterval
+        updateConfiguration(newConfig, jiraTokenChanged: tokenChanged)
+    }
+
+    private func updateConfiguration(_ config: Configuration, jiraTokenChanged: Bool) {
         let previousOpenAtCmuxFirst = configuration.openAtCmuxFirst
+        let previousJiraServerURL = configuration.jiraServerURL
+        let previousJiraEmail = configuration.jiraEmail
         configuration = config
         Self.saveConfiguration(config)
 
@@ -1008,6 +1116,38 @@ final class PRManager: PRManagerType, ObservableObject {
             if config.openAtCmuxFirst {
                 requestRefresh(trigger: .manual)
             }
+        }
+
+        let jiraServerOrEmailChanged = previousJiraServerURL != config.jiraServerURL
+            || previousJiraEmail != config.jiraEmail
+        if jiraServerOrEmailChanged || jiraTokenChanged {
+            JiraMetadataCache.shared.clear()
+            var updated = prList
+            clearJiraMetadata(in: &updated)
+            prList = updated
+            requestRefresh(trigger: .manual)
+        }
+
+        isJiraConfigured = Self.computeJiraConfigured(
+            config: config,
+            tokenPresent: !Keychain.loadJiraAPIToken().isEmpty
+        )
+    }
+
+    private func clearJiraMetadata(in prList: inout PRList) {
+        clearJiraMetadata(in: &prList.pullRequests)
+        clearJiraMetadata(in: &prList.mentionedPullRequests)
+        clearJiraMetadata(in: &prList.mergedPullRequests)
+    }
+
+    private func clearJiraMetadata(in prs: inout [PullRequest]) {
+        for index in prs.indices {
+            prs[index].jiraLabels = nil
+            prs[index].jiraTitle = nil
+            prs[index].jiraStatusName = nil
+            prs[index].jiraStatusCategoryKey = nil
+            prs[index].jiraUpdatedAt = nil
+            prs[index].jiraMetadataFetchedAt = nil
         }
     }
 

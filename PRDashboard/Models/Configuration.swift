@@ -15,6 +15,9 @@ struct Configuration: Codable, Equatable {
     var graphQLEndpoint: String  // developer override for GitHub GraphQL URL; empty = default
     var httpProxyURL: String     // e.g. "http://host:port"; empty = no proxy
     var httpProxyUsername: String  // empty = no auth; password stored in Keychain
+    var jiraServerURL: String    // e.g. "https://company.atlassian.net"; empty = disabled
+    var jiraEmail: String        // Atlassian account email; token stored in Keychain
+    var jiraRefreshInterval: TimeInterval  // seconds
 
     static var `default`: Configuration {
         Configuration(
@@ -31,7 +34,10 @@ struct Configuration: Codable, Equatable {
             openAtCmuxFirst: false,
             graphQLEndpoint: "",
             httpProxyURL: "",
-            httpProxyUsername: ""
+            httpProxyUsername: "",
+            jiraServerURL: "",
+            jiraEmail: "",
+            jiraRefreshInterval: 1800
         )
     }
 
@@ -49,7 +55,10 @@ struct Configuration: Codable, Equatable {
         openAtCmuxFirst: Bool,
         graphQLEndpoint: String,
         httpProxyURL: String,
-        httpProxyUsername: String
+        httpProxyUsername: String,
+        jiraServerURL: String,
+        jiraEmail: String,
+        jiraRefreshInterval: TimeInterval
     ) {
         self.refreshInterval = refreshInterval
         self.repositories = repositories
@@ -65,6 +74,9 @@ struct Configuration: Codable, Equatable {
         self.graphQLEndpoint = graphQLEndpoint
         self.httpProxyURL = httpProxyURL
         self.httpProxyUsername = httpProxyUsername
+        self.jiraServerURL = jiraServerURL
+        self.jiraEmail = jiraEmail
+        self.jiraRefreshInterval = jiraRefreshInterval
     }
 
     enum CodingKeys: String, CodingKey {
@@ -82,6 +94,9 @@ struct Configuration: Codable, Equatable {
         case graphQLEndpoint
         case httpProxyURL
         case httpProxyUsername
+        case jiraServerURL
+        case jiraEmail
+        case jiraRefreshInterval
     }
 
     init(from decoder: Decoder) throws {
@@ -102,6 +117,9 @@ struct Configuration: Codable, Equatable {
         graphQLEndpoint = try container.decodeIfPresent(String.self, forKey: .graphQLEndpoint) ?? defaults.graphQLEndpoint
         httpProxyURL = try container.decodeIfPresent(String.self, forKey: .httpProxyURL) ?? defaults.httpProxyURL
         httpProxyUsername = try container.decodeIfPresent(String.self, forKey: .httpProxyUsername) ?? defaults.httpProxyUsername
+        jiraServerURL = try container.decodeIfPresent(String.self, forKey: .jiraServerURL) ?? defaults.jiraServerURL
+        jiraEmail = try container.decodeIfPresent(String.self, forKey: .jiraEmail) ?? defaults.jiraEmail
+        jiraRefreshInterval = try container.decodeIfPresent(TimeInterval.self, forKey: .jiraRefreshInterval) ?? defaults.jiraRefreshInterval
     }
 
     var isValid: Bool {
