@@ -1,4 +1,4 @@
-.PHONY: build build-cli build-release run clean install uninstall open lint format help
+.PHONY: build build-cli build-release run clean install uninstall open lint format help build-mcp install-mcp uninstall-mcp
 
 # Project configuration
 PROJECT_NAME = PRDashboard
@@ -9,6 +9,11 @@ DERIVED_DATA = $(BUILD_DIR)/DerivedData
 APP_NAME = $(PROJECT_NAME).app
 CLI_NAME = ghpr
 INSTALL_DIR = /Applications
+
+# MCP server (TypeScript)
+MCP_DIR = mcp-ghpr
+MCP_BIN_NAME = mcp-ghpr
+LOCAL_BIN_DIR = $(HOME)/.local/bin
 
 # Xcode build settings
 XCODE_PROJECT = $(PROJECT_NAME).xcodeproj
@@ -77,6 +82,27 @@ uninstall: ## Remove from /Applications
 		echo "Uninstalled successfully!"; \
 	else \
 		echo "$(APP_NAME) is not installed"; \
+	fi
+
+## MCP server targets
+
+build-mcp: ## Build the mcp-ghpr TypeScript MCP server
+	cd $(MCP_DIR) && npm install && npm run build
+
+install-mcp: build-mcp ## Install mcp-ghpr launcher into ~/.local/bin/
+	@mkdir -p "$(LOCAL_BIN_DIR)"
+	@MCP_ENTRY="$(CURDIR)/$(MCP_DIR)/dist/index.js"; \
+	LAUNCHER="$(LOCAL_BIN_DIR)/$(MCP_BIN_NAME)"; \
+	printf '#!/bin/sh\nexec node "%s" "$$@"\n' "$$MCP_ENTRY" > "$$LAUNCHER"; \
+	chmod +x "$$LAUNCHER"; \
+	echo "Installed $$LAUNCHER -> $$MCP_ENTRY"
+
+uninstall-mcp: ## Remove mcp-ghpr launcher from ~/.local/bin/
+	@LAUNCHER="$(LOCAL_BIN_DIR)/$(MCP_BIN_NAME)"; \
+	if [ -e "$$LAUNCHER" ]; then \
+		rm -f "$$LAUNCHER" && echo "Removed $$LAUNCHER"; \
+	else \
+		echo "$$LAUNCHER not installed"; \
 	fi
 
 ## Clean targets
