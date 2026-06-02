@@ -462,6 +462,13 @@ final class PRManager: PRManagerType, ObservableObject {
                 var prs = self.filterByConfiguration(result.openPRs)
                 var mentionedPRs = self.filterByConfiguration(self.prList.mentionedPullRequests)
                 var mergedPRs = self.filterByConfiguration(result.mergedPRs)
+
+                // Keep known mentioned PRs' CI fresh on every poll. Discovering *which*
+                // PRs are mentioned is expensive and stays on the 30-minute throttle,
+                // but their CI can change far sooner, so refresh just the CI here to
+                // avoid a stale snapshot (e.g. stuck "running" after checks finished).
+                mentionedPRs = await self.apiClient.refreshMentionedCIStatuses(mentionedPRs)
+
                 self.applyReadState(to: &prs)
                 self.applyReadState(to: &mentionedPRs)
                 self.applyReadState(to: &mergedPRs)

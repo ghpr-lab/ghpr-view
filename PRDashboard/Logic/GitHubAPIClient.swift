@@ -2209,6 +2209,46 @@ final class GitHubAPIClient: ObservableObject {
         return nil
     }
 
+    /// CI fields a search-parsed PullRequest exposes, derived from a parsed
+    /// `CIParseResult` plus GitHub's rollup state.
+    private struct SearchCIDerivation {
+        let status: CIStatus?
+        let successCount: Int
+        let failureCount: Int
+        let pendingCount: Int
+        let extendedInfo: CIExtendedInfo?
+    }
+
+    /// Derive the search-path CI fields from a `CIParseResult` and the rollup
+    /// state. Shared by `makeSearchPullRequest` and the mentioned-path context
+    /// pagination pass so both apply the identical trust-rollup-PENDING rule
+    /// (GitHub reports PENDING for QUEUED checks not yet visible as contexts).
+    private static func deriveSearchCI(
+        from ciResult: CIParseResult,
+        rollupState: String?,
+        hasRollup: Bool
+    ) -> SearchCIDerivation {
+        var status: CIStatus? = deriveCIStatus(from: ciResult) ?? (hasRollup ? .expected : nil)
+        var effectivePendingCount = ciResult.pendingCount
+        var effectiveIsRunning = ciResult.isRunning
+        if status == .success, rollupState?.uppercased() == "PENDING" {
+            status = .pending
+            effectivePendingCount = max(effectivePendingCount, 1)
+            effectiveIsRunning = true
+        }
+        let extendedInfo: CIExtendedInfo? = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
+            isRunning: effectiveIsRunning,
+            workflows: Array(ciResult.workflows.values)
+        )
+        return SearchCIDerivation(
+            status: status,
+            successCount: ciResult.successCount,
+            failureCount: ciResult.failureCount,
+            pendingCount: effectivePendingCount,
+            extendedInfo: extendedInfo
+        )
+    }
+
     private static func contextNodes(from nodes: [GraphQLResponse.ContextNode]) -> [CIContextNode] {
         nodes.map { ctx in
             CIContextNode(
@@ -3042,31 +3082,19 @@ final class GitHubAPIClient: ObservableObject {
         let statusCheckRollup = lastCommit?.statusCheckRollup
         let lastCommitAt = lastCommit?.committedDate
 
-        let ciContexts = (statusCheckRollup?.contexts?.nodes ?? []).map { ctx in
-            CIContextNode(
-                name: ctx.name,
-                conclusion: ctx.conclusion,
-                state: ctx.state,
-                context: ctx.context,
-                workflowName: ctx.checkSuite?.workflowRun?.workflow?.name,
-                completedAt: ctx.completedAt
-            )
-        }
+        let ciContexts = Self.contextNodes(from: statusCheckRollup?.contexts?.nodes ?? [])
         let ciResult = parseCIContexts(ciContexts, excludeFilter: excludeFilter)
 
         let rollupState = statusCheckRollup?.state
-        var ciStatus: CIStatus? = Self.deriveCIStatus(from: ciResult)
-            ?? (statusCheckRollup != nil ? .expected : nil)
-
-        // Trust GitHub's rollup state when it says PENDING but we derived success.
-        // This handles QUEUED checks not yet visible in individual contexts.
-        var effectivePendingCount = ciResult.pendingCount
-        var effectiveIsRunning = ciResult.isRunning
-        if ciStatus == .success, rollupState?.uppercased() == "PENDING" {
-            ciStatus = .pending
-            effectivePendingCount = max(effectivePendingCount, 1)
-            effectiveIsRunning = true
-        }
+        // Note: this parses only the first page of contexts. Callers that keep the
+        // search-parsed CI as final (mentioned PRs) must paginate via
+        // enrichMentionedCIContexts; authored/review PRs are re-derived by the
+        // detail batch instead.
+        let derivedCI = Self.deriveSearchCI(
+            from: ciResult,
+            rollupState: rollupState,
+            hasRollup: statusCheckRollup != nil
+        )
 
         let reviewAgg = Self.aggregateReviews(
             node.latestReviews?.nodes ?? [],
@@ -3082,11 +3110,6 @@ final class GitHubAPIClient: ObservableObject {
         let hasBaseConflicts = deriveBaseConflicts(
             mergeable: node.mergeable,
             mergeStateStatus: node.mergeStateStatus
-        )
-
-        let ciExtendedInfo: CIExtendedInfo? = ciResult.workflows.isEmpty ? nil : CIExtendedInfo(
-            isRunning: effectiveIsRunning,
-            workflows: Array(ciResult.workflows.values)
         )
 
         return PullRequest(
@@ -3116,10 +3139,10 @@ final class GitHubAPIClient: ObservableObject {
             reviewThreads: reviewThreads,
             category: category,
             hasBaseConflicts: hasBaseConflicts,
-            ciStatus: ciStatus,
-            checkSuccessCount: ciResult.successCount,
-            checkFailureCount: ciResult.failureCount,
-            checkPendingCount: effectivePendingCount,
+            ciStatus: derivedCI.status,
+            checkSuccessCount: derivedCI.successCount,
+            checkFailureCount: derivedCI.failureCount,
+            checkPendingCount: derivedCI.pendingCount,
             githubCIState: rollupState,
             myLastReviewState: nil,
             myLastReviewAt: nil,
@@ -3127,7 +3150,7 @@ final class GitHubAPIClient: ObservableObject {
             myThreadsAllResolved: false,
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
-            ciExtendedInfo: ciExtendedInfo
+            ciExtendedInfo: derivedCI.extendedInfo
         )
     }
 
@@ -3372,6 +3395,60 @@ final class GitHubAPIClient: ObservableObject {
         }
     }
 
+    /// Refresh CI for an already-discovered set of mentioned PRs without re-running
+    /// the expensive cross-reference *discovery* (scanning which authored PRs are
+    /// referenced) — that pass stays throttled (30 min in PRManager). A backport's
+    /// CI changes far more often than the discovery cadence, so the regular poll
+    /// calls this to keep mentioned-PR CI fresh instead of letting it freeze on a
+    /// stale snapshot (e.g. stuck "running" after checks have finished). Only CI
+    /// fields and the head-commit pointers are copied onto the existing objects, so
+    /// Jira / cmux / review enrichment already on each PR is preserved; PRs that
+    /// fail to refetch keep their previous CI rather than disappearing, and ones no
+    /// longer open drop off.
+    func refreshMentionedCIStatuses(_ existing: [PullRequest]) async -> [PullRequest] {
+        guard !existing.isEmpty else { return existing }
+
+        let references = existing.map {
+            PullRequestReference(owner: $0.repositoryOwner, repo: $0.repositoryName, number: $0.number)
+        }
+        let fieldSelection = buildPRFieldSelection(
+            includeReviewMetadata: false,
+            includeCrossReferences: false,
+            includeMentionBodies: false
+        )
+
+        var refreshedByID: [Int: PullRequest] = [:]
+        for batch in references.chunked(into: Self.batchedPRQuerySize) {
+            do {
+                for pr in try await fetchMentionedBatch(batch, fieldSelection: fieldSelection) {
+                    refreshedByID[pr.id] = pr
+                }
+            } catch {
+                logger.warning("Failed to refresh mentioned CI batch: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        var result: [PullRequest] = []
+        for old in existing {
+            guard let fresh = refreshedByID[old.id] else {
+                result.append(old)  // keep the prior (stale) snapshot on a refetch miss
+                continue
+            }
+            guard fresh.state == .open else { continue }  // merged/closed backport drops off
+            var updated = old
+            updated.ciStatus = fresh.ciStatus
+            updated.checkSuccessCount = fresh.checkSuccessCount
+            updated.checkFailureCount = fresh.checkFailureCount
+            updated.checkPendingCount = fresh.checkPendingCount
+            updated.githubCIState = fresh.githubCIState
+            updated.ciExtendedInfo = fresh.ciExtendedInfo
+            updated.lastCommitAt = fresh.lastCommitAt
+            updated.headCommitOid = fresh.headCommitOid
+            result.append(updated)
+        }
+        return Self.normalizeMentionedResults(result)
+    }
+
     private func fetchMentionedBatch(
         _ batch: [PullRequestReference],
         fieldSelection: String
@@ -3403,8 +3480,79 @@ final class GitHubAPIClient: ObservableObject {
         var prs = response.data.nodes.compactMap {
             Self.makeSearchPullRequest(from: $0, category: .mentioned, excludeFilter: excludeFilter)
         }
+        await enrichMentionedCIContexts(&prs, from: response.data.nodes, excludeFilter: excludeFilter)
         await applyWorkflowRunCompletionGuards(to: &prs)
         return prs
+    }
+
+    /// Mentioned PRs are parsed from a single 20-context search page and — unlike
+    /// the authored/review detail batch — never paginate, so a PR with many checks
+    /// (e.g. a kong-ee backport with 90+ contexts) can miss failures that sit past
+    /// the first page and get stuck showing success/pending. When the rollup reports
+    /// more pages, fetch the remainder and re-derive CI from the full set, mirroring
+    /// the detail/hover path. Pagination only fires for FAILURE/PENDING/SUCCESS
+    /// rollups with a next page, so small-CI PRs pay nothing extra.
+    private func enrichMentionedCIContexts(
+        _ prs: inout [PullRequest],
+        from nodes: [GraphQLResponse.PRNode],
+        excludeFilter: String
+    ) async {
+        guard !prs.isEmpty else { return }
+
+        var indexByID: [Int: Int] = [:]
+        for (index, pr) in prs.enumerated() { indexByID[pr.id] = index }
+
+        for node in nodes {
+            guard let databaseId = node.databaseId, let prIndex = indexByID[databaseId] else { continue }
+            let commit = node.commits?.nodes.first?.commit
+            guard let statusCheckRollup = commit?.statusCheckRollup,
+                  let pageInfo = statusCheckRollup.contexts?.pageInfo,
+                  Self.shouldFetchRemainingCIContexts(
+                      rollupState: statusCheckRollup.state.uppercased(),
+                      hasNextPage: pageInfo.hasNextPage
+                  ),
+                  let endCursor = pageInfo.endCursor,
+                  let commitOid = commit?.oid, !commitOid.isEmpty else { continue }
+
+            // Snapshot identity into locals: os.Logger interpolation is an escaping
+            // autoclosure and can't capture the `inout prs` parameter.
+            var pr = prs[prIndex]
+            let repoFullName = pr.repoFullName
+            let prNumber = pr.number
+            let firstPage = Self.contextNodes(from: statusCheckRollup.contexts?.nodes ?? [])
+            let seed = Self.parseCIContexts(firstPage, excludeFilter: excludeFilter)
+            do {
+                let (full, _) = try await fetchFullCIContexts(
+                    owner: pr.repositoryOwner,
+                    repo: pr.repositoryName,
+                    commitOid: commitOid,
+                    startCursor: endCursor,
+                    initialCount: firstPage.count,
+                    seed: seed
+                )
+                let derived = Self.deriveSearchCI(
+                    from: full,
+                    rollupState: statusCheckRollup.state,
+                    hasRollup: true
+                )
+                let before = pr.ciStatus
+                pr.ciStatus = derived.status
+                pr.checkSuccessCount = derived.successCount
+                pr.checkFailureCount = derived.failureCount
+                pr.checkPendingCount = derived.pendingCount
+                pr.ciExtendedInfo = derived.extendedInfo
+                prs[prIndex] = pr
+                if before != derived.status {
+                    logger.info(
+                        "Paginated mentioned CI contexts for \(repoFullName)#\(prNumber, privacy: .public): \(String(describing: before), privacy: .public) -> \(String(describing: derived.status), privacy: .public) (success=\(derived.successCount, privacy: .public) failure=\(derived.failureCount, privacy: .public) pending=\(derived.pendingCount, privacy: .public))"
+                    )
+                }
+            } catch {
+                logger.warning(
+                    "Failed to paginate mentioned CI contexts for \(repoFullName)#\(prNumber, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     private struct CICounts {
