@@ -576,6 +576,26 @@
         }
       }
     },
+    "Collapse section": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "折叠分组"
+          }
+        }
+      }
+    },
+    "Collapsed": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已折叠"
+          }
+        }
+      }
+    },
     "Code expired. Please try again.": {
       "localizations": {
         "zh-Hans": {
@@ -692,6 +712,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "在 GitHub 上输入此代码："
+          }
+        }
+      }
+    },
+    "Expand section": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "展开分组"
+          }
+        }
+      }
+    },
+    "Expanded": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已展开"
           }
         }
       }
@@ -1214,6 +1254,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "今日已合并"
+          }
+        }
+      }
+    },
+    "Mentioned PRs": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提及我的 PR"
           }
         }
       }

@@ -362,6 +362,132 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(references.isEmpty)
     }
 
+    func testMentionRefreshSearchQueriesUseColdAndHotWindows() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 5, day: 29))!
+
+        let coldRefs = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester",
+            mode: .cold,
+            now: now
+        )
+        let hotRefs = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester",
+            mode: .hot,
+            now: now
+        )
+        let coldCandidates = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
+            owner: "owner",
+            repo: "repo",
+            username: "tester",
+            mode: .cold,
+            now: now
+        )
+        let hotCandidates = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
+            owner: "owner",
+            repo: "repo",
+            username: "tester",
+            mode: .hot,
+            now: now
+        )
+        let gapRefs = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester",
+            daysBack: 45,
+            now: now
+        )
+        let gapCandidates = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
+            owner: "owner",
+            repo: "repo",
+            username: "tester",
+            daysBack: 10,
+            now: now
+        )
+
+        XCTAssertEqual(coldRefs, "is:pr author:tester created:>=2025-05-29")
+        XCTAssertEqual(hotRefs, "is:pr author:tester created:>=2026-04-29")
+        XCTAssertEqual(coldCandidates, "repo:owner/repo is:pr is:open -author:tester updated:>=2026-04-29")
+        XCTAssertEqual(hotCandidates, "repo:owner/repo is:pr is:open -author:tester updated:>=2026-05-22")
+        XCTAssertEqual(gapRefs, "is:pr author:tester created:>=2026-04-14")
+        XCTAssertEqual(gapCandidates, "repo:owner/repo is:pr is:open -author:tester updated:>=2026-05-19")
+    }
+
+    func testColdMentionStageWindowsAreContiguousNewestFirst() {
+        let windows = GitHubAPIClient.coldMentionStageWindows
+        XCTAssertEqual(
+            windows.map { [$0.fromDays, $0.toDays] },
+            [[0, 7], [7, 30], [30, 90], [90, 365]],
+            "Cold stage windows should expand newest-first to a one-year horizon"
+        )
+        // Each window must start exactly where the previous ended so the scanned
+        // `updated` ranges are contiguous and disjoint — no gaps, no PR scanned twice.
+        for (previous, next) in zip(windows, windows.dropFirst()) {
+            XCTAssertEqual(previous.toDays, next.fromDays, "Stage windows must be contiguous")
+            XCTAssertLessThan(next.fromDays, next.toDays, "Each window must cover a positive range")
+            XCTAssertLessThanOrEqual(
+                previous.batchDelay, next.batchDelay,
+                "Recent windows must scan at least as fast as older ones"
+            )
+        }
+        XCTAssertEqual(
+            windows.first?.batchDelay, GitHubAPIClient.recentMentionBatchDelay,
+            "The 0–7d window should run at the high-frequency recent delay"
+        )
+    }
+
+    func testDescriptionMentionCandidateRangeQueryUsesDisjointUpdatedWindows() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 5, day: 29))!
+
+        let recent = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
+            owner: "owner", repo: "repo", username: "tester",
+            fromDays: 0, toDays: 7, now: now
+        )
+        let middle = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
+            owner: "owner", repo: "repo", username: "tester",
+            fromDays: 7, toDays: 30, now: now
+        )
+        let oldest = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
+            owner: "owner", repo: "repo", username: "tester",
+            fromDays: 90, toDays: 365, now: now
+        )
+
+        // The newer bound of one window is the older bound of the next, so the
+        // ranges tile [0, 365] days without overlap.
+        XCTAssertEqual(recent, "repo:owner/repo is:pr is:open -author:tester updated:2026-05-22..2026-05-29")
+        XCTAssertEqual(middle, "repo:owner/repo is:pr is:open -author:tester updated:2026-04-29..2026-05-22")
+        XCTAssertEqual(oldest, "repo:owner/repo is:pr is:open -author:tester updated:2025-05-29..2026-02-28")
+    }
+
+    func testBackgroundMentionRefreshDefaultsAreLowPriorityBatches() {
+        let options = GitHubAPIClient.MentionRefreshOptions.background(mode: .hot)
+
+        XCTAssertEqual(options.authoredReferenceDaysBack, 30)
+        XCTAssertEqual(options.descriptionCandidateDaysBack, 7)
+        XCTAssertEqual(options.batchSize, 10)
+        XCTAssertEqual(options.boundedBatchSize, 10)
+        XCTAssertEqual(options.batchDelay, 60)
+    }
+
+    func testBackgroundMentionRefreshExpandsWindowsToCoverGaps() {
+        let expanded = GitHubAPIClient.MentionRefreshOptions.background(
+            mode: .hot,
+            authoredReferenceDaysBack: 45,
+            descriptionCandidateDaysBack: 10
+        )
+        let belowDefault = GitHubAPIClient.MentionRefreshOptions.background(
+            mode: .hot,
+            authoredReferenceDaysBack: 2,
+            descriptionCandidateDaysBack: 3
+        )
+
+        XCTAssertEqual(expanded.authoredReferenceDaysBack, 45)
+        XCTAssertEqual(expanded.descriptionCandidateDaysBack, 10)
+        XCTAssertEqual(belowDefault.authoredReferenceDaysBack, 30)
+        XCTAssertEqual(belowDefault.descriptionCandidateDaysBack, 7)
+    }
+
     func testPATScopeMatcherAcceptsBroaderUserScopeForReadUserRequirement() {
         XCTAssertTrue(GitHubOAuthManager.grantedScopes(["user"], satisfy: "read:user"))
         XCTAssertTrue(GitHubOAuthManager.grantedScopes(["repo", "user"], satisfy: "read:user"))
@@ -873,7 +999,7 @@ final class UpdateLogicTests: XCTestCase {
             isLoading: false,
             error: nil
         )
-        viewModel.searchText = "ag-1234"
+        viewModel.searchText = "eg-1234"
 
         XCTAssertEqual(viewModel.filteredPRs.map(\.id), [matchingOpen.id])
         XCTAssertEqual(viewModel.mergedLast24hPRs.map(\.id), [matchingMerged.id])

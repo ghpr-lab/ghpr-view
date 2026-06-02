@@ -6,7 +6,28 @@ struct MainView: View {
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
     @State private var firstVisibleReviewStatusPRID: Int?
+    @State private var expandedSections: Set<PRSectionID> = Set(PRSectionID.allCases)
     @AppStorage("PRDashboard.JiraSetupTipDismissed") private var jiraSetupTipDismissed: Bool = false
+
+    private enum PRSectionID: Hashable, CaseIterable {
+        case authored
+        case reviewRequests
+        case mentioned
+        case mergedToday
+
+        var title: LocalizedStringKey {
+            switch self {
+            case .authored:
+                return "My PRs"
+            case .reviewRequests:
+                return "Review Requests"
+            case .mentioned:
+                return "Mentioned PRs"
+            case .mergedToday:
+                return "Merged Today"
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -156,10 +177,7 @@ struct MainView: View {
                     jiraSetupTip
                 }
 
-                // My PRs section
-                if !viewModel.authoredPRs.isEmpty {
-                    sectionHeader("My PRs", count: viewModel.authoredPRs.count, onboardingStep: .myPRs)
-
+                collapsibleSection(.authored, count: viewModel.authoredPRs.count, onboardingStep: .myPRs) {
                     // Pinned PRs at top
                     if !viewModel.pinnedAuthoredPRs.isEmpty {
                         ForEach(viewModel.pinnedAuthoredPRs) { pr in
@@ -203,10 +221,7 @@ struct MainView: View {
                     }
                 }
 
-                // Review Requests section
-                if !viewModel.reviewRequestPRs.isEmpty {
-                    sectionHeader("Review Requests", count: viewModel.reviewRequestPRs.count, onboardingStep: .reviewRequests)
-
+                collapsibleSection(.reviewRequests, count: viewModel.reviewRequestPRs.count, onboardingStep: .reviewRequests) {
                     if !viewModel.pinnedReviewRequestPRs.isEmpty {
                         ForEach(viewModel.pinnedReviewRequestPRs) { pr in
                             PRRowView(
@@ -240,20 +255,14 @@ struct MainView: View {
                     }
                 }
 
-                // Mentioned PRs section
-                if !viewModel.mentionedPRs.isEmpty {
-                    sectionHeader("Mentioned PRs", count: viewModel.mentionedPRs.count)
-
+                collapsibleSection(.mentioned, count: viewModel.mentionedPRs.count) {
                     ForEach(viewModel.groupedMentionedPRs, id: \.0) { repo, prs in
                         repoSection(repo: repo, prs: prs)
                             .id("mentioned-\(repo)")
                     }
                 }
 
-                // Merged Today section
-                if !viewModel.mergedLast24hPRs.isEmpty {
-                    sectionHeader("Merged Today", count: viewModel.mergedLast24hPRs.count, onboardingStep: .mergedToday)
-
+                collapsibleSection(.mergedToday, count: viewModel.mergedLast24hPRs.count, onboardingStep: .mergedToday) {
                     ForEach(viewModel.groupedMergedLast24hPRs, id: \.0) { repo, prs in
                         repoSection(repo: repo, prs: prs, showCIStatus: false, showConflictStatus: false)
                             .id("merged-\(repo)")
@@ -266,29 +275,78 @@ struct MainView: View {
         .id(viewModel.pinChangeToken)
     }
 
+    @ViewBuilder
+    private func collapsibleSection<Content: View>(
+        _ section: PRSectionID,
+        count: Int,
+        onboardingStep: OnboardingManager.Step? = nil,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        if count > 0 {
+            sectionHeader(section, count: count, onboardingStep: onboardingStep)
+
+            if isExpanded(section) {
+                content()
+                    .transition(.opacity)
+            }
+        }
+    }
+
     private func sectionHeader(
-        _ title: LocalizedStringKey,
+        _ section: PRSectionID,
         count: Int,
         onboardingStep: OnboardingManager.Step? = nil
     ) -> some View {
-        let header = HStack {
-            Text(title)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-            Text("(\(count))")
-                .font(.system(size: 11))
-                .foregroundColor(.secondary.opacity(0.7))
-            Spacer()
+        let expanded = isExpanded(section)
+        let header = Button {
+            toggleSection(section)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.secondary.opacity(0.8))
+                    .frame(width: 10)
+
+                Text(section.title)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+
+                Text("(\(count))")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary.opacity(0.7))
+
+                Spacer()
+            }
+            .padding(.horizontal, 8)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 12)
-        .padding(.bottom, 4)
+        .buttonStyle(.plain)
+        .help(expanded ? "Collapse section" : "Expand section")
+        .accessibilityLabel(Text(section.title))
+        .accessibilityValue(expanded ? Text("Expanded") : Text("Collapsed"))
 
         return Group {
             if let onboardingStep {
                 header.onboardingAnchor(onboardingManager, step: onboardingStep)
             } else {
                 header
+            }
+        }
+    }
+
+    private func isExpanded(_ section: PRSectionID) -> Bool {
+        expandedSections.contains(section)
+    }
+
+    private func toggleSection(_ section: PRSectionID) {
+        withAnimation(.easeInOut(duration: 0.16)) {
+            if expandedSections.contains(section) {
+                expandedSections.remove(section)
+            } else {
+                expandedSections.insert(section)
             }
         }
     }

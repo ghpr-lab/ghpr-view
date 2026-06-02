@@ -124,9 +124,15 @@ final class PRManager: PRManagerType, ObservableObject {
 
     private var timer: Timer?
     private var activeRefreshTask: Task<Void, Never>?
+    private var mentionedRefreshTask: Task<Void, Never>?
     private var recoveryRetryTask: Task<Void, Never>?
     private var queuedRefresh = false
     private var consecutiveTransientFailures = 0
+    private var backgroundRefreshGeneration = 0
+    private var lastMentionedRefreshStartedAt: Date?
+    private var lastMentionedRefreshSucceededAt: Date?
+    private var lastAuthoredMentionReferenceCoverageAt: Date?
+    private var lastAuthoredMentionReferenceCoverageUsername: String?
     private var previousPRs: [Int: PullRequest] = [:]
     private var previousPinnedMajorEvents: [Int: Set<PinnedMajorPREvent>] = [:]
     private var pendingAutoRetryPRIds: Set<Int> = []
@@ -138,6 +144,10 @@ final class PRManager: PRManagerType, ObservableObject {
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isOnExpensiveNetwork: Bool = false
     private let networkMonitor = NWPathMonitor()
+    private static let mentionedRefreshThrottle: TimeInterval = 30 * 60
+    private static let lastMentionedRefreshSucceededAtKey = "PRDashboard.LastMentionedRefreshSucceededAt"
+    private static let lastAuthoredMentionReferenceCoverageAtKey = "PRDashboard.LastAuthoredMentionReferenceCoverageAt"
+    private static let lastAuthoredMentionReferenceCoverageUsernameKey = "PRDashboard.LastAuthoredMentionReferenceCoverageUsername"
 
     private struct HoverDetailCacheEntry {
         let metadata: GitHubAPIClient.PRHoverMetadata
@@ -168,6 +178,15 @@ final class PRManager: PRManagerType, ObservableObject {
         self.configuration = Self.loadConfiguration()
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
         self.readReviewThreadIDs = Self.loadReadReviewThreadIDs()
+        self.lastMentionedRefreshSucceededAt = Self.loadDate(
+            forKey: Self.lastMentionedRefreshSucceededAtKey
+        )
+        self.lastAuthoredMentionReferenceCoverageAt = Self.loadDate(
+            forKey: Self.lastAuthoredMentionReferenceCoverageAtKey
+        )
+        self.lastAuthoredMentionReferenceCoverageUsername = UserDefaults.standard.string(
+            forKey: Self.lastAuthoredMentionReferenceCoverageUsernameKey
+        )
 
         apiClient.updateGraphQLEndpoint(self.configuration.graphQLEndpoint)
         apiClient.updateProxy(
@@ -192,6 +211,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
     deinit {
         activeRefreshTask?.cancel()
+        mentionedRefreshTask?.cancel()
         recoveryRetryTask?.cancel()
         hoverDetailTasks.values.forEach { $0.cancel() }
     }
@@ -267,6 +287,7 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     private func handleAuthStateChange(_ authState: AuthState) {
+        invalidateBackgroundRefreshWork(reason: "auth_state_change")
         apiClient.updateToken(authState.accessToken ?? "")
 
         if authState.isAuthenticated {
@@ -287,7 +308,14 @@ final class PRManager: PRManagerType, ObservableObject {
             PRCache.shared.clear()
             PRDetailCache.shared.clear()
             MentionCache.shared.clear()
+            AuthoredMentionReferenceCache.shared.clear()
             AvatarCache.shared.clear()
+            lastMentionedRefreshSucceededAt = nil
+            lastAuthoredMentionReferenceCoverageAt = nil
+            lastAuthoredMentionReferenceCoverageUsername = nil
+            Self.saveDate(nil, forKey: Self.lastMentionedRefreshSucceededAtKey)
+            Self.saveDate(nil, forKey: Self.lastAuthoredMentionReferenceCoverageAtKey)
+            UserDefaults.standard.removeObject(forKey: Self.lastAuthoredMentionReferenceCoverageUsernameKey)
         }
     }
 
@@ -429,8 +457,10 @@ final class PRManager: PRManagerType, ObservableObject {
                     existingPRs: visiblePRs,
                     onProgress: onProgress
                 )
+                let unfilteredOpenPRs = result.openPRs
+                let unfilteredMergedPRs = result.mergedPRs
                 var prs = self.filterByConfiguration(result.openPRs)
-                var mentionedPRs = self.filterByConfiguration(result.mentionedPRs)
+                var mentionedPRs = self.filterByConfiguration(self.prList.mentionedPullRequests)
                 var mergedPRs = self.filterByConfiguration(result.mergedPRs)
                 self.applyReadState(to: &prs)
                 self.applyReadState(to: &mentionedPRs)
@@ -449,24 +479,24 @@ final class PRManager: PRManagerType, ObservableObject {
 
                 // Enrich PRs with Jira tickets from body (fetches only for uncached PRs)
                 do {
-                    let jiraCache = try await apiClient.fetchJiraTickets(for: prs + mentionedPRs + mergedPRs)
+                    let jiraCache = try await apiClient.fetchJiraTickets(for: prs + mergedPRs)
                     GitHubAPIClient.applyJiraTickets(to: &prs, cache: jiraCache)
-                    GitHubAPIClient.applyJiraTickets(to: &mentionedPRs, cache: jiraCache)
                     GitHubAPIClient.applyJiraTickets(to: &mergedPRs, cache: jiraCache)
                 } catch {
                     logger.error("Failed to enrich Jira tickets: \(error.localizedDescription)")
                 }
 
+                var emptyMentionedPRs: [PullRequest] = []
                 await enrichJiraMetadata(
                     openPRs: &prs,
-                    mentionedPRs: &mentionedPRs,
+                    mentionedPRs: &emptyMentionedPRs,
                     mergedPRs: &mergedPRs
                 )
 
                 await refreshBaseUpdateStatuses(prs: &prs)
                 await refreshCmuxOpenStatuses(
                     openPRs: &prs,
-                    mentionedPRs: &mentionedPRs,
+                    mentionedPRs: &emptyMentionedPRs,
                     mergedPRs: &mergedPRs
                 )
 
@@ -491,6 +521,12 @@ final class PRManager: PRManagerType, ObservableObject {
 
                 // Save to cache after successful refresh
                 PRCache.shared.save(newPRList)
+                self.scheduleMentionedRefreshIfNeeded(
+                    username: username,
+                    openPRs: unfilteredOpenPRs,
+                    mergedPRs: unfilteredMergedPRs,
+                    mode: hadUsableData ? .hot : .cold
+                )
                 logger.info(
                     "Refresh succeeded: trigger=\(trigger.rawValue, privacy: .public) openPRs=\(prs.count) mentionedPRs=\(mentionedPRs.count) mergedPRs=\(mergedPRs.count)"
                 )
@@ -555,6 +591,193 @@ final class PRManager: PRManagerType, ObservableObject {
         logger.debug(
             "Incremental progress: stage=\(stage.rawValue, privacy: .public) open=\(filteredOpen.count, privacy: .public) merged=\(filteredMerged.count, privacy: .public)"
         )
+    }
+
+    private func scheduleMentionedRefreshIfNeeded(
+        username: String,
+        openPRs: [PullRequest],
+        mergedPRs: [PullRequest],
+        mode: GitHubAPIClient.MentionRefreshMode
+    ) {
+        guard oauthManager.authState.isAuthenticated,
+              oauthManager.authState.username == username else { return }
+        guard configuration.isValid else { return }
+        guard mentionedRefreshTask == nil else {
+            logger.info("Skipping mentioned refresh because a previous run is still active")
+            return
+        }
+        guard !isRateLimitCritical else {
+            logger.info("Skipping mentioned refresh because rate limit is critical")
+            return
+        }
+        guard !isAutomaticRecoveryPaused else {
+            logger.info("Skipping mentioned refresh because background polling is paused")
+            return
+        }
+
+        let now = Date()
+        if let lastMentionedRefreshStartedAt,
+           now.timeIntervalSince(lastMentionedRefreshStartedAt) < Self.mentionedRefreshThrottle {
+            logger.debug("Skipping mentioned refresh due to 30-minute throttle")
+            return
+        }
+
+        let effectiveMode = effectiveMentionRefreshMode(requestedMode: mode, username: username)
+        let options = mentionRefreshOptions(mode: effectiveMode, username: username, now: now)
+        lastMentionedRefreshStartedAt = now
+        let generation = backgroundRefreshGeneration
+        logger.info(
+            "Starting background mentioned refresh: mode=\(String(describing: effectiveMode), privacy: .public) authoredWindowDays=\(options.authoredReferenceDaysBack, privacy: .public) candidateWindowDays=\(options.descriptionCandidateDaysBack, privacy: .public)"
+        )
+
+        mentionedRefreshTask = Task(priority: .utility) { @MainActor [weak self] in
+            guard let self else { return }
+            // Prevent App Nap from suspending this long-running refresh while the
+            // menu-bar app is idle (popover closed). Without it the task can be
+            // frozen mid-pipeline and never complete, leaving mentionedRefreshTask
+            // non-nil and blocking every future mentioned refresh.
+            let activityToken = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Background mentioned PR refresh"
+            )
+            defer {
+                ProcessInfo.processInfo.endActivity(activityToken)
+                if self.backgroundRefreshGeneration == generation {
+                    self.mentionedRefreshTask = nil
+                }
+            }
+
+            // Publish each fetched batch as it arrives so the UI fills
+            // incrementally instead of waiting for the whole pipeline. The final,
+            // fully-enriched list is applied below.
+            let onProgress: @Sendable ([PullRequest]) async -> Void = { [weak self] partial in
+                guard let self else { return }
+                await self.applyMentionedProgress(partial, generation: generation, username: username)
+            }
+
+            do {
+                var mentionedPRs = try await self.apiClient.fetchMentionedPullRequests(
+                    username: username,
+                    openPRs: openPRs,
+                    mergedPRs: mergedPRs,
+                    options: options,
+                    onProgress: onProgress
+                )
+
+                guard self.canApplyMentionedRefresh(generation: generation, username: username) else { return }
+
+                mentionedPRs = self.filterByConfiguration(mentionedPRs)
+                self.applyReadState(to: &mentionedPRs)
+
+                do {
+                    let jiraCache = try await self.apiClient.fetchJiraTickets(for: mentionedPRs)
+                    GitHubAPIClient.applyJiraTickets(to: &mentionedPRs, cache: jiraCache)
+                } catch {
+                    logger.error("Failed to enrich mentioned Jira tickets: \(error.localizedDescription)")
+                }
+
+                guard self.canApplyMentionedRefresh(generation: generation, username: username) else { return }
+
+                var emptyOpenPRs: [PullRequest] = []
+                var emptyMergedPRs: [PullRequest] = []
+                await self.enrichJiraMetadata(
+                    openPRs: &emptyOpenPRs,
+                    mentionedPRs: &mentionedPRs,
+                    mergedPRs: &emptyMergedPRs
+                )
+                await self.refreshCmuxOpenStatuses(
+                    openPRs: &emptyOpenPRs,
+                    mentionedPRs: &mentionedPRs,
+                    mergedPRs: &emptyMergedPRs
+                )
+
+                guard self.canApplyMentionedRefresh(generation: generation, username: username) else { return }
+
+                self.prList.mentionedPullRequests = mentionedPRs
+                self.prList.error = nil
+                self.recordMentionedRefreshSucceeded(mode: effectiveMode, username: username, at: Date())
+                PRCache.shared.save(self.prList)
+                logger.info("Background mentioned refresh succeeded: mentionedPRs=\(mentionedPRs.count, privacy: .public)")
+            } catch {
+                if error is CancellationError || ((error as? APIError)?.isCancellation == true) {
+                    logger.debug("Background mentioned refresh cancelled")
+                    return
+                }
+                logger.error("Background mentioned refresh failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    private func effectiveMentionRefreshMode(
+        requestedMode: GitHubAPIClient.MentionRefreshMode,
+        username: String
+    ) -> GitHubAPIClient.MentionRefreshMode {
+        if requestedMode == .hot, !hasAuthoredMentionReferenceCoverage(for: username) {
+            return .cold
+        }
+        return requestedMode
+    }
+
+    private func mentionRefreshOptions(
+        mode: GitHubAPIClient.MentionRefreshMode,
+        username: String,
+        now: Date
+    ) -> GitHubAPIClient.MentionRefreshOptions {
+        let authoredCoverageAt = hasAuthoredMentionReferenceCoverage(for: username)
+            ? lastAuthoredMentionReferenceCoverageAt : nil
+        let authoredGapDays = gapDaysBack(since: authoredCoverageAt, now: now)
+        let candidateGapDays = gapDaysBack(since: lastMentionedRefreshSucceededAt, now: now)
+        return GitHubAPIClient.MentionRefreshOptions.background(
+            mode: mode,
+            authoredReferenceDaysBack: mode == .hot ? authoredGapDays : nil,
+            descriptionCandidateDaysBack: mode == .hot ? candidateGapDays : nil
+        )
+    }
+
+    private func gapDaysBack(since date: Date?, now: Date) -> Int? {
+        guard let date else { return nil }
+        let elapsed = max(0, now.timeIntervalSince(date))
+        return max(1, Int(ceil(elapsed / 86_400))) + 1
+    }
+
+    private func recordMentionedRefreshSucceeded(
+        mode: GitHubAPIClient.MentionRefreshMode,
+        username: String,
+        at date: Date
+    ) {
+        lastMentionedRefreshSucceededAt = date
+        lastAuthoredMentionReferenceCoverageAt = date
+        lastAuthoredMentionReferenceCoverageUsername = username
+        Self.saveDate(date, forKey: Self.lastMentionedRefreshSucceededAtKey)
+        Self.saveDate(date, forKey: Self.lastAuthoredMentionReferenceCoverageAtKey)
+        UserDefaults.standard.set(username, forKey: Self.lastAuthoredMentionReferenceCoverageUsernameKey)
+
+        if mode == .cold {
+            logger.debug("Recorded cold mentioned refresh coverage timestamp")
+        }
+    }
+
+    private func hasAuthoredMentionReferenceCoverage(for username: String) -> Bool {
+        lastAuthoredMentionReferenceCoverageAt != nil &&
+            lastAuthoredMentionReferenceCoverageUsername?.caseInsensitiveCompare(username) == .orderedSame
+    }
+
+    private func canApplyMentionedRefresh(generation: Int, username: String) -> Bool {
+        backgroundRefreshGeneration == generation &&
+            oauthManager.authState.isAuthenticated &&
+            oauthManager.authState.username == username &&
+            configuration.isValid
+    }
+
+    /// Apply an incremental batch of mentioned PRs to the published list. Filters
+    /// and read-state are applied so partial frames match user settings; Jira/cmux
+    /// enrichment is deferred to the final publish in `scheduleMentionedRefreshIfNeeded`.
+    private func applyMentionedProgress(_ partial: [PullRequest], generation: Int, username: String) {
+        guard canApplyMentionedRefresh(generation: generation, username: username) else { return }
+        var prs = filterByConfiguration(partial)
+        applyReadState(to: &prs)
+        prList.mentionedPullRequests = prs
+        logger.debug("Mentioned refresh progress: published \(prs.count, privacy: .public) partial mentioned PRs")
     }
 
     private func filterByConfiguration(_ prs: [PullRequest]) -> [PullRequest] {
@@ -643,9 +866,19 @@ final class PRManager: PRManagerType, ObservableObject {
         activeRefreshTask?.cancel()
         activeRefreshTask = nil
         queuedRefresh = false
+        mentionedRefreshTask?.cancel()
+        mentionedRefreshTask = nil
         cancelRecoveryRetry(resetFailureCount: true)
         refreshState = .idle
         logger.info("Cancelled refresh work: reason=\(reason, privacy: .public)")
+    }
+
+    private func invalidateBackgroundRefreshWork(reason: String) {
+        backgroundRefreshGeneration += 1
+        lastMentionedRefreshStartedAt = nil
+        mentionedRefreshTask?.cancel()
+        mentionedRefreshTask = nil
+        logger.debug("Invalidated background refresh work: reason=\(reason, privacy: .public)")
     }
 
     private func cancelRecoveryRetry(resetFailureCount: Bool = false) {
@@ -1091,6 +1324,9 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     private func updateConfiguration(_ config: Configuration, jiraTokenChanged: Bool) {
+        if config != configuration || jiraTokenChanged {
+            invalidateBackgroundRefreshWork(reason: "configuration_change")
+        }
         let previousOpenAtCmuxFirst = configuration.openAtCmuxFirst
         let previousJiraServerURL = configuration.jiraServerURL
         let previousJiraEmail = configuration.jiraEmail
@@ -1458,6 +1694,18 @@ final class PRManager: PRManagerType, ObservableObject {
     private static func saveConfiguration(_ config: Configuration) {
         if let data = try? JSONEncoder().encode(config) {
             UserDefaults.standard.set(data, forKey: configurationKey)
+        }
+    }
+
+    private static func loadDate(forKey key: String) -> Date? {
+        UserDefaults.standard.object(forKey: key) as? Date
+    }
+
+    private static func saveDate(_ date: Date?, forKey key: String) {
+        if let date {
+            UserDefaults.standard.set(date, forKey: key)
+        } else {
+            UserDefaults.standard.removeObject(forKey: key)
         }
     }
 
