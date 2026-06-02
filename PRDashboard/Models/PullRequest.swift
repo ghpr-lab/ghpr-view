@@ -74,6 +74,15 @@ struct PullRequestReference: Hashable, Codable {
     var repoFullName: String {
         "\(owner)/\(repo)"
     }
+
+    /// Canonical ordering: by owner, then repo (both ascending), then number.
+    /// `newestFirst` flips the number comparison so callers that want recent PRs
+    /// to surface first (higher number ≈ more recent within a repo) share one rule.
+    static func ordered(_ lhs: PullRequestReference, _ rhs: PullRequestReference, newestFirst: Bool) -> Bool {
+        if lhs.owner != rhs.owner { return lhs.owner < rhs.owner }
+        if lhs.repo != rhs.repo { return lhs.repo < rhs.repo }
+        return newestFirst ? lhs.number > rhs.number : lhs.number < rhs.number
+    }
 }
 
 struct PullRequest: Identifiable, Codable, Equatable {

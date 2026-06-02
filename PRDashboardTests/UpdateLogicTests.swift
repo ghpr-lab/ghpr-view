@@ -43,19 +43,202 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(configuration.openAtCmuxFirst)
     }
 
-    func testFailureAndPendingCIRollupsFetchRemainingContextPages() {
+    func testFailurePendingAndSuccessCIRollupsFetchRemainingContextPages() {
         XCTAssertTrue(
             GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "FAILURE", hasNextPage: true)
         )
         XCTAssertTrue(
             GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "PENDING", hasNextPage: true)
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
             GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "SUCCESS", hasNextPage: true)
         )
         XCTAssertFalse(
             GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "FAILURE", hasNextPage: false)
         )
+        XCTAssertFalse(
+            GitHubAPIClient.shouldFetchRemainingCIContexts(rollupState: "SUCCESS", hasNextPage: false)
+        )
+    }
+
+    func testWorkflowRunSummaryUsesCurrentRoundLatestAttempt() {
+        let olderFailedAttempt = workflowRun(
+            id: 1,
+            name: "Build",
+            workflowId: 10,
+            runNumber: 42,
+            runAttempt: 1,
+            status: "completed",
+            conclusion: "failure"
+        )
+        let latestSuccessfulAttempt = workflowRun(
+            id: 2,
+            name: "Build",
+            workflowId: 10,
+            runNumber: 42,
+            runAttempt: 2,
+            status: "completed",
+            conclusion: "success"
+        )
+        let olderRunNumber = workflowRun(
+            id: 3,
+            name: "Test",
+            workflowId: 11,
+            runNumber: 8,
+            runAttempt: 1,
+            status: "completed",
+            conclusion: "success"
+        )
+        let latestQueuedRun = workflowRun(
+            id: 4,
+            name: "Test",
+            workflowId: 11,
+            runNumber: 9,
+            runAttempt: 1,
+            status: "queued",
+            conclusion: nil
+        )
+
+        let latest = GitHubAPIClient.latestWorkflowRunsByCurrentRound([
+            olderFailedAttempt,
+            latestSuccessfulAttempt,
+            olderRunNumber,
+            latestQueuedRun
+        ])
+        let summary = GitHubAPIClient.summarizeWorkflowRunCompletion(latest)
+
+        XCTAssertEqual(Set(latest.map(\.id)), [2, 4])
+        XCTAssertEqual(summary.totalCount, 2)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(summary.inFlightCount, 1)
+        XCTAssertEqual(summary.failureLikeCount, 0)
+    }
+
+    func testWorkflowRunSummaryKeepsExcludedFailuresVisibleButNonBlocking() {
+        let runs = [
+            workflowRun(
+                id: 1,
+                name: "Review CI",
+                displayTitle: "PR title",
+                workflowId: 10,
+                status: "completed",
+                conclusion: "failure"
+            ),
+            workflowRun(
+                id: 2,
+                name: "Build",
+                displayTitle: "Docs-only change",
+                workflowId: 11,
+                status: "completed",
+                conclusion: "failure"
+            ),
+            workflowRun(
+                id: 3,
+                name: "Test",
+                displayTitle: "PR title",
+                workflowId: 12,
+                status: "completed",
+                conclusion: "success"
+            )
+        ]
+
+        let summary = GitHubAPIClient.summarizeWorkflowRunCompletion(
+            runs,
+            excludeFilter: "Review\\s+CI|Docs-only"
+        )
+
+        XCTAssertEqual(summary.totalCount, 3)
+        XCTAssertEqual(summary.completedCount, 3)
+        XCTAssertEqual(summary.failureLikeCount, 2)
+        XCTAssertEqual(summary.blockingFailureLikeCount, 0)
+        XCTAssertEqual(summary.inFlightCount, 0)
+    }
+
+    func testWorkflowRunSummaryInvalidRegexFallsBackToContains() {
+        let runs = [
+            workflowRun(
+                id: 1,
+                name: "Lint[bot]",
+                workflowId: 10,
+                status: "completed",
+                conclusion: "failure"
+            )
+        ]
+
+        let summary = GitHubAPIClient.summarizeWorkflowRunCompletion(runs, excludeFilter: "[")
+
+        XCTAssertEqual(summary.failureLikeCount, 1)
+        XCTAssertEqual(summary.blockingFailureLikeCount, 0)
+    }
+
+    func testWorkflowRunCompletionSummaryFetchesRestPages() async throws {
+        let session = makeMockGitHubActionsSession()
+        MockGitHubActionsURLProtocol.reset { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer token")
+            let page = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .first(where: { $0.name == "page" })?
+                .value
+            let body: String
+            if page == "1" {
+                body = """
+                {
+                  "total_count": 2,
+                  "workflow_runs": [
+                    {
+                      "id": 1,
+                      "name": "Build",
+                      "display_title": "PR title",
+                      "path": ".github/workflows/build.yml",
+                      "workflow_id": 10,
+                      "run_number": 1,
+                      "run_attempt": 1,
+                      "status": "completed",
+                      "conclusion": "success",
+                      "created_at": "2026-06-02T00:00:00Z",
+                      "updated_at": "2026-06-02T00:01:00Z"
+                    },
+                    {
+                      "id": 2,
+                      "name": "Lint",
+                      "display_title": "Docs-only change",
+                      "path": ".github/workflows/lint.yml",
+                      "workflow_id": 11,
+                      "run_number": 1,
+                      "run_attempt": 1,
+                      "status": "completed",
+                      "conclusion": "failure",
+                      "created_at": "2026-06-02T00:00:00Z",
+                      "updated_at": "2026-06-02T00:01:00Z"
+                    }
+                  ]
+                }
+                """
+            } else {
+                body = #"{"total_count":2,"workflow_runs":[]}"#
+            }
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: nil
+            )!
+            return (response, Data(body.utf8))
+        }
+        defer { MockGitHubActionsURLProtocol.reset() }
+
+        let client = GitHubAPIClient(token: "token", session: session)
+        let summary = try await client.fetchWorkflowRunCompletionSummary(
+            owner: "owner",
+            repo: "repo",
+            headSHA: "abc",
+            excludeFilter: "Docs-only"
+        )
+
+        XCTAssertEqual(summary.totalCount, 2)
+        XCTAssertEqual(summary.completedCount, 2)
+        XCTAssertEqual(summary.failureLikeCount, 1)
+        XCTAssertEqual(summary.blockingFailureLikeCount, 0)
     }
 
     @MainActor
@@ -362,102 +545,24 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(references.isEmpty)
     }
 
-    func testMentionRefreshSearchQueriesUseColdAndHotWindows() {
+    func testAuthoredMentionReferenceSearchQueryUsesCreatedWindow() {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0)!
         let now = calendar.date(from: DateComponents(year: 2026, month: 5, day: 29))!
 
-        let coldRefs = GitHubAPIClient.authoredMentionReferenceSearchQuery(
-            username: "tester",
-            mode: .cold,
-            now: now
+        let yearWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester", daysBack: 365, now: now
         )
-        let hotRefs = GitHubAPIClient.authoredMentionReferenceSearchQuery(
-            username: "tester",
-            mode: .hot,
-            now: now
+        let quarterWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester", daysBack: 90, now: now
         )
-        let coldCandidates = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
-            owner: "owner",
-            repo: "repo",
-            username: "tester",
-            mode: .cold,
-            now: now
-        )
-        let hotCandidates = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
-            owner: "owner",
-            repo: "repo",
-            username: "tester",
-            mode: .hot,
-            now: now
-        )
-        let gapRefs = GitHubAPIClient.authoredMentionReferenceSearchQuery(
-            username: "tester",
-            daysBack: 45,
-            now: now
-        )
-        let gapCandidates = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
-            owner: "owner",
-            repo: "repo",
-            username: "tester",
-            daysBack: 10,
-            now: now
+        let gapWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester", daysBack: 45, now: now
         )
 
-        XCTAssertEqual(coldRefs, "is:pr author:tester created:>=2025-05-29")
-        XCTAssertEqual(hotRefs, "is:pr author:tester created:>=2026-04-29")
-        XCTAssertEqual(coldCandidates, "repo:owner/repo is:pr is:open -author:tester updated:>=2026-04-29")
-        XCTAssertEqual(hotCandidates, "repo:owner/repo is:pr is:open -author:tester updated:>=2026-05-22")
-        XCTAssertEqual(gapRefs, "is:pr author:tester created:>=2026-04-14")
-        XCTAssertEqual(gapCandidates, "repo:owner/repo is:pr is:open -author:tester updated:>=2026-05-19")
-    }
-
-    func testColdMentionStageWindowsAreContiguousNewestFirst() {
-        let windows = GitHubAPIClient.coldMentionStageWindows
-        XCTAssertEqual(
-            windows.map { [$0.fromDays, $0.toDays] },
-            [[0, 7], [7, 30], [30, 90], [90, 365]],
-            "Cold stage windows should expand newest-first to a one-year horizon"
-        )
-        // Each window must start exactly where the previous ended so the scanned
-        // `updated` ranges are contiguous and disjoint — no gaps, no PR scanned twice.
-        for (previous, next) in zip(windows, windows.dropFirst()) {
-            XCTAssertEqual(previous.toDays, next.fromDays, "Stage windows must be contiguous")
-            XCTAssertLessThan(next.fromDays, next.toDays, "Each window must cover a positive range")
-            XCTAssertLessThanOrEqual(
-                previous.batchDelay, next.batchDelay,
-                "Recent windows must scan at least as fast as older ones"
-            )
-        }
-        XCTAssertEqual(
-            windows.first?.batchDelay, GitHubAPIClient.recentMentionBatchDelay,
-            "The 0–7d window should run at the high-frequency recent delay"
-        )
-    }
-
-    func testDescriptionMentionCandidateRangeQueryUsesDisjointUpdatedWindows() {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let now = calendar.date(from: DateComponents(year: 2026, month: 5, day: 29))!
-
-        let recent = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
-            owner: "owner", repo: "repo", username: "tester",
-            fromDays: 0, toDays: 7, now: now
-        )
-        let middle = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
-            owner: "owner", repo: "repo", username: "tester",
-            fromDays: 7, toDays: 30, now: now
-        )
-        let oldest = GitHubAPIClient.descriptionMentionCandidateSearchQuery(
-            owner: "owner", repo: "repo", username: "tester",
-            fromDays: 90, toDays: 365, now: now
-        )
-
-        // The newer bound of one window is the older bound of the next, so the
-        // ranges tile [0, 365] days without overlap.
-        XCTAssertEqual(recent, "repo:owner/repo is:pr is:open -author:tester updated:2026-05-22..2026-05-29")
-        XCTAssertEqual(middle, "repo:owner/repo is:pr is:open -author:tester updated:2026-04-29..2026-05-22")
-        XCTAssertEqual(oldest, "repo:owner/repo is:pr is:open -author:tester updated:2025-05-29..2026-02-28")
+        XCTAssertEqual(yearWindow, "is:pr author:tester created:>=2025-05-29")
+        XCTAssertEqual(quarterWindow, "is:pr author:tester created:>=2026-02-28")
+        XCTAssertEqual(gapWindow, "is:pr author:tester created:>=2026-04-14")
     }
 
     func testBackgroundMentionRefreshDefaultsAreLowPriorityBatches() {
@@ -1283,6 +1388,12 @@ final class UpdateLogicTests: XCTestCase {
         return URLSession(configuration: configuration)
     }
 
+    private func makeMockGitHubActionsSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockGitHubActionsURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
     private static func makeMockJiraSession() -> URLSession {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockJiraURLProtocol.self]
@@ -1296,6 +1407,34 @@ final class UpdateLogicTests: XCTestCase {
             httpVersion: nil,
             headerFields: nil
         )!
+    }
+
+    private func workflowRun(
+        id: Int,
+        name: String? = nil,
+        displayTitle: String? = nil,
+        path: String? = nil,
+        workflowId: Int? = nil,
+        runNumber: Int = 1,
+        runAttempt: Int = 1,
+        status: String? = nil,
+        conclusion: String? = nil,
+        createdAt: Date? = nil,
+        updatedAt: Date? = nil
+    ) -> GitHubAPIClient.WorkflowRunSnapshot {
+        GitHubAPIClient.WorkflowRunSnapshot(
+            id: id,
+            name: name,
+            displayTitle: displayTitle,
+            path: path,
+            workflowId: workflowId,
+            runNumber: runNumber,
+            runAttempt: runAttempt,
+            status: status,
+            conclusion: conclusion,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
     }
 
     private func installMockReleaseResponses(tag: String = "v999.0.0") {
@@ -1787,6 +1926,51 @@ private final class MockUpdateURLProtocol: URLProtocol {
         lock.lock()
         recordedURLs.append(url)
         lock.unlock()
+    }
+}
+
+private final class MockGitHubActionsURLProtocol: URLProtocol {
+    typealias RequestHandler = (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    private static var handler: RequestHandler?
+
+    static func reset(handler: RequestHandler? = nil) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        guard let handler = Self.currentHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private static var currentHandler: RequestHandler? {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler
     }
 }
 

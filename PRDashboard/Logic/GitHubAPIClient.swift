@@ -170,7 +170,12 @@ struct IndexedPR {
         pendingCount: Int,
         successCount: Int
     ) -> CIStatus? {
-        if failureCount > 0 { return .failure }
+        if failureCount > 0 {
+            if existing == .success || visible == .success {
+                return .success
+            }
+            return .failure
+        }
         if pendingCount > 0 { return .pending }
         if successCount > 0 { return .success }
         return existing ?? visible
@@ -300,7 +305,7 @@ private final class ProxyAuthDelegate: NSObject, URLSessionDelegate {
 }
 
 final class GitHubAPIClient: ObservableObject {
-    private static let maxCIContextsToFetch = 200
+    private static let maxCIContextsToFetch = 512
     private static let maxGraphQLAttempts = 3
     /// Aliased-batch size used by detail / mention-source / mentioned-PR batches.
     private static let batchedPRQuerySize = 20
@@ -311,18 +316,6 @@ final class GitHubAPIClient: ObservableObject {
     /// matter most, so this phase fires requests far more aggressively than the
     /// gentle background default — still trivially within the 5000/hr budget.
     static let recentMentionBatchDelay: TimeInterval = 3
-    /// Recency windows for the cold-start description-mention scan: an `updated`-
-    /// age range in days (newer bound first) plus the inter-batch delay used while
-    /// scanning that window. The pipeline scans these in order so the most-recent
-    /// mentions surface first (at high frequency) and older ones fill in
-    /// progressively at a gentler pace. Windows are disjoint by `updated` date, so
-    /// each candidate PR is body-scanned in exactly one stage.
-    static let coldMentionStageWindows: [(fromDays: Int, toDays: Int, batchDelay: TimeInterval)] = [
-        (0, 7, recentMentionBatchDelay),  // recent: high frequency
-        (7, 30, 15),
-        (30, 90, 30),
-        (90, 365, 60)                     // oldest: gentle background
-    ]
     /// Thrown when a cold mention scan stops before completing every window
     /// (low rate-limit headroom or a network/API error). Signals PRManager not to
     /// record cold-scan coverage, so the next refresh retries cold rather than
@@ -333,8 +326,7 @@ final class GitHubAPIClient: ObservableObject {
         )
     }
     /// Maximum number of aliased-batch queries in flight at once. Applied to
-    /// fetchIncremental, fetchMentionSourceReferences, and fetchMentionedPullRequests
-    /// so a cold start can't burst 10+ concurrent GraphQL requests.
+    /// fetchIncremental so a cold start can't burst 10+ concurrent GraphQL requests.
     private static let batchedPRQueryConcurrency = 3
     static let defaultGraphQLURL = URL(string: "https://api.github.com/graphql")!
     private var graphQLURL: URL = GitHubAPIClient.defaultGraphQLURL
@@ -351,9 +343,79 @@ final class GitHubAPIClient: ObservableObject {
         let delay: TimeInterval?
     }
 
-    init(token: String, graphQLEndpoint: String? = nil) {
+    private struct CIExcludeMatcher {
+        let pattern: String
+        let regex: NSRegularExpression?
+
+        init(pattern: String) {
+            self.pattern = pattern.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.regex = try? NSRegularExpression(pattern: self.pattern, options: [.caseInsensitive])
+        }
+
+        var isEmpty: Bool {
+            pattern.isEmpty
+        }
+
+        func matches(_ value: String?) -> Bool {
+            guard !pattern.isEmpty, let value, !value.isEmpty else {
+                return false
+            }
+            if let regex {
+                let range = NSRange(value.startIndex..<value.endIndex, in: value)
+                return regex.firstMatch(in: value, range: range) != nil
+            }
+            return value.lowercased().contains(pattern.lowercased())
+        }
+
+        func matchesAny(_ values: [String?]) -> Bool {
+            values.contains { matches($0) }
+        }
+    }
+
+    struct WorkflowRunCompletionSummary: Equatable {
+        let totalCount: Int
+        let completedCount: Int
+        let successCount: Int
+        let skippedCount: Int
+        let failureLikeCount: Int
+        let blockingFailureLikeCount: Int
+        let inFlightCount: Int
+
+        var allCompleted: Bool {
+            totalCount > 0 && inFlightCount == 0 && completedCount == totalCount
+        }
+    }
+
+    struct WorkflowRunSnapshot: Equatable {
+        let id: Int
+        let name: String?
+        let displayTitle: String?
+        let path: String?
+        let workflowId: Int?
+        let runNumber: Int
+        let runAttempt: Int
+        let status: String?
+        let conclusion: String?
+        let createdAt: Date?
+        let updatedAt: Date?
+
+        var groupingKey: String {
+            if let workflowId {
+                return "workflow_id:\(workflowId)"
+            }
+            if let path, !path.isEmpty {
+                return "path:\(path)"
+            }
+            if let name, !name.isEmpty {
+                return "name:\(name)"
+            }
+            return "run:\(id)"
+        }
+    }
+
+    init(token: String, graphQLEndpoint: String? = nil, session: URLSession? = nil) {
         self.token = token
-        self.session = Self.makeSession(proxy: nil, delegate: sessionDelegate)
+        self.session = session ?? Self.makeSession(proxy: nil, delegate: sessionDelegate)
         self.graphQLURL = Self.resolveGraphQLURL(graphQLEndpoint)
     }
 
@@ -439,7 +501,9 @@ final class GitHubAPIClient: ObservableObject {
     func fetchPullRequests(username: String, searchQuery: String, category: PRCategory) async throws -> [PullRequest] {
         let query = buildGraphQLQuery(searchQuery: searchQuery)
         let responseData = try await executeGraphQL(query: query, operation: "fetchPullRequests")
-        return try parseSearchResponse(data: responseData, category: category)
+        var prs = try parseSearchResponse(data: responseData, category: category)
+        await applyWorkflowRunCompletionGuards(to: &prs)
+        return prs
     }
 
     struct CombinedPRResult {
@@ -635,9 +699,7 @@ final class GitHubAPIClient: ObservableObject {
                 if a.repositoryName != b.repositoryName { return a.repositoryName < b.repositoryName }
                 return a.number < b.number
             }
-            let batches: [[IndexedPR]] = stride(from: 0, to: sorted.count, by: Self.batchedPRQuerySize).map {
-                Array(sorted[$0..<min($0 + Self.batchedPRQuerySize, sorted.count)])
-            }
+            let batches = sorted.chunked(into: Self.batchedPRQuerySize)
             let fieldSelection = buildPRFieldSelection(
                 username: username,
                 includeReviewMetadata: true,
@@ -729,6 +791,7 @@ final class GitHubAPIClient: ObservableObject {
 
         var combinedByID: [Int: PullRequest] = hits
         combinedByID.merge(fetched) { _, new in new }
+        await applyWorkflowRunCompletionGuards(to: &combinedByID)
 
         let split = splitOpenMerged(byID: combinedByID)
         let openPRs = split.open
@@ -814,18 +877,12 @@ final class GitHubAPIClient: ObservableObject {
         // the cumulative mentioned set after each batch. Empty frames are skipped
         // so the cached list is never wiped to zero before real results arrive.
         func ingest(_ references: Set<PullRequestReference>) async throws {
-            let toFetch = references.subtracting(fetchedReferences).sorted {
-                if $0.owner != $1.owner { return $0.owner < $1.owner }
-                if $0.repo != $1.repo { return $0.repo < $1.repo }
-                return $0.number > $1.number
-            }
+            let toFetch = references.subtracting(fetchedReferences)
+                .sorted { PullRequestReference.ordered($0, $1, newestFirst: true) }
             guard !toFetch.isEmpty else { return }
             fetchedReferences.formUnion(toFetch)
 
-            let batchSize = options.boundedBatchSize
-            let batches: [[PullRequestReference]] = stride(from: 0, to: toFetch.count, by: batchSize).map {
-                Array(toFetch[$0..<min($0 + batchSize, toFetch.count)])
-            }
+            let batches = toFetch.chunked(into: options.boundedBatchSize)
             for (index, batch) in batches.enumerated() {
                 let prs = try await fetchMentionedBatch(batch, fieldSelection: fieldSelection)
                 for pr in prs { fetchedByID[pr.id] = pr }
@@ -856,16 +913,10 @@ final class GitHubAPIClient: ObservableObject {
 
         // Newest-first within each repo (higher number ≈ more recent). The work
         // repo where backports happen sorts early, so its backports surface first.
-        let orderedAuthored = authoredReferences.sorted {
-            if $0.owner != $1.owner { return $0.owner < $1.owner }
-            if $0.repo != $1.repo { return $0.repo < $1.repo }
-            return $0.number > $1.number
-        }
+        let orderedAuthored = authoredReferences
+            .sorted { PullRequestReference.ordered($0, $1, newestFirst: true) }
 
-        let bounded = options.boundedBatchSize
-        let batches: [[PullRequestReference]] = stride(from: 0, to: orderedAuthored.count, by: bounded).map {
-            Array(orderedAuthored[$0..<min($0 + bounded, orderedAuthored.count)])
-        }
+        let batches = orderedAuthored.chunked(into: options.boundedBatchSize)
         for (index, batch) in batches.enumerated() {
             guard await hasMentionHeadroom() else {
                 throw Self.coldMentionScanIncompleteError
@@ -928,333 +979,6 @@ final class GitHubAPIClient: ObservableObject {
         await MainActor.run { self.rateLimitInfo.hasHeadroomForMentions }
     }
 
-    /// Collect outbound/inbound PR cross-references from the user's own authored
-    /// PRs (Path A of mention discovery). Only PRs the user authored are scanned —
-    /// review-request (and review-related merged) seeds are intentionally excluded
-    /// so backports of PRs the user merely reviews don't surface as "mentioned";
-    /// those stay in the review section. Callers still build `existingReferences`
-    /// from the full seed set, so review PRs are also kept out of the mentioned
-    /// list. Uses MentionCache (TTL+cooldown) so unchanged source PRs aren't
-    /// re-scanned, and degrades to stale cache entries when the rate-limit headroom
-    /// is exhausted. Shared by the hot single-pass and the cold staged pipelines.
-    private func collectMentionSourceReferences(
-        seedPRs: [PullRequest],
-        username: String,
-        options: MentionRefreshOptions
-    ) async throws -> Set<PullRequestReference> {
-        var mentionCandidates = Set<PullRequestReference>()
-        let authoredSeeds = seedPRs.filter {
-            $0.author.caseInsensitiveCompare(username) == .orderedSame
-        }
-        guard !authoredSeeds.isEmpty else { return mentionCandidates }
-
-        var mentionCacheEntries = MentionCache.shared.loadEntries()
-        var mentionSourcesToRefresh: [PullRequest] = []
-        let refreshTimestamp = Date()
-
-        for pr in authoredSeeds {
-            if let cacheEntry = mentionCacheEntries[pr.id],
-               cacheEntry.isUsable(
-                   currentUpdatedAt: pr.updatedAt,
-                   now: refreshTimestamp,
-                   ttl: MentionCache.ttl,
-                   cooldown: MentionCache.cooldown
-               ) {
-                mentionCandidates.formUnion(cacheEntry.pullRequestReferences)
-            } else {
-                mentionSourcesToRefresh.append(pr)
-            }
-        }
-
-        let rateLimitSnapshot = await MainActor.run { self.rateLimitInfo }
-        if !mentionSourcesToRefresh.isEmpty, !rateLimitSnapshot.hasHeadroomForMentions {
-            logger.info(
-                "Skipping mention refresh: rate limit remaining \(rateLimitSnapshot.remaining) below headroom threshold"
-            )
-            for pr in mentionSourcesToRefresh {
-                if let stale = mentionCacheEntries[pr.id] {
-                    mentionCandidates.formUnion(stale.pullRequestReferences)
-                }
-            }
-            mentionSourcesToRefresh.removeAll()
-        }
-
-        if !mentionSourcesToRefresh.isEmpty {
-            logger.info("Refreshing mention sources for \(mentionSourcesToRefresh.count) PRs")
-            let refreshedReferences = try await fetchMentionSourceReferences(
-                for: mentionSourcesToRefresh,
-                batchSize: options.boundedBatchSize,
-                batchDelay: options.batchDelay
-            )
-
-            for pr in mentionSourcesToRefresh {
-                let references = refreshedReferences[pr.id] ?? []
-                mentionCandidates.formUnion(references)
-                let sortedReferences = references.sorted {
-                    if $0.owner != $1.owner { return $0.owner < $1.owner }
-                    if $0.repo != $1.repo { return $0.repo < $1.repo }
-                    return $0.number < $1.number
-                }
-                mentionCacheEntries[pr.id] = MentionCacheEntry(
-                    sourcePRID: pr.id,
-                    sourceUpdatedAt: pr.updatedAt,
-                    references: sortedReferences,
-                    cachedAt: refreshTimestamp
-                )
-            }
-
-            MentionCache.shared.saveEntries(mentionCacheEntries)
-        }
-
-        return mentionCandidates
-    }
-
-    /// Cold-start mention discovery, ordered newest-first and published
-    /// incrementally. Path A (cross-references from the user's own open/merged
-    /// PRs) is fetched and published first, then description-mention candidates
-    /// are scanned in the expanding recency windows of `coldMentionStageWindows`.
-    /// Each detail batch republishes the cumulative set via `onProgress`, so the
-    /// UI fills in from most-recent outward instead of waiting for the full
-    /// year-long scan. Whatever has been published is preserved if rate-limit
-    /// headroom runs out mid-scan.
-    private func enrichWithMentionsColdStaged(
-        username: String,
-        openPRs: [PullRequest],
-        mergedPRs: [PullRequest],
-        options: MentionRefreshOptions,
-        onProgress: (@Sendable ([PullRequest]) async -> Void)?
-    ) async throws -> [PullRequest] {
-        let seedPRs = openPRs + mergedPRs
-        let existingReferences = Set(
-            seedPRs.map {
-                PullRequestReference(
-                    owner: $0.repositoryOwner,
-                    repo: $0.repositoryName,
-                    number: $0.number
-                )
-            }
-        )
-
-        let fieldSelection = buildPRFieldSelection(
-            includeReviewMetadata: false,
-            includeCrossReferences: false,
-            includeMentionBodies: false
-        )
-
-        var fetchedByID: [Int: PullRequest] = [:]
-        var fetchedReferences = existingReferences
-
-        // Fetch details for newly-discovered references in batches, republishing
-        // the cumulative mentioned set after each batch. References already
-        // fetched (or belonging to the user) are skipped so no PR is fetched twice
-        // across stages. Intra-batch order is a best-effort newest-first proxy
-        // (higher number first within a repo); cross-stage order is the real
-        // recency guarantee.
-        func ingest(_ references: Set<PullRequestReference>, batchDelay: TimeInterval) async throws {
-            let toFetch = references.subtracting(fetchedReferences).sorted {
-                if $0.owner != $1.owner { return $0.owner < $1.owner }
-                if $0.repo != $1.repo { return $0.repo < $1.repo }
-                return $0.number > $1.number
-            }
-            guard !toFetch.isEmpty else { return }
-            fetchedReferences.formUnion(toFetch)
-
-            let batchSize = options.boundedBatchSize
-            let batches: [[PullRequestReference]] = stride(from: 0, to: toFetch.count, by: batchSize).map {
-                Array(toFetch[$0..<min($0 + batchSize, toFetch.count)])
-            }
-            for (index, batch) in batches.enumerated() {
-                let prs = try await fetchMentionedBatch(batch, fieldSelection: fieldSelection)
-                for pr in prs { fetchedByID[pr.id] = pr }
-                // Skip empty frames: publishing [] here would wipe the cached
-                // mentioned list to zero before any real result arrives (e.g. when
-                // Path A finds nothing, or a batch resolves to no open PRs). The
-                // final return value still clears stale entries when a complete scan
-                // legitimately finds none.
-                if let onProgress, !fetchedByID.isEmpty {
-                    await onProgress(Self.normalizeMentionedResults(Array(fetchedByID.values)))
-                }
-                if index < batches.count - 1 {
-                    try await sleepBetweenMentionBatches(batchDelay)
-                }
-            }
-        }
-
-        // The most-recent phase — Path A, the authored-reference fetch, and the
-        // 0–7d window — runs at a high request frequency so recent mentions show
-        // up fast; older windows fall back to their own gentler delays.
-        let recentOptions = options.withBatchDelay(Self.recentMentionBatchDelay)
-
-        // --- Path A: the user's own authored cross-references, published first. ---
-        let sourceReferences = try await collectMentionSourceReferences(
-            seedPRs: seedPRs,
-            username: username,
-            options: recentOptions
-        )
-        try await ingest(sourceReferences, batchDelay: Self.recentMentionBatchDelay)
-
-        // --- Path B: description mentions, scanned newest-first by update window.
-        // Any early termination — headroom exhaustion or a network/API error mid-
-        // scan — throws AFTER the per-repo results gathered so far have been
-        // published. Consequences: (a) PRManager keeps those published results on
-        // screen (its catch never overwrites the list), and (b) it does NOT record
-        // cold-scan coverage, so the next refresh retries cold and finishes the
-        // remaining windows instead of silently dropping to the narrow hot window.
-        // A run only returns normally — recording coverage and clearing stale
-        // entries — when every window completes.
-        guard await hasMentionHeadroom() else {
-            logger.info("Stopping cold mention scan: rate limit headroom exhausted after Path A")
-            throw Self.coldMentionScanIncompleteError
-        }
-
-        let authoredReferences = try await fetchAuthoredPullRequestReferences(
-            username: username,
-            options: recentOptions
-        )
-        guard !authoredReferences.isEmpty else {
-            return Self.normalizeMentionedResults(Array(fetchedByID.values))
-        }
-
-        let authoredNumbersByRepo = authoredReferences.reduce(into: [String: Set<Int>]()) { partial, reference in
-            partial[Self.repoKey(owner: reference.owner, repo: reference.repo), default: []].insert(reference.number)
-        }
-        let repos = authoredReferences
-            .map { (owner: $0.owner, repo: $0.repo, key: Self.repoKey(owner: $0.owner, repo: $0.repo)) }
-            .reduce(into: [String: (owner: String, repo: String)]()) { partial, item in
-                partial[item.key] = (item.owner, item.repo)
-            }
-            .values
-            .sorted {
-                if $0.owner != $1.owner { return $0.owner < $1.owner }
-                return $0.repo < $1.repo
-            }
-
-        for window in Self.coldMentionStageWindows {
-            guard await hasMentionHeadroom() else {
-                logger.info(
-                    "Stopping cold mention scan at window \(window.fromDays)-\(window.toDays)d: rate limit headroom exhausted"
-                )
-                throw Self.coldMentionScanIncompleteError
-            }
-
-            let windowOptions = options.withBatchDelay(window.batchDelay)
-            for (repoIndex, repo) in repos.enumerated() {
-                let candidates = try await fetchDescriptionMentionCandidates(
-                    owner: repo.owner,
-                    repo: repo.repo,
-                    username: username,
-                    fromDays: window.fromDays,
-                    toDays: window.toDays,
-                    options: windowOptions
-                )
-                let repoKey = Self.repoKey(owner: repo.owner, repo: repo.repo)
-                let authoredNumbers = authoredNumbersByRepo[repoKey] ?? []
-
-                var repoReferences = Set<PullRequestReference>()
-                for candidate in candidates {
-                    let reference = candidate.reference
-                    guard !existingReferences.contains(reference) else { continue }
-                    guard let body = candidate.body, !body.isEmpty else { continue }
-
-                    let mentionedRefs = Self.extractMentionedPRReferences(
-                        from: body,
-                        repositoryOwner: reference.owner,
-                        repositoryName: reference.repo,
-                        sourcePRNumber: reference.number
-                    )
-                    let mentionsMine = mentionedRefs.contains { ref in
-                        Self.repoKey(owner: ref.owner, repo: ref.repo) == repoKey &&
-                            authoredNumbers.contains(ref.number)
-                    }
-                    guard mentionsMine else { continue }
-                    repoReferences.insert(reference)
-                }
-
-                // Publish each repo's matches immediately so a later failure (e.g. a
-                // transient network error mid-scan) can't discard results already
-                // discovered earlier in the same window.
-                try await ingest(repoReferences, batchDelay: window.batchDelay)
-
-                if repoIndex < repos.count - 1 {
-                    try await sleepBetweenMentionBatches(window.batchDelay)
-                }
-            }
-        }
-
-        return Self.normalizeMentionedResults(Array(fetchedByID.values))
-    }
-
-    private func fetchDescriptionMentionedPullRequestReferences(
-        username: String,
-        existingReferences: Set<PullRequestReference>,
-        options: MentionRefreshOptions
-    ) async throws -> Set<PullRequestReference> {
-        let rateLimitSnapshot = await MainActor.run { self.rateLimitInfo }
-        guard rateLimitSnapshot.hasHeadroomForMentions else {
-            logger.info(
-                "Skipping description mention refresh: rate limit remaining \(rateLimitSnapshot.remaining) below headroom threshold"
-            )
-            throw APIError.unknown(String(localized: "Skipped description mention refresh due to low GitHub rate limit headroom"))
-        }
-
-        let authoredReferences = try await fetchAuthoredPullRequestReferences(
-            username: username,
-            options: options
-        )
-        guard !authoredReferences.isEmpty else { return [] }
-
-        let authoredNumbersByRepo = authoredReferences.reduce(into: [String: Set<Int>]()) { partial, reference in
-            partial[Self.repoKey(owner: reference.owner, repo: reference.repo), default: []].insert(reference.number)
-        }
-        let repos = authoredReferences
-            .map { (owner: $0.owner, repo: $0.repo, key: Self.repoKey(owner: $0.owner, repo: $0.repo)) }
-            .reduce(into: [String: (owner: String, repo: String)]()) { partial, item in
-                partial[item.key] = (item.owner, item.repo)
-            }
-            .values
-            .sorted {
-                if $0.owner != $1.owner { return $0.owner < $1.owner }
-                return $0.repo < $1.repo
-            }
-
-        var result = Set<PullRequestReference>()
-        for (repoIndex, repo) in repos.enumerated() {
-            let candidates = try await fetchDescriptionMentionCandidates(
-                owner: repo.owner,
-                repo: repo.repo,
-                username: username,
-                options: options
-            )
-            let repoKey = Self.repoKey(owner: repo.owner, repo: repo.repo)
-            let authoredNumbers = authoredNumbersByRepo[repoKey] ?? []
-
-            for candidate in candidates {
-                let reference = candidate.reference
-                guard !existingReferences.contains(reference) else { continue }
-                guard let body = candidate.body, !body.isEmpty else { continue }
-
-                let mentionedRefs = Self.extractMentionedPRReferences(
-                    from: body,
-                    repositoryOwner: reference.owner,
-                    repositoryName: reference.repo,
-                    sourcePRNumber: reference.number
-                )
-                let mentionsMine = mentionedRefs.contains { ref in
-                    Self.repoKey(owner: ref.owner, repo: ref.repo) == repoKey &&
-                        authoredNumbers.contains(ref.number)
-                }
-                guard mentionsMine else { continue }
-                result.insert(reference)
-            }
-
-            if repoIndex < repos.count - 1 {
-                try await sleepBetweenMentionBatches(options.batchDelay)
-            }
-        }
-
-        return result
-    }
-
     private func fetchAuthoredPullRequestReferences(
         username: String,
         options: MentionRefreshOptions
@@ -1296,77 +1020,8 @@ final class GitHubAPIClient: ObservableObject {
         return mergedReferences
     }
 
-    private struct PullRequestBodyReference {
-        let reference: PullRequestReference
-        let body: String?
-    }
-
-    private func fetchDescriptionMentionCandidates(
-        owner: String,
-        repo: String,
-        username: String,
-        options: MentionRefreshOptions
-    ) async throws -> [PullRequestBodyReference] {
-        let searchQuery = Self.descriptionMentionCandidateSearchQuery(
-            owner: owner,
-            repo: repo,
-            username: username,
-            daysBack: options.descriptionCandidateDaysBack
-        )
-        return try await fetchDescriptionMentionCandidates(searchQuery: searchQuery, options: options)
-    }
-
-    /// Range-windowed variant used by the cold staged scan: only PRs whose
-    /// `updated` date falls in `[now - toDays, now - fromDays]` are returned.
-    private func fetchDescriptionMentionCandidates(
-        owner: String,
-        repo: String,
-        username: String,
-        fromDays: Int,
-        toDays: Int,
-        options: MentionRefreshOptions
-    ) async throws -> [PullRequestBodyReference] {
-        let searchQuery = Self.descriptionMentionCandidateSearchQuery(
-            owner: owner,
-            repo: repo,
-            username: username,
-            fromDays: fromDays,
-            toDays: toDays
-        )
-        return try await fetchDescriptionMentionCandidates(searchQuery: searchQuery, options: options)
-    }
-
-    private func fetchDescriptionMentionCandidates(
-        searchQuery: String,
-        options: MentionRefreshOptions
-    ) async throws -> [PullRequestBodyReference] {
-        var candidates: [PullRequestBodyReference] = []
-        var after: String?
-        repeat {
-            let page = try await fetchPullRequestBodyReferencePage(
-                searchQuery: searchQuery,
-                first: options.boundedSearchPageSize,
-                after: after
-            )
-            candidates.append(contentsOf: page.references)
-            after = page.pageInfo.endCursor
-            if page.pageInfo.hasNextPage {
-                try await sleepBetweenMentionBatches(options.batchDelay)
-            } else {
-                break
-            }
-        } while after != nil
-
-        return candidates
-    }
-
     private struct PullRequestReferencePage {
         let references: Set<PullRequestReference>
-        let pageInfo: PRReferenceSearchResponse.PageInfo
-    }
-
-    private struct PullRequestBodyReferencePage {
-        let references: [PullRequestBodyReference]
         let pageInfo: PRReferenceSearchResponse.PageInfo
     }
 
@@ -1390,35 +1045,6 @@ final class GitHubAPIClient: ObservableObject {
                 }
             )
             return PullRequestReferencePage(
-                references: references,
-                pageInfo: response.data.search.pageInfo
-            )
-        } catch {
-            throw APIError.decoding(error)
-        }
-    }
-
-    private func fetchPullRequestBodyReferencePage(
-        searchQuery: String,
-        first: Int,
-        after: String?
-    ) async throws -> PullRequestBodyReferencePage {
-        let query = buildReferenceSearchQuery(searchQuery: searchQuery, first: first, after: after, includeBody: true)
-        let responseData = try await executeGraphQL(query: query, operation: "fetchDescriptionMentionCandidates")
-        let decoder = JSONDecoder.githubDecoder
-        do {
-            let response = try decoder.decode(PRReferenceSearchResponse.self, from: responseData)
-            let references = response.data.search.nodes.map {
-                PullRequestBodyReference(
-                    reference: PullRequestReference(
-                        owner: $0.repository.owner.login,
-                        repo: $0.repository.name,
-                        number: $0.number
-                    ),
-                    body: $0.body
-                )
-            }
-            return PullRequestBodyReferencePage(
                 references: references,
                 pageInfo: response.data.search.pageInfo
             )
@@ -1704,15 +1330,7 @@ final class GitHubAPIClient: ObservableObject {
                 }
             }
 
-            if ciResult.failureCount > 0 {
-                ciStatus = .failure
-            } else if ciResult.pendingCount > 0 {
-                ciStatus = .pending
-            } else if ciResult.successCount > 0 {
-                ciStatus = .success
-            } else {
-                ciStatus = .expected
-            }
+            ciStatus = Self.deriveCIStatus(from: ciResult) ?? .expected
 
             var effectivePendingCount = ciResult.pendingCount
             var effectiveIsRunning = ciResult.isRunning
@@ -1730,6 +1348,35 @@ final class GitHubAPIClient: ObservableObject {
                 isRunning: effectiveIsRunning,
                 workflows: Array(ciResult.workflows.values)
             )
+
+            let shouldFetchWorkflowRunGuard = ciStatus == .success || (
+                ciStatus == .failure && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            )
+            if shouldFetchWorkflowRunGuard, let headSHA = commit?.oid, !headSHA.isEmpty {
+                do {
+                    let summary = try await fetchWorkflowRunCompletionSummary(
+                        owner: pr.repositoryOwner,
+                        repo: pr.repositoryName,
+                        headSHA: headSHA,
+                        excludeFilter: excludeFilter
+                    )
+                    let snapshot = Self.CIStatusSnapshot(
+                        status: ciStatus,
+                        successCount: checkSuccessCount ?? 0,
+                        failureCount: checkFailureCount ?? 0,
+                        pendingCount: checkPendingCount ?? 0,
+                        extendedInfo: ciExtendedInfo
+                    )
+                    let adjusted = Self.applyingWorkflowRunSummary(to: snapshot, summary: summary)
+                    ciStatus = adjusted.status
+                    checkSuccessCount = adjusted.successCount
+                    checkFailureCount = adjusted.failureCount
+                    checkPendingCount = adjusted.pendingCount
+                    ciExtendedInfo = adjusted.extendedInfo
+                } catch {
+                    logger.warning("Failed to fetch hover workflow-run completion guard for \(pr.repoFullName)#\(pr.number, privacy: .public): \(error.localizedDescription, privacy: .public)")
+                }
+            }
         }
 
         let graphQLBaseNeedsUpdate = Self.deriveBaseNeedsUpdate(mergeStateStatus: node.mergeStateStatus)
@@ -1902,6 +1549,37 @@ final class GitHubAPIClient: ObservableObject {
         return try parseCIContextsResponse(data: responseData)
     }
 
+    func fetchWorkflowRunCompletionSummary(
+        owner: String,
+        repo: String,
+        headSHA: String,
+        excludeFilter: String = ""
+    ) async throws -> WorkflowRunCompletionSummary {
+        var allRuns: [WorkflowRunSnapshot] = []
+        let perPage = 100
+        var page = 1
+        var totalCount: Int?
+
+        repeat {
+            let response = try await fetchWorkflowRunsPage(
+                owner: owner,
+                repo: repo,
+                headSHA: headSHA,
+                perPage: perPage,
+                page: page
+            )
+            totalCount = response.totalCount
+            allRuns.append(contentsOf: response.workflowRuns)
+
+            if response.workflowRuns.count < perPage {
+                break
+            }
+            page += 1
+        } while allRuns.count < (totalCount ?? allRuns.count)
+
+        return Self.summarizeWorkflowRunCompletion(allRuns, excludeFilter: excludeFilter)
+    }
+
     struct CIContextsResult {
         let contexts: [CIContextNode]
         let hasNextPage: Bool
@@ -1922,6 +1600,114 @@ final class GitHubAPIClient: ObservableObject {
         var ciContext: String? { context }
         var ciWorkflowName: String? { workflowName }
         var ciCompletedAt: Date? { completedAt }
+    }
+
+    private struct WorkflowRunsPage {
+        let totalCount: Int
+        let workflowRuns: [WorkflowRunSnapshot]
+    }
+
+    private func fetchWorkflowRunsPage(
+        owner: String,
+        repo: String,
+        headSHA: String,
+        perPage: Int,
+        page: Int
+    ) async throws -> WorkflowRunsPage {
+        var components = URLComponents(string: "https://api.github.com/repos/\(owner)/\(repo)/actions/runs")
+        components?.queryItems = [
+            URLQueryItem(name: "head_sha", value: headSHA),
+            URLQueryItem(name: "per_page", value: String(perPage)),
+            URLQueryItem(name: "page", value: String(page))
+        ]
+        guard let url = components?.url else {
+            throw APIError.invalidResponse
+        }
+
+        var request = URLRequest(url: url)
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
+
+        let (data, response): (Data, URLResponse)
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            throw APIError.network(error)
+        }
+
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw APIError.invalidResponse
+        }
+        updateRateLimitInfo(from: httpResponse)
+        guard httpResponse.statusCode == 200 else {
+            if httpResponse.statusCode == 401 {
+                throw APIError.unauthorized
+            }
+            throw APIError.unknown(String(localized: "Failed to fetch workflow runs: HTTP \(httpResponse.statusCode)"))
+        }
+
+        struct Response: Decodable {
+            let totalCount: Int
+            let workflowRuns: [Run]
+
+            enum CodingKeys: String, CodingKey {
+                case totalCount = "total_count"
+                case workflowRuns = "workflow_runs"
+            }
+
+            struct Run: Decodable {
+                let id: Int
+                let name: String?
+                let displayTitle: String?
+                let path: String?
+                let workflowId: Int?
+                let runNumber: Int?
+                let runAttempt: Int?
+                let status: String?
+                let conclusion: String?
+                let createdAt: Date?
+                let updatedAt: Date?
+
+                enum CodingKeys: String, CodingKey {
+                    case id
+                    case name
+                    case displayTitle = "display_title"
+                    case path
+                    case workflowId = "workflow_id"
+                    case runNumber = "run_number"
+                    case runAttempt = "run_attempt"
+                    case status
+                    case conclusion
+                    case createdAt = "created_at"
+                    case updatedAt = "updated_at"
+                }
+            }
+        }
+
+        do {
+            let decoded = try JSONDecoder.githubDecoder.decode(Response.self, from: data)
+            return WorkflowRunsPage(
+                totalCount: decoded.totalCount,
+                workflowRuns: decoded.workflowRuns.map {
+                    WorkflowRunSnapshot(
+                        id: $0.id,
+                        name: $0.name,
+                        displayTitle: $0.displayTitle,
+                        path: $0.path,
+                        workflowId: $0.workflowId,
+                        runNumber: $0.runNumber ?? 0,
+                        runAttempt: $0.runAttempt ?? 0,
+                        status: $0.status,
+                        conclusion: $0.conclusion,
+                        createdAt: $0.createdAt,
+                        updatedAt: $0.updatedAt
+                    )
+                }
+            )
+        } catch {
+            throw APIError.decoding(error)
+        }
     }
 
     private static func compileRegex(_ pattern: String) -> NSRegularExpression {
@@ -2012,10 +1798,18 @@ final class GitHubAPIClient: ObservableObject {
         return result
     }
 
+    /// Decide whether to paginate past the first page of CI contexts.
+    ///
+    /// We paginate for FAILURE/PENDING (need the full picture to count failed/done
+    /// tasks) and for SUCCESS so the workflow count reflects every workflow that
+    /// ran, not just those whose checks landed on the first page. `hasNextPage`
+    /// gates the cost: small-CI PRs (single page) never pay for an extra request;
+    /// only large-CI PRs — exactly the ones whose first-page sample undercounts
+    /// workflows — trigger pagination.
     static func shouldFetchRemainingCIContexts(rollupState: String, hasNextPage: Bool) -> Bool {
         guard hasNextPage else { return false }
         switch rollupState.uppercased() {
-        case "FAILURE", "PENDING":
+        case "FAILURE", "PENDING", "SUCCESS":
             return true
         default:
             return false
@@ -2084,8 +1878,7 @@ final class GitHubAPIClient: ObservableObject {
         includeReviewMetadata: Bool,
         includeCrossReferences: Bool,
         includeMentionBodies: Bool,
-        includeReviewAuthors: Bool = false,
-        includeBody: Bool = false
+        includeReviewAuthors: Bool = false
     ) -> String {
         let reviewCommentBodyField = includeMentionBodies ? "\n                            body" : ""
         let reviewAuthorField = includeReviewAuthors ? """
@@ -2094,8 +1887,8 @@ final class GitHubAPIClient: ObservableObject {
                         login
                     }
         """ : ""
-        let bodyField = (includeBody || includeMentionBodies) ? "body" : ""
-        let commentsSection = includeMentionBodies ? """
+        let bodySection = includeMentionBodies ? """
+            body
             comments(last: 20) {
                 nodes {
                     id
@@ -2107,12 +1900,6 @@ final class GitHubAPIClient: ObservableObject {
                 }
             }
         """ : ""
-        let bodySection = [bodyField, commentsSection]
-            .filter { !$0.isEmpty }
-            .joined(separator: "\n")
-        let bodySectionWithIndent = bodySection.isEmpty ? "" : """
-            \(bodySection)
-        """
 
         var sections: [String] = [
             """
@@ -2140,7 +1927,7 @@ final class GitHubAPIClient: ObservableObject {
                 }
                 name
             }
-            \(bodySectionWithIndent)
+            \(bodySection)
             reviewThreads(last: 20) {
                 nodes {
                     id
@@ -2403,10 +2190,23 @@ final class GitHubAPIClient: ObservableObject {
     private struct CIParseResult {
         var successCount: Int = 0
         var failureCount: Int = 0
+        var blockingFailureCount: Int = 0
         var pendingCount: Int = 0
         var isRunning: Bool = false
         var workflows: [String: CIWorkflowInfo] = [:]
         var seenCheckNames: Set<String> = []
+    }
+
+    /// Core CI-status ladder shared by every GraphQL parse path. A blocking
+    /// (non-excluded) failure wins, then any pending check, then any completed
+    /// check — note success OR an excluded/non-blocking failure both render as
+    /// `.success`. Returns nil when no check contributed, leaving each caller to
+    /// supply its own fallback (`.expected`, a rollup-based value, or nil).
+    private static func deriveCIStatus(from result: CIParseResult) -> CIStatus? {
+        if result.blockingFailureCount > 0 { return .failure }
+        if result.pendingCount > 0 { return .pending }
+        if result.successCount > 0 || result.failureCount > 0 { return .success }
+        return nil
     }
 
     private static func contextNodes(from nodes: [GraphQLResponse.ContextNode]) -> [CIContextNode] {
@@ -2425,6 +2225,7 @@ final class GitHubAPIClient: ObservableObject {
     /// Shared CI context parsing logic used by parseSearchResponse, parseNodes, and fetchFullCIContexts
     private static func parseCIContexts<T: CIContextLike>(_ contexts: [T], excludeFilter: String, existing: CIParseResult = CIParseResult()) -> CIParseResult {
         var result = existing
+        let excludeMatcher = CIExcludeMatcher(pattern: excludeFilter)
 
         // Sort newest-first by completedAt so dedup keeps the latest result per check name.
         // Entries without completedAt (in-progress checks, StatusContexts) sort to the end.
@@ -2432,6 +2233,8 @@ final class GitHubAPIClient: ObservableObject {
             ($0.ciCompletedAt ?? .distantPast) > ($1.ciCompletedAt ?? .distantPast)
         }
         for context in sorted {
+            let isExcluded = excludeMatcher.matchesAny([context.ciWorkflowName])
+
             if let conclusion = context.ciConclusion {
                 // CheckRun with conclusion
                 if let name = context.ciName {
@@ -2447,6 +2250,9 @@ final class GitHubAPIClient: ObservableObject {
                     updateWorkflow(&result.workflows, key: workflowKey, isWorkflow: isWorkflow, success: 1)
                 case "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
                     result.failureCount += 1
+                    if !isExcluded {
+                        result.blockingFailureCount += 1
+                    }
                     updateWorkflow(&result.workflows, key: workflowKey, isWorkflow: isWorkflow, failure: 1)
                 case "CANCELLED", "SKIPPED", "NEUTRAL", "STALE":
                     break
@@ -2457,11 +2263,6 @@ final class GitHubAPIClient: ObservableObject {
                 }
             } else if let state = context.ciState {
                 // StatusContext
-                if !excludeFilter.isEmpty,
-                   let contextName = context.ciContext,
-                   contextName.lowercased().contains(excludeFilter.lowercased()) {
-                    continue
-                }
                 let workflowKey = context.ciContext ?? "status"
                 switch state.uppercased() {
                 case "SUCCESS":
@@ -2469,6 +2270,9 @@ final class GitHubAPIClient: ObservableObject {
                     updateWorkflow(&result.workflows, key: workflowKey, isWorkflow: false, success: 1)
                 case "FAILURE", "ERROR":
                     result.failureCount += 1
+                    if !isExcluded {
+                        result.blockingFailureCount += 1
+                    }
                     updateWorkflow(&result.workflows, key: workflowKey, isWorkflow: false, failure: 1)
                 case "PENDING", "EXPECTED":
                     result.pendingCount += 1
@@ -2516,6 +2320,192 @@ final class GitHubAPIClient: ObservableObject {
                 pendingCount: pending
             )
         }
+    }
+
+    static func latestWorkflowRunsByCurrentRound(_ runs: [WorkflowRunSnapshot]) -> [WorkflowRunSnapshot] {
+        var latestByWorkflow: [String: WorkflowRunSnapshot] = [:]
+
+        for run in runs {
+            let key = run.groupingKey
+            if let existing = latestByWorkflow[key],
+               compareWorkflowRuns(run, existing) != .orderedDescending {
+                continue
+            }
+            latestByWorkflow[key] = run
+        }
+
+        return Array(latestByWorkflow.values)
+    }
+
+    static func summarizeWorkflowRunCompletion(
+        _ runs: [WorkflowRunSnapshot],
+        excludeFilter: String = ""
+    ) -> WorkflowRunCompletionSummary {
+        let latestRuns = latestWorkflowRunsByCurrentRound(runs)
+        let excludeMatcher = CIExcludeMatcher(pattern: excludeFilter)
+        var completed = 0
+        var success = 0
+        var skipped = 0
+        var failureLike = 0
+        var blockingFailureLike = 0
+        var inFlight = 0
+
+        for run in latestRuns {
+            let conclusion = run.conclusion?.lowercased()
+            let isCompleted = run.status?.lowercased() == "completed" || isTerminalWorkflowRunConclusion(conclusion)
+
+            if isCompleted {
+                completed += 1
+            } else {
+                inFlight += 1
+            }
+
+            switch conclusion {
+            case "success":
+                success += 1
+            case "skipped":
+                skipped += 1
+            case "failure", "cancelled", "timed_out", "action_required", "startup_failure":
+                failureLike += 1
+                if !excludeMatcher.matchesAny([run.displayTitle, run.name]) {
+                    blockingFailureLike += 1
+                }
+            default:
+                break
+            }
+        }
+
+        return WorkflowRunCompletionSummary(
+            totalCount: latestRuns.count,
+            completedCount: completed,
+            successCount: success,
+            skippedCount: skipped,
+            failureLikeCount: failureLike,
+            blockingFailureLikeCount: blockingFailureLike,
+            inFlightCount: inFlight
+        )
+    }
+
+    private static func compareWorkflowRuns(_ lhs: WorkflowRunSnapshot, _ rhs: WorkflowRunSnapshot) -> ComparisonResult {
+        if lhs.runNumber != rhs.runNumber {
+            return lhs.runNumber > rhs.runNumber ? .orderedDescending : .orderedAscending
+        }
+        if lhs.runAttempt != rhs.runAttempt {
+            return lhs.runAttempt > rhs.runAttempt ? .orderedDescending : .orderedAscending
+        }
+
+        let lhsDate = lhs.updatedAt ?? lhs.createdAt ?? .distantPast
+        let rhsDate = rhs.updatedAt ?? rhs.createdAt ?? .distantPast
+        if lhsDate != rhsDate {
+            return lhsDate > rhsDate ? .orderedDescending : .orderedAscending
+        }
+        if lhs.id != rhs.id {
+            return lhs.id > rhs.id ? .orderedDescending : .orderedAscending
+        }
+        return .orderedSame
+    }
+
+    private static func isTerminalWorkflowRunConclusion(_ conclusion: String?) -> Bool {
+        guard let conclusion else { return false }
+        return [
+            "action_required",
+            "cancelled",
+            "failure",
+            "neutral",
+            "skipped",
+            "stale",
+            "success",
+            "timed_out",
+            "startup_failure"
+        ].contains(conclusion)
+    }
+
+    private struct CIStatusSnapshot {
+        var status: CIStatus?
+        var successCount: Int
+        var failureCount: Int
+        var pendingCount: Int
+        var extendedInfo: CIExtendedInfo?
+    }
+
+    private static func applyingWorkflowRunSummary(
+        to snapshot: CIStatusSnapshot,
+        summary: WorkflowRunCompletionSummary
+    ) -> CIStatusSnapshot {
+        guard summary.totalCount > 0 else {
+            return snapshot
+        }
+
+        var adjusted = snapshot
+
+        if summary.failureLikeCount > 0 {
+            adjusted.failureCount = max(adjusted.failureCount, summary.failureLikeCount)
+            addSyntheticWorkflowIfNeeded(
+                to: &adjusted.extendedInfo,
+                name: String(localized: "Failed workflow"),
+                failureCount: summary.failureLikeCount,
+                pendingCount: 0
+            )
+        }
+
+        if summary.inFlightCount > 0 {
+            adjusted.status = .pending
+            adjusted.pendingCount = max(adjusted.pendingCount, summary.inFlightCount)
+            setCIRunning(true, in: &adjusted.extendedInfo)
+            addSyntheticWorkflowIfNeeded(
+                to: &adjusted.extendedInfo,
+                name: String(localized: "Queued workflow"),
+                failureCount: 0,
+                pendingCount: summary.inFlightCount
+            )
+        } else if summary.blockingFailureLikeCount > 0 {
+            adjusted.status = .failure
+            setCIRunning(false, in: &adjusted.extendedInfo)
+        } else if summary.allCompleted, (adjusted.status == .success || summary.failureLikeCount > 0) {
+            adjusted.status = .success
+            adjusted.pendingCount = 0
+            setCIRunning(false, in: &adjusted.extendedInfo)
+        }
+
+        return adjusted
+    }
+
+    private static func setCIRunning(_ isRunning: Bool, in extendedInfo: inout CIExtendedInfo?) {
+        if extendedInfo == nil, isRunning {
+            extendedInfo = CIExtendedInfo(isRunning: true, workflows: [])
+            return
+        }
+        extendedInfo?.isRunning = isRunning
+    }
+
+    private static func addSyntheticWorkflowIfNeeded(
+        to extendedInfo: inout CIExtendedInfo?,
+        name: String,
+        failureCount: Int,
+        pendingCount: Int
+    ) {
+        guard failureCount > 0 || pendingCount > 0 else { return }
+
+        var info = extendedInfo ?? CIExtendedInfo(isRunning: pendingCount > 0, workflows: [])
+        let alreadyRepresented = info.workflows.contains { workflow in
+            (failureCount > 0 && workflow.failureCount > 0) ||
+            (pendingCount > 0 && workflow.pendingCount > 0)
+        }
+        if !alreadyRepresented {
+            info.workflows.append(
+                CIWorkflowInfo(
+                    name: name,
+                    isWorkflow: true,
+                    successCount: 0,
+                    failureCount: failureCount,
+                    pendingCount: pendingCount
+                )
+            )
+        }
+        if pendingCount > 0 {
+            info.isRunning = true
+        }
+        extendedInfo = info
     }
 
     // MARK: - Private
@@ -2729,64 +2719,10 @@ final class GitHubAPIClient: ObservableObject {
 
     static func authoredMentionReferenceSearchQuery(
         username: String,
-        mode: MentionRefreshMode,
-        now: Date = Date()
-    ) -> String {
-        authoredMentionReferenceSearchQuery(
-            username: username,
-            daysBack: mode.authoredReferenceDaysBack,
-            now: now
-        )
-    }
-
-    static func authoredMentionReferenceSearchQuery(
-        username: String,
         daysBack: Int,
         now: Date = Date()
     ) -> String {
         "is:pr author:\(username) created:>=\(dateStringForSearch(daysBack: daysBack, now: now))"
-    }
-
-    static func descriptionMentionCandidateSearchQuery(
-        owner: String,
-        repo: String,
-        username: String,
-        mode: MentionRefreshMode,
-        now: Date = Date()
-    ) -> String {
-        descriptionMentionCandidateSearchQuery(
-            owner: owner,
-            repo: repo,
-            username: username,
-            daysBack: mode.descriptionCandidateDaysBack,
-            now: now
-        )
-    }
-
-    static func descriptionMentionCandidateSearchQuery(
-        owner: String,
-        repo: String,
-        username: String,
-        daysBack: Int,
-        now: Date = Date()
-    ) -> String {
-        "repo:\(owner)/\(repo) is:pr is:open -author:\(username) updated:>=\(dateStringForSearch(daysBack: daysBack, now: now))"
-    }
-
-    /// Bounded-window variant: matches PRs updated within `[now - toDays, now -
-    /// fromDays]`. Used by the cold staged scan so each recency window queries a
-    /// disjoint `updated` range and no candidate is body-scanned twice.
-    static func descriptionMentionCandidateSearchQuery(
-        owner: String,
-        repo: String,
-        username: String,
-        fromDays: Int,
-        toDays: Int,
-        now: Date = Date()
-    ) -> String {
-        let newerBound = dateStringForSearch(daysBack: max(0, fromDays), now: now)
-        let olderBound = dateStringForSearch(daysBack: max(fromDays, toDays), now: now)
-        return "repo:\(owner)/\(repo) is:pr is:open -author:\(username) updated:\(olderBound)..\(newerBound)"
     }
 
     private static func dateStringForSearch(daysBack: Int, now: Date = Date()) -> String {
@@ -2838,17 +2774,15 @@ final class GitHubAPIClient: ObservableObject {
     private func buildReferenceSearchQuery(
         searchQuery: String,
         first: Int,
-        after: String?,
-        includeBody: Bool = false
+        after: String?
     ) -> String {
         let afterClause = after.map { ", after: \(Self.graphQLStringLiteral($0))" } ?? ""
-        let bodyField = includeBody ? "\n                        body" : ""
         return """
         query {
             search(query: \(Self.graphQLStringLiteral(searchQuery)), type: ISSUE, first: \(first)\(afterClause)) {
                 nodes {
                     ... on PullRequest {
-                        number\(bodyField)
+                        number
                         repository {
                             owner {
                                 login
@@ -3121,18 +3055,8 @@ final class GitHubAPIClient: ObservableObject {
         let ciResult = parseCIContexts(ciContexts, excludeFilter: excludeFilter)
 
         let rollupState = statusCheckRollup?.state
-        var ciStatus: CIStatus?
-        if ciResult.failureCount > 0 {
-            ciStatus = .failure
-        } else if ciResult.pendingCount > 0 {
-            ciStatus = .pending
-        } else if ciResult.successCount > 0 {
-            ciStatus = .success
-        } else if statusCheckRollup != nil {
-            ciStatus = .expected
-        } else {
-            ciStatus = nil
-        }
+        var ciStatus: CIStatus? = Self.deriveCIStatus(from: ciResult)
+            ?? (statusCheckRollup != nil ? .expected : nil)
 
         // Trust GitHub's rollup state when it says PENDING but we derived success.
         // This handles QUEUED checks not yet visible in individual contexts.
@@ -3227,54 +3151,6 @@ final class GitHubAPIClient: ObservableObject {
         let initialContextCount: Int  // Number of contexts already fetched in first page
     }
 
-    private static func extractOutboundMentionReferences(
-        body: String?,
-        conversationComments: [IssueCommentSummary],
-        reviewThreads: [ReviewThread],
-        repositoryOwner: String,
-        repositoryName: String,
-        sourcePRNumber: Int
-    ) -> Set<PullRequestReference> {
-        var result = Set<PullRequestReference>()
-
-        if let body, !body.isEmpty {
-            result.formUnion(
-                extractMentionedPRReferences(
-                    from: body,
-                    repositoryOwner: repositoryOwner,
-                    repositoryName: repositoryName,
-                    sourcePRNumber: sourcePRNumber
-                )
-            )
-        }
-
-        for comment in conversationComments {
-            result.formUnion(
-                extractMentionedPRReferences(
-                    from: comment.body,
-                    repositoryOwner: repositoryOwner,
-                    repositoryName: repositoryName,
-                    sourcePRNumber: sourcePRNumber
-                )
-            )
-        }
-
-        for thread in reviewThreads {
-            for comment in thread.comments {
-                result.formUnion(
-                    extractMentionedPRReferences(
-                        from: comment.body,
-                        repositoryOwner: repositoryOwner,
-                        repositoryName: repositoryName,
-                        sourcePRNumber: sourcePRNumber
-                    )
-                )
-            }
-        }
-
-        return result
-    }
-
     private static func inboundMentionReferences(
         from node: MentionSourceBatchResponse.PRNode,
         currentPR: PullRequestReference
@@ -3308,94 +3184,6 @@ final class GitHubAPIClient: ObservableObject {
                     )
                 )
             }
-        }
-
-        return result
-    }
-
-    private func fetchMentionSourceReferences(
-        for prs: [PullRequest],
-        batchSize: Int,
-        batchDelay: TimeInterval
-    ) async throws -> [Int: Set<PullRequestReference>] {
-        let sortedPRs = prs.sorted {
-            if $0.repositoryOwner != $1.repositoryOwner { return $0.repositoryOwner < $1.repositoryOwner }
-            if $0.repositoryName != $1.repositoryName { return $0.repositoryName < $1.repositoryName }
-            return $0.number < $1.number
-        }
-
-        let boundedBatchSize = max(1, min(100, batchSize))
-        let batches: [[PullRequest]] = stride(from: 0, to: sortedPRs.count, by: boundedBatchSize).map {
-            Array(sortedPRs[$0..<min($0 + boundedBatchSize, sortedPRs.count)])
-        }
-
-        var result: [Int: Set<PullRequestReference>] = [:]
-        for (index, batch) in batches.enumerated() {
-            let partial = try await fetchMentionSourceBatch(batch)
-            result.merge(partial) { _, new in new }
-            if index < batches.count - 1 {
-                try await sleepBetweenMentionBatches(batchDelay)
-            }
-        }
-        return result
-    }
-
-    /// Fetch only `crossReferences` (inbound mentions) for a batch of PRs. We no
-    /// longer re-fetch body/comments/reviewThreads — those are already present on
-    /// each `PullRequest` (populated by fetchIncremental from PRDetailCache or the
-    /// detail batch), so outbound mentions can be extracted locally.
-    private func fetchMentionSourceBatch(_ batch: [PullRequest]) async throws -> [Int: Set<PullRequestReference>] {
-        var queryParts: [String] = []
-        for (index, pr) in batch.enumerated() {
-            queryParts.append(
-                """
-                pr_\(index): repository(owner: "\(pr.repositoryOwner)", name: "\(pr.repositoryName)") {
-                    pullRequest(number: \(pr.number)) {
-                        \(buildMentionSourceFieldSelection())
-                    }
-                }
-                """
-            )
-        }
-
-        let query = "query {\n" + queryParts.joined(separator: "\n") + "\n}"
-        let responseData = try await executeGraphQL(query: query, operation: "fetchMentionSourceBatch")
-
-        let decoder = JSONDecoder.githubDecoder
-        let response: MentionSourceBatchResponse
-        do {
-            response = try decoder.decode(MentionSourceBatchResponse.self, from: responseData)
-        } catch {
-            throw APIError.decoding(error)
-        }
-
-        let sourcePRsById = Dictionary(uniqueKeysWithValues: batch.map { ($0.id, $0) })
-        var result: [Int: Set<PullRequestReference>] = [:]
-
-        // Outbound: extract from local fields on the PullRequest we already have.
-        for pr in batch {
-            let outbound = Self.extractOutboundMentionReferences(
-                body: pr.body,
-                conversationComments: pr.conversationComments,
-                reviewThreads: pr.reviewThreads,
-                repositoryOwner: pr.repositoryOwner,
-                repositoryName: pr.repositoryName,
-                sourcePRNumber: pr.number
-            )
-            result[pr.id] = outbound
-        }
-
-        // Inbound: derive from the fresh crossReferences we just fetched.
-        for node in response.data.nodes {
-            guard let databaseId = node.databaseId,
-                  let sourcePR = sourcePRsById[databaseId] else { continue }
-            let currentPR = PullRequestReference(
-                owner: sourcePR.repositoryOwner,
-                repo: sourcePR.repositoryName,
-                number: sourcePR.number
-            )
-            let inbound = Self.inboundMentionReferences(from: node, currentPR: currentPR)
-            result[databaseId, default: []].formUnion(inbound)
         }
 
         return result
@@ -3479,6 +3267,7 @@ final class GitHubAPIClient: ObservableObject {
             }
         }
 
+        await applyWorkflowRunCompletionGuards(to: &parsed)
         return parsed
     }
 
@@ -3490,11 +3279,12 @@ final class GitHubAPIClient: ObservableObject {
             pr.checkSuccessCount += c.success
             pr.checkFailureCount += c.failure
             pr.checkPendingCount += c.pending
-            if pr.checkFailureCount > 0 {
+            let hasBlockingFailure = pr.ciStatus == .failure || c.blockingFailure > 0
+            if hasBlockingFailure {
                 pr.ciStatus = .failure
             } else if pr.checkPendingCount > 0 {
                 pr.ciStatus = .pending
-            } else if pr.checkSuccessCount > 0 {
+            } else if pr.checkSuccessCount > 0 || pr.checkFailureCount > 0 {
                 pr.ciStatus = .success
             } else if c.limitReached && pr.githubCIState?.uppercased() == "FAILURE" {
                 pr.ciStatus = .unknown
@@ -3520,41 +3310,66 @@ final class GitHubAPIClient: ObservableObject {
         }
     }
 
-    private func fetchMentionedPullRequests(
-        references: [PullRequestReference],
-        batchSize: Int,
-        batchDelay: TimeInterval,
-        onProgress: (@Sendable ([PullRequest]) async -> Void)? = nil
-    ) async throws -> [PullRequest] {
-        let sortedReferences = references.sorted {
-            if $0.owner != $1.owner { return $0.owner < $1.owner }
-            if $0.repo != $1.repo { return $0.repo < $1.repo }
-            return $0.number < $1.number
+    private func applyWorkflowRunCompletionGuards(to prs: inout [Int: PullRequest]) async {
+        let excludeFilter = Self.loadCIStatusExcludeFilter()
+        for id in prs.keys.sorted() {
+            guard let pr = prs[id] else { continue }
+            prs[id] = await applyWorkflowRunCompletionGuard(to: pr, excludeFilter: excludeFilter)
+        }
+    }
+
+    private func applyWorkflowRunCompletionGuards(to prs: inout [PullRequest]) async {
+        let excludeFilter = Self.loadCIStatusExcludeFilter()
+        for index in prs.indices {
+            prs[index] = await applyWorkflowRunCompletionGuard(to: prs[index], excludeFilter: excludeFilter)
+        }
+    }
+
+    private func applyWorkflowRunCompletionGuard(to pr: PullRequest, excludeFilter: String) async -> PullRequest {
+        let shouldCheckFailureForExclude = pr.ciStatus == .failure
+            && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard (pr.ciStatus == .success || shouldCheckFailureForExclude),
+              let headSHA = pr.headCommitOid,
+              !headSHA.isEmpty else {
+            return pr
         }
 
-        let fieldSelection = buildPRFieldSelection(
-            includeReviewMetadata: false,
-            includeCrossReferences: false,
-            includeMentionBodies: false
-        )
-        let boundedBatchSize = max(1, min(100, batchSize))
-        let batches: [[PullRequestReference]] = stride(from: 0, to: sortedReferences.count, by: boundedBatchSize).map {
-            Array(sortedReferences[$0..<min($0 + boundedBatchSize, sortedReferences.count)])
-        }
+        do {
+            let summary = try await fetchWorkflowRunCompletionSummary(
+                owner: pr.repositoryOwner,
+                repo: pr.repositoryName,
+                headSHA: headSHA,
+                excludeFilter: excludeFilter
+            )
+            guard summary.totalCount > 0 else { return pr }
 
-        var result: [PullRequest] = []
-        for (index, batch) in batches.enumerated() {
-            result.append(contentsOf: try await fetchMentionedBatch(batch, fieldSelection: fieldSelection))
-            // Emit accumulated results after each batch so callers can publish
-            // incrementally instead of waiting for the full (60s-per-batch) pipeline.
-            if let onProgress {
-                await onProgress(result)
+            var adjusted = pr
+            let snapshot = Self.CIStatusSnapshot(
+                status: adjusted.ciStatus,
+                successCount: adjusted.checkSuccessCount,
+                failureCount: adjusted.checkFailureCount,
+                pendingCount: adjusted.checkPendingCount,
+                extendedInfo: adjusted.ciExtendedInfo
+            )
+            let updated = Self.applyingWorkflowRunSummary(to: snapshot, summary: summary)
+            adjusted.ciStatus = updated.status
+            adjusted.checkSuccessCount = updated.successCount
+            adjusted.checkFailureCount = updated.failureCount
+            adjusted.checkPendingCount = updated.pendingCount
+            adjusted.ciExtendedInfo = updated.extendedInfo
+
+            if adjusted.ciStatus != pr.ciStatus || adjusted.ciIsRunning != pr.ciIsRunning {
+                logger.info(
+                    "Adjusted workflow-run CI state for \(pr.repoFullName)#\(pr.number, privacy: .public): total=\(summary.totalCount, privacy: .public) completed=\(summary.completedCount, privacy: .public) inFlight=\(summary.inFlightCount, privacy: .public) failureLike=\(summary.failureLikeCount, privacy: .public) blockingFailureLike=\(summary.blockingFailureLikeCount, privacy: .public)"
+                )
             }
-            if index < batches.count - 1 {
-                try await sleepBetweenMentionBatches(batchDelay)
-            }
+            return adjusted
+        } catch {
+            logger.warning(
+                "Failed to fetch workflow-run completion guard for \(pr.repoFullName)#\(pr.number, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return pr
         }
-        return result
     }
 
     private func fetchMentionedBatch(
@@ -3585,14 +3400,17 @@ final class GitHubAPIClient: ObservableObject {
             throw APIError.decoding(error)
         }
         let excludeFilter = Self.loadCIStatusExcludeFilter()
-        return response.data.nodes.compactMap {
+        var prs = response.data.nodes.compactMap {
             Self.makeSearchPullRequest(from: $0, category: .mentioned, excludeFilter: excludeFilter)
         }
+        await applyWorkflowRunCompletionGuards(to: &prs)
+        return prs
     }
 
     private struct CICounts {
         var success: Int
         var failure: Int
+        var blockingFailure: Int
         var pending: Int
         var limitReached: Bool
         var isRunning: Bool
@@ -3768,6 +3586,7 @@ final class GitHubAPIClient: ObservableObject {
                 let counts = CICounts(
                     success: parseResult.successCount,
                     failure: parseResult.failureCount,
+                    blockingFailure: parseResult.blockingFailureCount,
                     pending: parseResult.pendingCount,
                     limitReached: limitReached,
                     isRunning: parseResult.isRunning,
@@ -3937,18 +3756,8 @@ final class GitHubAPIClient: ObservableObject {
             ))
         }
 
-        var ciStatus: CIStatus?
-        if ciResult.failureCount > 0 {
-            ciStatus = .failure
-        } else if ciResult.pendingCount > 0 {
-            ciStatus = .pending
-        } else if ciResult.successCount > 0 {
-            ciStatus = .success
-        } else if statusCheckRollup != nil {
-            ciStatus = .expected
-        } else {
-            ciStatus = nil
-        }
+        var ciStatus: CIStatus? = Self.deriveCIStatus(from: ciResult)
+            ?? (statusCheckRollup != nil ? .expected : nil)
 
         var effectivePendingCount = ciResult.pendingCount
         var effectiveIsRunning = ciResult.isRunning
@@ -4046,6 +3855,7 @@ final class GitHubAPIClient: ObservableObject {
         let checkFailureCount: Int
         let checkPendingCount: Int
         let ciExtendedInfo: CIExtendedInfo?
+        let headSHA: String?
     }
 
     func fetchSinglePRCIStatus(owner: String, repo: String, number: Int) async throws -> SinglePRCIResult {
@@ -4056,6 +3866,7 @@ final class GitHubAPIClient: ObservableObject {
                     commits(last: 1) {
                         nodes {
                             commit {
+                                oid
                                 statusCheckRollup {
                                     state
                                     contexts(first: 100) {
@@ -4088,7 +3899,25 @@ final class GitHubAPIClient: ObservableObject {
         """
 
         let responseData = try await executeGraphQL(query: query, operation: "fetchSinglePRCIStatus")
-        return try parseSinglePRCIResponse(data: responseData)
+        var result = try parseSinglePRCIResponse(data: responseData)
+        let excludeFilter = Self.loadCIStatusExcludeFilter()
+        let shouldFetchWorkflowRunGuard = result.ciStatus == .success || (
+            result.ciStatus == .failure && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        )
+        if shouldFetchWorkflowRunGuard, let headSHA = result.headSHA, !headSHA.isEmpty {
+            do {
+                let summary = try await fetchWorkflowRunCompletionSummary(
+                    owner: owner,
+                    repo: repo,
+                    headSHA: headSHA,
+                    excludeFilter: excludeFilter
+                )
+                result = Self.applyingWorkflowRunSummary(to: result, summary: summary)
+            } catch {
+                logger.warning("Failed to fetch single-PR workflow-run completion guard for \(owner)/\(repo)#\(number, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return result
     }
 
     private func parseSinglePRCIResponse(data: Data) throws -> SinglePRCIResult {
@@ -4110,6 +3939,7 @@ final class GitHubAPIClient: ObservableObject {
                 let commit: CommitInfo
             }
             struct CommitInfo: Decodable {
+                let oid: String?
                 let statusCheckRollup: StatusCheckRollup?
             }
             struct StatusCheckRollup: Decodable {
@@ -4142,8 +3972,9 @@ final class GitHubAPIClient: ObservableObject {
         let response = try decoder.decode(Response.self, from: data)
 
         guard let rollup = response.data.repository?.pullRequest?.commits?.nodes.first?.commit.statusCheckRollup else {
-            return SinglePRCIResult(ciStatus: nil, checkSuccessCount: 0, checkFailureCount: 0, checkPendingCount: 0, ciExtendedInfo: nil)
+            return SinglePRCIResult(ciStatus: nil, checkSuccessCount: 0, checkFailureCount: 0, checkPendingCount: 0, ciExtendedInfo: nil, headSHA: nil)
         }
+        let headSHA = response.data.repository?.pullRequest?.commits?.nodes.first?.commit.oid
 
         let ciContexts = (rollup.contexts?.nodes ?? []).map { node in
             CIContextNode(
@@ -4159,16 +3990,7 @@ final class GitHubAPIClient: ObservableObject {
         let excludeFilter = Self.loadCIStatusExcludeFilter()
         let ciResult = Self.parseCIContexts(ciContexts, excludeFilter: excludeFilter)
 
-        var ciStatus: CIStatus?
-        if ciResult.failureCount > 0 {
-            ciStatus = .failure
-        } else if ciResult.pendingCount > 0 {
-            ciStatus = .pending
-        } else if ciResult.successCount > 0 {
-            ciStatus = .success
-        } else {
-            ciStatus = .expected
-        }
+        var ciStatus: CIStatus? = Self.deriveCIStatus(from: ciResult) ?? .expected
 
         // Trust GitHub's rollup state when it says PENDING but we derived success.
         // This handles QUEUED checks not yet visible in individual contexts.
@@ -4190,7 +4012,30 @@ final class GitHubAPIClient: ObservableObject {
             checkSuccessCount: ciResult.successCount,
             checkFailureCount: ciResult.failureCount,
             checkPendingCount: effectivePendingCount,
-            ciExtendedInfo: ciExtendedInfo
+            ciExtendedInfo: ciExtendedInfo,
+            headSHA: headSHA
+        )
+    }
+
+    private static func applyingWorkflowRunSummary(
+        to result: SinglePRCIResult,
+        summary: WorkflowRunCompletionSummary
+    ) -> SinglePRCIResult {
+        let snapshot = CIStatusSnapshot(
+            status: result.ciStatus,
+            successCount: result.checkSuccessCount,
+            failureCount: result.checkFailureCount,
+            pendingCount: result.checkPendingCount,
+            extendedInfo: result.ciExtendedInfo
+        )
+        let adjusted = applyingWorkflowRunSummary(to: snapshot, summary: summary)
+        return SinglePRCIResult(
+            ciStatus: adjusted.status,
+            checkSuccessCount: adjusted.successCount,
+            checkFailureCount: adjusted.failureCount,
+            checkPendingCount: adjusted.pendingCount,
+            ciExtendedInfo: adjusted.extendedInfo,
+            headSHA: result.headSHA
         )
     }
 
@@ -4939,7 +4784,6 @@ private struct PRReferenceSearchResponse: Decodable {
 
     struct PRNode: Decodable {
         let number: Int
-        let body: String?
         let repository: Repository
     }
 
@@ -5170,6 +5014,17 @@ private struct CombinedGraphQLResponse: Decodable {
 
         var repoFullName: String {
             "\(repository.owner.login)/\(repository.name)"
+        }
+    }
+}
+
+private extension Array {
+    /// Split into consecutive sub-arrays of at most `size` elements. A non-positive
+    /// `size` yields a single chunk so callers can't trip `stride(by: 0)`.
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0 else { return isEmpty ? [] : [self] }
+        return stride(from: 0, to: count, by: size).map {
+            Array(self[$0..<Swift.min($0 + size, count)])
         }
     }
 }

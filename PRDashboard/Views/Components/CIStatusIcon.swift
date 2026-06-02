@@ -119,6 +119,11 @@ struct CIStatusIcon: View {
                     return String(localized: "\(doneWf)/\(totalWf) workflows done")
                 }
             case .success:
+                let failedWf = workflows.filter { $0.status == .failure }.count
+                let totalFailedTasks = workflows.reduce(0) { $0 + $1.failureCount }
+                if failedWf > 0 {
+                    return String(localized: "\(failedWf)/\(totalWf) workflows failed, \(totalFailedTasks) tasks ignored")
+                }
                 return String(localized: "\(totalWf) workflows passed")
             default:
                 return ""

@@ -145,7 +145,7 @@ extension IndexSnapshot {
 }
 
 struct CachedPRDetail: Codable {
-    private static let currentCIContextParserVersion = 2
+    private static let currentCIContextParserVersion = 3
 
     let prId: Int
     let indexSnapshot: IndexSnapshot
@@ -389,11 +389,8 @@ final class AuthoredMentionReferenceCache {
     }
 
     func saveEntry(username: String, references: Set<PullRequestReference>, updatedAt: Date) {
-        let sortedReferences = references.sorted {
-            if $0.owner != $1.owner { return $0.owner < $1.owner }
-            if $0.repo != $1.repo { return $0.repo < $1.repo }
-            return $0.number < $1.number
-        }
+        let sortedReferences = references
+            .sorted { PullRequestReference.ordered($0, $1, newestFirst: false) }
         let key = Self.key(for: username)
         let entry = AuthoredMentionReferenceCacheEntry(
             username: username,
