@@ -28,6 +28,39 @@ enum PinnedMajorPREvent: Hashable {
     }
 }
 
+enum CIStatusNotificationPlanner {
+    static func notificationStatus(previous: PullRequest?, current: PullRequest) -> CIStatus? {
+        guard let previous else { return nil }
+        return notificationStatus(previous: previous.ciStatus, current: current.ciStatus)
+    }
+
+    static func notificationStatus(previous: CIStatus?, current: CIStatus?) -> CIStatus? {
+        guard previous != current,
+              let current,
+              current == .success || current == .failure else {
+            return nil
+        }
+        return current
+    }
+}
+
+enum CIWatchPlanner {
+    static func watchCandidates(from prList: PRList) -> [PullRequest] {
+        var seenIDs = Set<Int>()
+        return prList.allPRs.filter { pr in
+            pr.state == .open &&
+                pr.ciIsInFlight &&
+                seenIDs.insert(pr.id).inserted
+        }
+    }
+
+    static func shouldRun(for prList: PRList) -> Bool {
+        // Only existence matters here, so short-circuit on the first in-flight PR
+        // instead of allocating the full (deduped) candidate list.
+        prList.allPRs.contains { $0.state == .open && $0.ciIsInFlight }
+    }
+}
+
 struct PinnedMajorPRNotificationPlan: Equatable {
     let prID: Int
     let events: [PinnedMajorPREvent]
@@ -123,7 +156,9 @@ final class PRManager: PRManagerType, ObservableObject {
     private let oauthManager: GitHubOAuthManager
 
     private var timer: Timer?
+    private var ciWatchTimer: Timer?
     private var activeRefreshTask: Task<Void, Never>?
+    private var ciWatchTask: Task<Void, Never>?
     private var mentionedRefreshTask: Task<Void, Never>?
     private var recoveryRetryTask: Task<Void, Never>?
     private var queuedRefresh = false
@@ -145,6 +180,7 @@ final class PRManager: PRManagerType, ObservableObject {
     private var isOnExpensiveNetwork: Bool = false
     private let networkMonitor = NWPathMonitor()
     private static let mentionedRefreshThrottle: TimeInterval = 30 * 60
+    private static let ciWatchInterval: TimeInterval = 30
     private static let lastMentionedRefreshSucceededAtKey = "PRDashboard.LastMentionedRefreshSucceededAt"
     private static let lastAuthoredMentionReferenceCoverageAtKey = "PRDashboard.LastAuthoredMentionReferenceCoverageAt"
     private static let lastAuthoredMentionReferenceCoverageUsernameKey = "PRDashboard.LastAuthoredMentionReferenceCoverageUsername"
@@ -211,6 +247,8 @@ final class PRManager: PRManagerType, ObservableObject {
 
     deinit {
         activeRefreshTask?.cancel()
+        ciWatchTask?.cancel()
+        ciWatchTimer?.invalidate()
         mentionedRefreshTask?.cancel()
         recoveryRetryTask?.cancel()
         hoverDetailTasks.values.forEach { $0.cancel() }
@@ -230,7 +268,25 @@ final class PRManager: PRManagerType, ObservableObject {
         apiClient.$rateLimitInfo
             .receive(on: DispatchQueue.main)
             .sink { [weak self] info in
-                self?.rateLimitInfo = info
+                Task { @MainActor [weak self] in
+                    self?.rateLimitInfo = info
+                    self?.updateCIWatchTimer()
+                }
+            }
+            .store(in: &cancellables)
+
+        // Re-evaluate the fast CI watch whenever the snapshot changes. Deriving it from
+        // the single source of truth means any path that surfaces in-flight CI (main poll,
+        // manual refresh, mentioned-PR refresh, cache load, single-PR refresh) arms the
+        // watch — no manual call site can be forgotten. Debounced so a burst of per-field
+        // mutations during a refresh collapses into one evaluation, and so the closure reads
+        // the committed `prList` rather than the pre-update value @Published delivers.
+        $prList
+            .debounce(for: .milliseconds(300), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.updateCIWatchTimer()
+                }
             }
             .store(in: &cancellables)
 
@@ -261,11 +317,13 @@ final class PRManager: PRManagerType, ObservableObject {
         if isOnExpensiveNetwork && !wasExpensive {
             timer?.invalidate()
             timer = nil
+            stopCIWatchTimer(reason: "expensive_network")
             cancelRecoveryRetry()
         } else if !isOnExpensiveNetwork && wasExpensive {
             if oauthManager.authState.isAuthenticated {
                 enablePolling(true)
             }
+            updateCIWatchTimer()
         }
     }
 
@@ -278,11 +336,13 @@ final class PRManager: PRManagerType, ObservableObject {
         if isLowPowerMode && !wasLowPowerMode {
             timer?.invalidate()
             timer = nil
+            stopCIWatchTimer(reason: "low_power_mode")
             cancelRecoveryRetry()
         } else if !isLowPowerMode && wasLowPowerMode {
             if oauthManager.authState.isAuthenticated {
                 enablePolling(true)
             }
+            updateCIWatchTimer()
         }
     }
 
@@ -296,6 +356,7 @@ final class PRManager: PRManagerType, ObservableObject {
             requestRefresh(trigger: .auth)
         } else {
             enablePolling(false)
+            stopCIWatchTimer(reason: "sign_out")
             cancelRefreshWork(reason: "sign_out")
             prList = .empty
             previousPRs = [:]
@@ -326,9 +387,8 @@ final class PRManager: PRManagerType, ObservableObject {
             applyReadState(to: &cached)
             self.prList = cached
             // Rebuild previousPRs for change detection
-            for pr in cached.pullRequests {
-                previousPRs[pr.id] = pr
-            }
+            previousPRs = Self.previousPRState(from: cached.allPRs)
+            updateCIWatchTimer()
         }
     }
 
@@ -340,6 +400,7 @@ final class PRManager: PRManagerType, ObservableObject {
         if !enabled {
             timer?.invalidate()
             timer = nil
+            stopCIWatchTimer(reason: "polling_disabled")
             cancelRecoveryRetry()
             return
         }
@@ -511,7 +572,7 @@ final class PRManager: PRManagerType, ObservableObject {
                 checkCIAutoRetries(newPRs: prs)
 
                 // Update previous state
-                previousPRs = Dictionary(uniqueKeysWithValues: prs.map { ($0.id, $0) })
+                previousPRs = Self.previousPRState(from: prs + mentionedPRs)
 
                 let newPRList = PRList(
                     lastUpdated: Date(),
@@ -528,6 +589,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
                 // Save to cache after successful refresh
                 PRCache.shared.save(newPRList)
+                self.updateCIWatchTimer()
                 self.scheduleMentionedRefreshIfNeeded(
                     username: username,
                     openPRs: unfilteredOpenPRs,
@@ -555,7 +617,7 @@ final class PRManager: PRManagerType, ObservableObject {
                     self.clearCmuxOpenStatus(in: &cached)
                     self.prList = cached
                     self.prList.error = error  // Still show error to indicate stale data
-                    self.previousPRs = Dictionary(uniqueKeysWithValues: cached.pullRequests.map { ($0.id, $0) })
+                    self.previousPRs = Self.previousPRState(from: cached.allPRs)
                 } else {
                     self.prList.isLoading = false
                     self.prList.error = error
@@ -570,6 +632,7 @@ final class PRManager: PRManagerType, ObservableObject {
                 if !self.queuedRefresh {
                     self.scheduleRecoveryRetry(after: error, trigger: trigger, showingStaleData: showingStaleData)
                 }
+                self.updateCIWatchTimer()
             }
         }
     }
@@ -1088,20 +1151,137 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     func refreshSinglePRCI(for pr: PullRequest) async {
+        await refreshSinglePRCI(for: pr, notifyOnTerminalChange: false)
+    }
+
+    private func refreshSinglePRCI(for pr: PullRequest, notifyOnTerminalChange: Bool) async {
         do {
             let result = try await apiClient.fetchSinglePRCIStatus(
                 owner: pr.repositoryOwner, repo: pr.repositoryName, number: pr.number
             )
-            if let index = prList.pullRequests.firstIndex(where: { $0.id == pr.id }) {
-                prList.pullRequests[index].ciStatus = result.ciStatus
-                prList.pullRequests[index].checkSuccessCount = result.checkSuccessCount
-                prList.pullRequests[index].checkFailureCount = result.checkFailureCount
-                prList.pullRequests[index].checkPendingCount = result.checkPendingCount
-                prList.pullRequests[index].ciExtendedInfo = result.ciExtendedInfo
-                logger.info("Refreshed single PR CI status for #\(pr.number): \(result.ciStatus?.rawValue ?? "nil")")
-            }
+            applyCIRefreshResult(result, for: pr, notifyOnTerminalChange: notifyOnTerminalChange)
+            updateCIWatchTimer()
+            logger.info("Refreshed single PR CI status for #\(pr.number): \(result.ciStatus?.rawValue ?? "nil")")
         } catch {
+            if error is CancellationError || ((error as? APIError)?.isCancellation == true) {
+                return
+            }
             logger.error("Failed to refresh single PR CI for #\(pr.number): \(error.localizedDescription)")
+        }
+    }
+
+    private func applyCIRefreshResult(
+        _ result: GitHubAPIClient.SinglePRCIResult,
+        for pr: PullRequest,
+        notifyOnTerminalChange: Bool
+    ) {
+        let previousPR = previousPRs[pr.id]
+        var updatedPR: PullRequest?
+
+        func apply(to prs: inout [PullRequest]) {
+            guard let index = prs.firstIndex(where: { $0.id == pr.id }) else { return }
+            prs[index].ciStatus = result.ciStatus
+            prs[index].checkSuccessCount = result.checkSuccessCount
+            prs[index].checkFailureCount = result.checkFailureCount
+            prs[index].checkPendingCount = result.checkPendingCount
+            prs[index].githubCIState = result.ciStatus?.rawValue
+            prs[index].ciExtendedInfo = result.ciExtendedInfo
+            if let headSHA = result.headSHA, !headSHA.isEmpty {
+                prs[index].headCommitOid = headSHA
+            }
+            updatedPR = prs[index]
+        }
+
+        apply(to: &prList.pullRequests)
+        apply(to: &prList.mentionedPullRequests)
+        apply(to: &prList.mergedPullRequests)
+
+        guard let updatedPR else { return }
+        previousPRs[updatedPR.id] = updatedPR
+
+        guard notifyOnTerminalChange,
+              configuration.notificationsEnabled,
+              let newStatus = CIStatusNotificationPlanner.notificationStatus(
+                previous: previousPR,
+                current: updatedPR
+              ) else {
+            return
+        }
+
+        if newStatus == .failure && pinnedPRIdentifiers.contains(updatedPR.pinIdentifier) {
+            notifyPinnedMajorEventsIfNeeded(for: updatedPR)
+        } else {
+            notificationManager.notifyCIStatusChange(pr: updatedPR, newStatus: newStatus)
+        }
+    }
+
+    private func updateCIWatchTimer() {
+        guard oauthManager.authState.isAuthenticated,
+              configuration.isValid,
+              !isAutomaticRecoveryPaused,
+              !isRateLimitCritical else {
+            stopCIWatchTimer(reason: "ci_watch_paused")
+            return
+        }
+
+        guard CIWatchPlanner.shouldRun(for: prList) else {
+            stopCIWatchTimer(reason: "no_in_flight_ci", cancelInFlight: false)
+            return
+        }
+
+        guard ciWatchTimer?.isValid != true else { return }
+
+        let newTimer = Timer(timeInterval: Self.ciWatchInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.startCIWatchRefresh()
+            }
+        }
+        RunLoop.main.add(newTimer, forMode: .common)
+        ciWatchTimer = newTimer
+        logger.info("Started fast CI watch timer")
+    }
+
+    private func stopCIWatchTimer(reason: String, cancelInFlight: Bool = true) {
+        if ciWatchTimer != nil {
+            logger.info("Stopped fast CI watch timer: reason=\(reason, privacy: .public)")
+        }
+        ciWatchTimer?.invalidate()
+        ciWatchTimer = nil
+
+        if cancelInFlight {
+            ciWatchTask?.cancel()
+            ciWatchTask = nil
+        }
+    }
+
+    private func startCIWatchRefresh() {
+        guard ciWatchTask == nil else { return }
+        // Intentionally NOT gated on activeRefreshTask. A full refresh runs for tens of
+        // seconds (incremental fetch + staged mentioned refresh); on a >=60s poll interval
+        // that leaves gaps shorter than the 30s watch cadence, so gating here starved the
+        // watch — nearly every tick landed inside a refresh and was dropped. The watch only
+        // fetches in-flight PRs and self-pauses under rate-limit pressure, so running it
+        // alongside a full refresh is acceptable: snapshot writes are MainActor-serialized
+        // and the last writer wins, self-healing on the next tick.
+
+        let candidates = CIWatchPlanner.watchCandidates(from: prList)
+        guard !candidates.isEmpty else {
+            updateCIWatchTimer()
+            return
+        }
+
+        ciWatchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.ciWatchTask = nil
+                logger.debug("CI watch sweep complete")
+                self.updateCIWatchTimer()
+            }
+
+            for pr in candidates {
+                guard !Task.isCancelled else { return }
+                await self.refreshSinglePRCI(for: pr, notifyOnTerminalChange: true)
+            }
         }
     }
 
@@ -1375,6 +1555,7 @@ final class PRManager: PRManagerType, ObservableObject {
             config: config,
             tokenPresent: !Keychain.loadJiraAPIToken().isEmpty
         )
+        updateCIWatchTimer()
     }
 
     private func clearJiraMetadata(in prList: inout PRList) {
@@ -1499,19 +1680,38 @@ final class PRManager: PRManagerType, ObservableObject {
             }
 
             // Check for CI status changes
-            let previousCI = previousPR.ciStatus
-            let currentCI = pr.ciStatus
-
-            if previousCI != currentCI {
-                if let newStatus = currentCI,
-                   (newStatus == .success || newStatus == .failure) {
-                    if newStatus == .failure && pinnedPRIdentifiers.contains(pr.pinIdentifier) {
-                        continue
-                    }
-                    notificationManager.notifyCIStatusChange(pr: pr, newStatus: newStatus)
+            if let newStatus = CIStatusNotificationPlanner.notificationStatus(
+                previous: previousPR,
+                current: pr
+            ) {
+                if newStatus == .failure && pinnedPRIdentifiers.contains(pr.pinIdentifier) {
+                    continue
                 }
+                notificationManager.notifyCIStatusChange(pr: pr, newStatus: newStatus)
             }
         }
+    }
+
+    private func notifyPinnedMajorEventsIfNeeded(for pr: PullRequest) {
+        guard pinnedPRIdentifiers.contains(pr.pinIdentifier) else { return }
+        guard pr.category == .authored || pr.category == .reviewRequest else { return }
+
+        previousPinnedMajorEvents[pr.id] = notifyPinnedMajorEventsDelta(for: pr)
+    }
+
+    /// Notifies for pinned major events newly observed since the last recorded state and
+    /// returns the current event set for the caller to persist. Suppresses notifications on
+    /// first sighting (cold start, newly pinned) — the caller records state and waits for the
+    /// next delta.
+    private func notifyPinnedMajorEventsDelta(for pr: PullRequest) -> Set<PinnedMajorPREvent> {
+        let events = PinnedMajorPRNotificationPlanner.events(for: pr)
+        if let previousSet = previousPinnedMajorEvents[pr.id] {
+            let newEvents = events.filter { !previousSet.contains($0) }
+            if !newEvents.isEmpty {
+                notificationManager.notifyPinnedMajorEvents(pr: pr, events: newEvents)
+            }
+        }
+        return Set(events)
     }
 
     private func notifyPinnedMajorEvents(newPRs: [PullRequest]) {
@@ -1524,19 +1724,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
         for pr in newPRs where pinnedPRIdentifiers.contains(pr.pinIdentifier) {
             guard pr.category == .authored || pr.category == .reviewRequest else { continue }
-
-            let events = PinnedMajorPRNotificationPlanner.events(for: pr)
-            let currentSet = Set(events)
-
-            // Suppress on first sighting (cold start, newly pinned) — record state and wait for next delta.
-            if let previousSet = previousPinnedMajorEvents[pr.id] {
-                let newEvents = events.filter { !previousSet.contains($0) }
-                if !newEvents.isEmpty {
-                    notificationManager.notifyPinnedMajorEvents(pr: pr, events: newEvents)
-                }
-            }
-
-            nextState[pr.id] = currentSet
+            nextState[pr.id] = notifyPinnedMajorEventsDelta(for: pr)
         }
 
         previousPinnedMajorEvents = nextState
@@ -1702,6 +1890,10 @@ final class PRManager: PRManagerType, ObservableObject {
         if let data = try? JSONEncoder().encode(config) {
             UserDefaults.standard.set(data, forKey: configurationKey)
         }
+    }
+
+    private static func previousPRState(from prs: [PullRequest]) -> [Int: PullRequest] {
+        Dictionary(prs.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     private static func loadDate(forKey key: String) -> Date? {

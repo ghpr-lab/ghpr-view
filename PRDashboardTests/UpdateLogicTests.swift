@@ -715,6 +715,97 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(list.totalUnresolvedCount, 3)
     }
 
+    func testCIStatusNotificationPlannerNotifiesForTerminalTransitions() {
+        XCTAssertEqual(
+            CIStatusNotificationPlanner.notificationStatus(previous: .pending, current: .success),
+            .success
+        )
+        XCTAssertEqual(
+            CIStatusNotificationPlanner.notificationStatus(previous: .expected, current: .failure),
+            .failure
+        )
+        XCTAssertEqual(
+            CIStatusNotificationPlanner.notificationStatus(previous: nil, current: .success),
+            .success
+        )
+    }
+
+    func testCIStatusNotificationPlannerIgnoresFirstObservationAndNonTerminalChanges() {
+        var current = makePullRequest(id: 21, number: 21, category: .authored)
+        current.ciStatus = .success
+
+        XCTAssertNil(CIStatusNotificationPlanner.notificationStatus(previous: nil, current: current))
+        XCTAssertNil(CIStatusNotificationPlanner.notificationStatus(previous: .pending, current: .pending))
+        XCTAssertNil(CIStatusNotificationPlanner.notificationStatus(previous: .success, current: .pending))
+        XCTAssertNil(CIStatusNotificationPlanner.notificationStatus(previous: .failure, current: .expected))
+    }
+
+    func testCIWatchPlannerWatchesVisibleInFlightPRsAndDedupes() {
+        var pendingAuthored = makePullRequest(id: 31, number: 31, category: .authored)
+        pendingAuthored.ciStatus = .pending
+        pendingAuthored.checkSuccessCount = 0
+        pendingAuthored.checkPendingCount = 1
+        pendingAuthored.githubCIState = "PENDING"
+        pendingAuthored.ciExtendedInfo = CIExtendedInfo(isRunning: true, workflows: [])
+
+        var duplicateMentioned = makePullRequest(id: pendingAuthored.id, number: 31, category: .mentioned)
+        duplicateMentioned.ciStatus = .pending
+        duplicateMentioned.checkSuccessCount = 0
+        duplicateMentioned.checkPendingCount = 1
+        duplicateMentioned.githubCIState = "PENDING"
+        duplicateMentioned.ciExtendedInfo = CIExtendedInfo(isRunning: true, workflows: [])
+
+        var pendingMentioned = makePullRequest(id: 34, number: 34, category: .mentioned)
+        pendingMentioned.ciStatus = .pending
+        pendingMentioned.checkSuccessCount = 0
+        pendingMentioned.checkPendingCount = 1
+        pendingMentioned.githubCIState = "PENDING"
+        pendingMentioned.ciExtendedInfo = CIExtendedInfo(isRunning: true, workflows: [])
+
+        var terminal = makePullRequest(id: 32, number: 32, category: .reviewRequest)
+        terminal.ciStatus = .success
+
+        var mergedPending = makePullRequest(
+            id: 33,
+            number: 33,
+            category: .authored,
+            mergedAt: Date()
+        )
+        mergedPending.ciStatus = .pending
+        mergedPending.checkPendingCount = 1
+
+        let list = PRList(
+            lastUpdated: Date(),
+            pullRequests: [pendingAuthored, terminal],
+            mentionedPullRequests: [duplicateMentioned, pendingMentioned],
+            mergedPullRequests: [mergedPending],
+            isLoading: false,
+            error: nil
+        )
+
+        let candidates = CIWatchPlanner.watchCandidates(from: list)
+
+        XCTAssertEqual(candidates.map(\.id), [pendingAuthored.id, pendingMentioned.id])
+        XCTAssertTrue(CIWatchPlanner.shouldRun(for: list))
+    }
+
+    func testCIWatchPlannerStopsWhenNoVisiblePRHasInFlightCI() {
+        var expected = makePullRequest(id: 41, number: 41, category: .authored)
+        expected.ciStatus = .expected
+        expected.checkPendingCount = 0
+        expected.ciExtendedInfo = nil
+        let list = PRList(
+            lastUpdated: Date(),
+            pullRequests: [expected],
+            mentionedPullRequests: [],
+            mergedPullRequests: [],
+            isLoading: false,
+            error: nil
+        )
+
+        XCTAssertFalse(CIWatchPlanner.shouldRun(for: list))
+    }
+
     func testPinnedMajorEventPlannerReportsCIFailureEveryRefresh() {
         var pr = makePullRequest(id: 11, number: 11, category: .authored)
         pr.ciStatus = .failure

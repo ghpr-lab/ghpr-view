@@ -180,7 +180,7 @@ struct SettingsView: View {
                 }
 
                 Section("Notifications") {
-                    Toggle("Enable notifications for new unresolved comments", isOn: $notificationsEnabled)
+                    Toggle("Enable notifications for unresolved comments and CI status changes", isOn: $notificationsEnabled)
                 }
 
                 Section("Jira") {
