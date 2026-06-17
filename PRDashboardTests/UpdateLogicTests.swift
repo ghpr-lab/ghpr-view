@@ -891,6 +891,55 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertFalse(cached.isUsable(against: freshSnapshot, now: now, ttl: PRDetailCache.ttl))
     }
 
+    func testCachedPRDetailInvalidatesWhenBaseConflictsAppearWithoutPRUpdate() {
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        // Base branch advanced into a conflict: none of the other index scalars
+        // move, only the derived conflict flag does.
+        let cachedSnapshot = makeIndexSnapshot(updatedAt: now, hasBaseConflicts: false)
+        let freshSnapshot = makeIndexSnapshot(updatedAt: now, hasBaseConflicts: true)
+        let cached = CachedPRDetail(
+            prId: 18682,
+            indexSnapshot: cachedSnapshot,
+            detail: makePullRequest(id: 18682, number: 18682, category: .authored),
+            detailFetchedAt: now
+        )
+
+        XCTAssertFalse(cached.isUsable(against: freshSnapshot, now: now, ttl: PRDetailCache.ttl))
+    }
+
+    func testIndexSnapshotDecodeWithoutBaseConflictsForcesCacheMiss() throws {
+        struct LegacyIndexSnapshot: Codable {
+            let updatedAt: Date
+            let headOid: String?
+            let ciRollupState: String?
+            let reviewThreadTotal: Int
+            let commentTotal: Int
+            let reviewTotal: Int
+            let unresolvedReviewThreadCount: Int
+        }
+
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        let legacy = LegacyIndexSnapshot(
+            updatedAt: now,
+            headOid: "f574918fa04b0c7ac49de5b1f3876c430d16e81c",
+            ciRollupState: "SUCCESS",
+            reviewThreadTotal: 0,
+            commentTotal: 0,
+            reviewTotal: 0,
+            unresolvedReviewThreadCount: 0
+        )
+        let decoded = try JSONDecoder().decode(IndexSnapshot.self, from: JSONEncoder().encode(legacy))
+        let current = makeIndexSnapshot(
+            updatedAt: now,
+            headOid: "f574918fa04b0c7ac49de5b1f3876c430d16e81c",
+            ciRollupState: "SUCCESS",
+            hasBaseConflicts: false
+        )
+
+        XCTAssertNil(decoded.hasBaseConflicts)
+        XCTAssertNotEqual(decoded, current)
+    }
+
     func testIndexSnapshotDecodeWithoutCIRollupStateForcesCacheMiss() throws {
         struct LegacyIndexSnapshot: Codable {
             let updatedAt: Date
@@ -1609,7 +1658,8 @@ final class UpdateLogicTests: XCTestCase {
         reviewThreadTotal: Int = 0,
         commentTotal: Int = 0,
         reviewTotal: Int = 0,
-        unresolvedReviewThreadCount: Int = 0
+        unresolvedReviewThreadCount: Int = 0,
+        hasBaseConflicts: Bool? = false
     ) -> IndexSnapshot {
         IndexSnapshot(
             updatedAt: updatedAt,
@@ -1618,7 +1668,8 @@ final class UpdateLogicTests: XCTestCase {
             reviewThreadTotal: reviewThreadTotal,
             commentTotal: commentTotal,
             reviewTotal: reviewTotal,
-            unresolvedReviewThreadCount: unresolvedReviewThreadCount
+            unresolvedReviewThreadCount: unresolvedReviewThreadCount,
+            hasBaseConflicts: hasBaseConflicts
         )
     }
 

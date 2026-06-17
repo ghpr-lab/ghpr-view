@@ -2564,6 +2564,8 @@ final class GitHubAPIClient: ObservableObject {
         createdAt
         updatedAt
         mergedAt
+        mergeable
+        mergeStateStatus
         author {
             login
             avatarUrl
@@ -2699,6 +2701,15 @@ final class GitHubAPIClient: ObservableObject {
                     sampledUnresolved += 1
                 }
             }
+            // Base-branch conflicts surface when the base branch advances, which
+            // bumps none of the other index scalars. Carry the derived flag both
+            // as the IndexedPR value (so cache hits paint the badge immediately)
+            // and inside the snapshot (so a conflict transition forces a detail
+            // refetch instead of reusing stale detail for the full TTL).
+            let hasBaseConflicts = Self.deriveBaseConflicts(
+                mergeable: node.mergeable,
+                mergeStateStatus: node.mergeStateStatus
+            )
             let snapshot = IndexSnapshot(
                 updatedAt: node.updatedAt,
                 headOid: lastCommit?.oid,
@@ -2706,7 +2717,8 @@ final class GitHubAPIClient: ObservableObject {
                 reviewThreadTotal: node.reviewThreads?.totalCount ?? 0,
                 commentTotal: node.comments?.totalCount ?? 0,
                 reviewTotal: node.reviews?.totalCount ?? 0,
-                unresolvedReviewThreadCount: sampledUnresolved
+                unresolvedReviewThreadCount: sampledUnresolved,
+                hasBaseConflicts: hasBaseConflicts
             )
             return IndexedPR(
                 databaseId: databaseId,
@@ -2726,7 +2738,7 @@ final class GitHubAPIClient: ObservableObject {
                 baseRefName: node.baseRefName,
                 headRefName: node.headRefName,
                 baseNeedsUpdate: nil,
-                hasBaseConflicts: nil,
+                hasBaseConflicts: hasBaseConflicts,
                 category: category,
                 isMerged: isMerged,
                 snapshot: snapshot
@@ -4708,6 +4720,8 @@ private struct IndexGraphQLResponse: Decodable {
         let createdAt: Date
         let updatedAt: Date
         let mergedAt: Date?
+        let mergeable: String?
+        let mergeStateStatus: String?
         let author: Author?
         let repository: Repository
         let reviewThreads: ReviewThreadsSummary?

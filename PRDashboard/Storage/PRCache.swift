@@ -88,6 +88,13 @@ struct IndexSnapshot: Codable, Equatable {
     /// count field, so without this extra dimension the cached PR detail
     /// (and its stale `isResolved` flags) would be reused for the full TTL.
     let unresolvedReviewThreadCount: Int
+    /// A base-branch conflict appears when the base branch advances, which bumps
+    /// none of the other scalars above. Tracking the derived flag here makes a
+    /// conflict transition invalidate the cache so the detail (and the conflict
+    /// badge) refreshes instead of going stale for the full TTL. `nil` only for
+    /// legacy cache entries written before this field existed, which forces a
+    /// one-time refetch.
+    let hasBaseConflicts: Bool?
 }
 
 extension IndexSnapshot {
@@ -99,6 +106,7 @@ extension IndexSnapshot {
         case commentTotal
         case reviewTotal
         case unresolvedReviewThreadCount
+        case hasBaseConflicts
     }
 
     private static let missingCIRollupStateSentinel = "__missing_ci_rollup_state__"
@@ -125,6 +133,10 @@ extension IndexSnapshot {
             Int.self,
             forKey: .unresolvedReviewThreadCount
         ) ?? -1
+        // Absent in pre-upgrade entries: decoding to `nil` leaves the snapshot
+        // unequal to any freshly-built one (which always carries a concrete
+        // Bool), forcing a one-time refetch so the conflict badge is correct.
+        hasBaseConflicts = try c.decodeIfPresent(Bool.self, forKey: .hasBaseConflicts)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -141,6 +153,7 @@ extension IndexSnapshot {
         try c.encode(commentTotal, forKey: .commentTotal)
         try c.encode(reviewTotal, forKey: .reviewTotal)
         try c.encode(unresolvedReviewThreadCount, forKey: .unresolvedReviewThreadCount)
+        try c.encodeIfPresent(hasBaseConflicts, forKey: .hasBaseConflicts)
     }
 }
 
