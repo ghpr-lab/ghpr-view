@@ -2612,30 +2612,25 @@ final class GitHubAPIClient: ObservableObject {
         """
     }
 
-    private func buildIndexQuery(username: String) -> String {
+    // One search per request. Combining all four index searches into a single
+    // GraphQL document made GitHub evaluate up to 200 PR nodes (4 × first: 50)
+    // with their nested repository/author/commits/reviewThreads selections in
+    // one shot, which blows GitHub's per-query resource budget once the user has
+    // ~50 authored PRs: the API returns HTTP 200 with `RESOURCE_LIMITS_EXCEEDED`
+    // errors and null nodes, which the strict decoder then surfaced as a
+    // confusing "Failed to parse response" error. A single search of 50 PRs with
+    // full thread sampling resolves comfortably (cost ~2), so each search now
+    // runs as its own request.
+    private func buildIndexSearchQuery(searchQuery: String) -> String {
         let fragment = buildPRIndexFieldSelection()
-        let mergedSince = Self.dateStringForSearch(daysBack: 2)
-        let prFragment = """
+        return """
+        query {
+            search(query: \(Self.graphQLStringLiteral(searchQuery)), type: ISSUE, first: 50) {
                 nodes {
                     ... on PullRequest {
                         \(fragment)
                     }
                 }
-        """
-
-        return """
-        query {
-            authored: search(query: "is:pr is:open author:\(username)", type: ISSUE, first: 50) {
-                \(prFragment)
-            }
-            reviewRequested: search(query: "is:pr is:open -author:\(username) review-requested:\(username)", type: ISSUE, first: 50) {
-                \(prFragment)
-            }
-            reviewedBy: search(query: "is:pr is:open -author:\(username) reviewed-by:\(username)", type: ISSUE, first: 50) {
-                \(prFragment)
-            }
-            mergedInvolved: search(query: "is:pr is:merged involves:\(username) merged:>=\(mergedSince)", type: ISSUE, first: 50) {
-                \(prFragment)
             }
             rateLimit {
                 cost
@@ -2647,24 +2642,57 @@ final class GitHubAPIClient: ObservableObject {
     }
 
     func fetchIndex(username: String) async throws -> [IndexedPR] {
-        let query = buildIndexQuery(username: username)
-        let data = try await executeGraphQL(query: query, operation: "fetchIndex")
-        return try parseIndexResponse(data: data, username: username)
+        let mergedSince = Self.dateStringForSearch(daysBack: 2)
+        // Run the four searches concurrently to keep the index off the critical
+        // path; each is independent and bounded to first: 50.
+        async let authored = fetchIndexSearch(
+            "is:pr is:open author:\(username)", operation: "fetchIndex.authored")
+        async let reviewRequested = fetchIndexSearch(
+            "is:pr is:open -author:\(username) review-requested:\(username)",
+            operation: "fetchIndex.reviewRequested")
+        async let reviewedBy = fetchIndexSearch(
+            "is:pr is:open -author:\(username) reviewed-by:\(username)",
+            operation: "fetchIndex.reviewedBy")
+        async let mergedInvolved = fetchIndexSearch(
+            "is:pr is:merged involves:\(username) merged:>=\(mergedSince)",
+            operation: "fetchIndex.mergedInvolved")
+
+        let groups = try await (authored, reviewRequested, reviewedBy, mergedInvolved)
+        return buildIndexedPRs(
+            authored: groups.0,
+            reviewRequested: groups.1,
+            reviewedBy: groups.2,
+            mergedInvolved: groups.3,
+            username: username
+        )
     }
 
-    private func parseIndexResponse(data: Data, username: String) throws -> [IndexedPR] {
+    private func fetchIndexSearch(
+        _ searchQuery: String,
+        operation: String
+    ) async throws -> [IndexSearchResponse.PRNode] {
+        let query = buildIndexSearchQuery(searchQuery: searchQuery)
+        let data = try await executeGraphQL(query: query, operation: operation)
         let decoder = JSONDecoder.githubDecoder
-        let response: IndexGraphQLResponse
+        let response: IndexSearchResponse
         do {
-            response = try decoder.decode(IndexGraphQLResponse.self, from: data)
+            response = try decoder.decode(IndexSearchResponse.self, from: data)
         } catch {
             throw APIError.decoding(error)
         }
-
         if let rl = response.data.rateLimit {
-            logger.info("Index query cost=\(rl.cost, privacy: .public) remaining=\(rl.remaining, privacy: .public)")
+            logger.info("Index \(operation, privacy: .public) cost=\(rl.cost, privacy: .public) remaining=\(rl.remaining, privacy: .public) nodes=\(response.data.search.nodes.count, privacy: .public)")
         }
+        return response.data.search.nodes
+    }
 
+    private func buildIndexedPRs(
+        authored: [IndexSearchResponse.PRNode],
+        reviewRequested: [IndexSearchResponse.PRNode],
+        reviewedBy: [IndexSearchResponse.PRNode],
+        mergedInvolved: [IndexSearchResponse.PRNode],
+        username: String
+    ) -> [IndexedPR] {
         let usernameLower = username.lowercased()
         // Dedupe by databaseId: the 4 aliased searches overlap (e.g. a PR can be
         // both `review-requested:me` and `reviewed-by:me`). First write wins,
@@ -2678,7 +2706,7 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         func indexedFromNode(
-            _ node: IndexGraphQLResponse.PRNode,
+            _ node: IndexSearchResponse.PRNode,
             category: PRCategory,
             isMerged: Bool
         ) -> IndexedPR? {
@@ -2745,22 +2773,22 @@ final class GitHubAPIClient: ObservableObject {
             )
         }
 
-        for node in response.data.authored.nodes {
+        for node in authored {
             if let ip = indexedFromNode(node, category: .authored, isMerged: false) {
                 appendIfNew(ip)
             }
         }
-        for node in response.data.reviewRequested.nodes {
+        for node in reviewRequested {
             if let ip = indexedFromNode(node, category: .reviewRequest, isMerged: false) {
                 appendIfNew(ip)
             }
         }
-        for node in response.data.reviewedBy.nodes {
+        for node in reviewedBy {
             if let ip = indexedFromNode(node, category: .reviewRequest, isMerged: false) {
                 appendIfNew(ip)
             }
         }
-        for node in response.data.mergedInvolved.nodes {
+        for node in mergedInvolved {
             let resolved: PRCategory = (node.author?.login.lowercased() == usernameLower) ? .authored : .reviewRequest
             if let ip = indexedFromNode(node, category: resolved, isMerged: true) {
                 appendIfNew(ip)
@@ -4686,19 +4714,42 @@ private struct MentionedBatchResponse: Decodable {
     }
 }
 
-private struct IndexGraphQLResponse: Decodable {
+private struct IndexSearchResponse: Decodable {
     let data: DataContainer
 
     struct DataContainer: Decodable {
-        let authored: SearchResult
-        let reviewRequested: SearchResult
-        let reviewedBy: SearchResult
-        let mergedInvolved: SearchResult
+        let search: SearchResult
         let rateLimit: RateLimit?
     }
 
     struct SearchResult: Decodable {
         let nodes: [PRNode]
+
+        private enum CodingKeys: String, CodingKey {
+            case nodes
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            // Decode leniently: should a search ever hit GitHub's resource
+            // budget, the over-limit nodes come back as null (the non-null
+            // `id`/`owner` fields fail and the null propagates up the whole
+            // node). Dropping those instead of failing the decode lets the PRs
+            // that did resolve still surface, rather than failing the entire
+            // refresh with a "Failed to parse response" error.
+            let raw = try container.decode([FailableNode].self, forKey: .nodes)
+            nodes = raw.compactMap(\.value)
+        }
+    }
+
+    /// Wrapper that decodes a node to nil instead of throwing when the element
+    /// is null or missing a required field (see `SearchResult`).
+    struct FailableNode: Decodable {
+        let value: PRNode?
+
+        init(from decoder: Decoder) throws {
+            value = try? PRNode(from: decoder)
+        }
     }
 
     struct RateLimit: Decodable {
