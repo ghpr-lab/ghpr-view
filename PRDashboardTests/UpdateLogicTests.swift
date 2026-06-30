@@ -1262,6 +1262,84 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(viewModel.filteredPRs.isEmpty)
     }
 
+    @MainActor
+    func testPRListViewModelSearchMatchesScopedStatusFilters() {
+        let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
+        let prManager = PRManager(
+            apiClient: GitHubAPIClient(token: ""),
+            notificationManager: NotificationManager(),
+            oauthManager: oauthManager
+        )
+        let viewModel = PRListViewModel(
+            prManager: prManager,
+            oauthManager: oauthManager,
+            linkOpener: FakePRLinkOpening(opensAtCmuxFirst: false)
+        )
+
+        var passing = makePullRequest(id: 18101, number: 201, category: .authored)
+        passing.ciStatus = .success
+        passing.checkSuccessCount = 3
+        passing.approvalCount = 2
+
+        var failing = makePullRequest(id: 18102, number: 202, category: .authored)
+        failing.ciStatus = .failure
+        failing.checkSuccessCount = 0
+        failing.checkFailureCount = 1
+
+        var running = makePullRequest(id: 18103, number: 203, category: .authored)
+        running.ciStatus = .pending
+        running.checkSuccessCount = 0
+        running.checkPendingCount = 1
+        running.ciExtendedInfo = CIExtendedInfo(isRunning: true, workflows: [])
+
+        var conflict = makePullRequest(id: 18104, number: 204, category: .authored, hasBaseConflicts: true)
+        conflict.approvalCount = 3
+
+        viewModel.prList = PRList(
+            lastUpdated: Date(),
+            pullRequests: [passing, failing, running, conflict],
+            mentionedPullRequests: [],
+            mergedPullRequests: [],
+            isLoading: false,
+            error: nil
+        )
+
+        viewModel.searchText = "ci:pass"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [passing.id, conflict.id])
+
+        viewModel.searchText = "ci:failure"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [failing.id])
+
+        viewModel.searchText = "ci:running"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [running.id])
+
+        viewModel.searchText = "pr:conflict"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [conflict.id])
+
+        viewModel.searchText = "approval:>=2"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [passing.id, conflict.id])
+
+        viewModel.searchText = "approval:<2"
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [failing.id, running.id])
+    }
+
+    func testPRSearchScopeSuggestsEnumValuesOnly() {
+        XCTAssertEqual(
+            PRSearchScope.suggestions(for: "ci:").map(\.query),
+            ["ci:pass", "ci:failure", "ci:running"]
+        )
+        XCTAssertEqual(PRSearchScope.suggestions(for: "ci:f").map(\.query), ["ci:failure"])
+        XCTAssertEqual(PRSearchScope.suggestions(for: "CI:R").map(\.query), ["ci:running"])
+        XCTAssertTrue(PRSearchScope.suggestions(for: "ci:failure").isEmpty)
+
+        XCTAssertEqual(PRSearchScope.suggestions(for: "pr:").map(\.query), ["pr:conflict"])
+        XCTAssertEqual(PRSearchScope.suggestions(for: "pr:c").map(\.query), ["pr:conflict"])
+        XCTAssertTrue(PRSearchScope.suggestions(for: "pr:conflict").isEmpty)
+
+        XCTAssertTrue(PRSearchScope.suggestions(for: "jira:").isEmpty)
+        XCTAssertTrue(PRSearchScope.suggestions(for: "approval:").isEmpty)
+    }
+
     func testPullRequestDecodesWhenJiraMetadataFieldsAreMissing() throws {
         let pr = makePullRequest(id: 18100, number: 201, category: .authored)
         let data = try JSONEncoder().encode(pr)

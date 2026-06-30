@@ -29,12 +29,10 @@ struct PRRowView: View {
     var onUpdateBranchWithRebase: (() -> Void)?
     var onLoadHoverDetail: (() -> Void)?
     var onTogglePin: (() -> Void)?
-    var onToggleCIAutoRetry: (() -> Void)?
     var isPinned: Bool = false
     var isOpening: Bool = false
     var isUpdatingBranch: Bool = false
     var isLoadingHoverDetail: Bool = false
-    var ciAutoRetryRound: Int?  // nil = not active, 0-3 = current round
     var showCIStatus: Bool = true
     var showConflictStatus: Bool = true
     var showMyReviewStatus: Bool = false
@@ -300,27 +298,8 @@ struct PRRowView: View {
                     )
                 }
             }
-            if let onToggleCIAutoRetry, pr.category == .authored,
-                (ciAutoRetryRound != nil || pr.ciIsRunning || pr.checkFailureCount > 0) {
-                Divider()
-                if let round = ciAutoRetryRound {
-                    Button {
-                        DispatchQueue.main.async { onToggleCIAutoRetry() }
-                    } label: {
-                        Label("Cancel Auto-retry (\(round)/3)", systemImage: "xmark.circle")
-                    }
-                } else {
-                    Button {
-                        DispatchQueue.main.async { onToggleCIAutoRetry() }
-                    } label: {
-                        Label("Auto-retry CI (3x)", systemImage: "arrow.triangle.2.circlepath")
-                    }
-                }
-            }
             if pr.category == .authored && pr.checkFailureCount > 0 {
-                if onToggleCIAutoRetry == nil {
-                    Divider()
-                }
+                Divider()
                 Button {
                     DispatchQueue.main.async { onRerunFailedCI?() }
                 } label: {

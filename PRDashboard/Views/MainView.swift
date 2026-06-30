@@ -29,6 +29,10 @@ struct MainView: View {
         }
     }
 
+    private var searchSuggestions: [PRSearchScope.Suggestion] {
+        PRSearchScope.suggestions(for: viewModel.searchText)
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if viewModel.authState.isAuthenticated {
@@ -77,27 +81,44 @@ struct MainView: View {
     // MARK: - Header
 
     private var headerView: some View {
-        HStack {
+        HStack(alignment: .top, spacing: 8) {
             // Search field
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Search PRs (try jira: for Jira fields)", text: $viewModel.searchText)
-                    .textFieldStyle(.plain)
-                if !viewModel.searchText.isEmpty {
-                    Button(action: { viewModel.searchText = "" }) {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search PRs (jira:, ci:, pr:conflict, approval:>=2)", text: $viewModel.searchText)
+                        .textFieldStyle(.plain)
+                    if !viewModel.searchText.isEmpty {
+                        Button(action: { viewModel.searchText = "" }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
                     }
-                    .buttonStyle(.plain)
+                }
+                .padding(6)
+                .background(Color.primary.opacity(0.05))
+                .cornerRadius(6)
+
+                if !searchSuggestions.isEmpty {
+                    HStack(spacing: 4) {
+                        ForEach(searchSuggestions) { suggestion in
+                            Button {
+                                viewModel.searchText = suggestion.query
+                            } label: {
+                                Label(suggestion.title, systemImage: suggestion.systemImage)
+                            }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                            .help("Filter by \(suggestion.query)")
+                        }
+                    }
+                    .font(.caption)
                 }
             }
-            .padding(6)
-            .background(Color.primary.opacity(0.05))
-            .cornerRadius(6)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .onboardingAnchor(onboardingManager, step: .filter)
-
-            Spacer()
 
             // Refresh button
             Button(action: { viewModel.refresh() }) {
@@ -190,17 +211,9 @@ struct MainView: View {
                                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
-                                onToggleCIAutoRetry: {
-                                    if viewModel.ciAutoRetryRound(for: pr) != nil {
-                                        viewModel.cancelCIAutoRetry(pr)
-                                    } else {
-                                        viewModel.enableCIAutoRetry(pr)
-                                    }
-                                },
                                 isPinned: true,
                                 isOpening: viewModel.isOpeningPR(pr),
                                 isUpdatingBranch: viewModel.isUpdatingBranch(pr),
-                                ciAutoRetryRound: viewModel.ciAutoRetryRound(for: pr),
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                                 showCmuxStatus: viewModel.configuration.openAtCmuxFirst,

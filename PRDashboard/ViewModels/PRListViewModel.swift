@@ -10,16 +10,86 @@ private let logger = Logger(subsystem: "com.prdashboard", category: "PRListViewM
 /// interpreted identically in both places.
 enum PRSearchScope {
     static let jiraPrefix = "jira:"
+    static let ciPrefix = "ci:"
+    static let prPrefix = "pr:"
+    static let approvalPrefix = "approval:"
 
     enum Kind {
         case all
         case jira
+        case ci
+        case pr
+        case approval
     }
 
     struct Parsed {
         let kind: Kind
         /// Trimmed, original-case term (may be empty when the user typed only the scope prefix).
         let term: String
+    }
+
+    struct Suggestion: Equatable, Identifiable {
+        let title: String
+        let query: String
+        let systemImage: String
+
+        var id: String { query }
+    }
+
+    private struct EnumValueSuggestion {
+        let value: String
+        let systemImage: String
+    }
+
+    private enum CIValue: String, CaseIterable {
+        case pass
+        case failure
+        case running
+
+        var suggestion: EnumValueSuggestion {
+            switch self {
+            case .pass:
+                return EnumValueSuggestion(value: rawValue, systemImage: "checkmark.circle")
+            case .failure:
+                return EnumValueSuggestion(value: rawValue, systemImage: "xmark.circle")
+            case .running:
+                return EnumValueSuggestion(value: rawValue, systemImage: "clock")
+            }
+        }
+    }
+
+    private enum PRValue: String, CaseIterable {
+        case conflict
+
+        var suggestion: EnumValueSuggestion {
+            switch self {
+            case .conflict:
+                return EnumValueSuggestion(value: rawValue, systemImage: "exclamationmark.triangle")
+            }
+        }
+    }
+
+    private enum EnumSuggestionScope: CaseIterable {
+        case ci
+        case pr
+
+        var prefix: String {
+            switch self {
+            case .ci:
+                return PRSearchScope.ciPrefix
+            case .pr:
+                return PRSearchScope.prPrefix
+            }
+        }
+
+        var values: [EnumValueSuggestion] {
+            switch self {
+            case .ci:
+                return CIValue.allCases.map(\.suggestion)
+            case .pr:
+                return PRValue.allCases.map(\.suggestion)
+            }
+        }
     }
 
     static func parse(_ rawSearchText: String) -> Parsed {
@@ -29,7 +99,47 @@ enum PRSearchScope {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             return Parsed(kind: .jira, term: term)
         }
+        if trimmed.lowercased().hasPrefix(ciPrefix) {
+            let term = String(trimmed.dropFirst(ciPrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Parsed(kind: .ci, term: term)
+        }
+        if trimmed.lowercased().hasPrefix(prPrefix) {
+            let term = String(trimmed.dropFirst(prPrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Parsed(kind: .pr, term: term)
+        }
+        if trimmed.lowercased().hasPrefix(approvalPrefix) {
+            let term = String(trimmed.dropFirst(approvalPrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Parsed(kind: .approval, term: term)
+        }
         return Parsed(kind: .all, term: trimmed)
+    }
+
+    static func suggestions(for rawSearchText: String) -> [Suggestion] {
+        let trimmed = rawSearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lowered = trimmed.lowercased()
+        guard let scope = EnumSuggestionScope.allCases.first(where: { lowered.hasPrefix($0.prefix) }) else {
+            return []
+        }
+
+        let typedValue = String(lowered.dropFirst(scope.prefix.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedQuery = "\(scope.prefix)\(typedValue)"
+
+        return scope.values
+            .filter { typedValue.isEmpty || $0.value.hasPrefix(typedValue) }
+            .map { value in
+                Suggestion(
+                    title: value.value,
+                    query: "\(scope.prefix)\(value.value)",
+                    systemImage: value.systemImage
+                )
+            }
+            .filter { suggestion in
+                suggestion.query != normalizedQuery
+            }
     }
 
     static func contains(_ term: String, in text: String) -> Bool {
@@ -49,7 +159,6 @@ final class PRListViewModel: ObservableObject {
     @Published private(set) var authState: AuthState = .empty
     @Published private(set) var pinnedPRIdentifiers: Set<String> = []
     @Published private(set) var pinChangeToken = UUID()
-    @Published private(set) var ciRetryTracking: [String: CIRetryState] = [:]
     @Published private(set) var deviceCode: DeviceCodeInfo?
     @Published private(set) var isAuthenticating: Bool = false
     @Published private(set) var authError: Error?
@@ -146,13 +255,6 @@ final class PRListViewModel: ObservableObject {
         prManager.$pinnedPRIdentifiers
             .sink { [weak self] identifiers in
                 self?.pinnedPRIdentifiers = identifiers
-            }
-            .store(in: &cancellables)
-
-        // Match the pin binding above to avoid an extra queue hop for row state.
-        prManager.$ciRetryTracking
-            .sink { [weak self] tracking in
-                self?.ciRetryTracking = tracking
             }
             .store(in: &cancellables)
 
@@ -426,20 +528,6 @@ final class PRListViewModel: ObservableObject {
         prManager.markReviewCommentsUnread(for: pr)
     }
 
-    /// Returns nil if auto-retry is not active, otherwise the max retry round (0-3).
-    func ciAutoRetryRound(for pr: PullRequest) -> Int? {
-        guard let state = ciRetryTracking[pr.pinIdentifier] else { return nil }
-        return state.maxRetryRound
-    }
-
-    func enableCIAutoRetry(_ pr: PullRequest) {
-        prManager.enableCIAutoRetry(for: pr)
-    }
-
-    func cancelCIAutoRetry(_ pr: PullRequest) {
-        prManager.cancelCIAutoRetry(for: pr)
-    }
-
     func rerunFailedCI(_ pr: PullRequest) {
         Task {
             do {
@@ -497,6 +585,18 @@ final class PRListViewModel: ObservableObject {
             return prs.filter { pr in
                 parsed.term.isEmpty ? hasAnyJiraField(pr) : matchesJiraFields(pr, term: parsed.term)
             }
+        case .ci:
+            return prs.filter { pr in
+                matchesCIState(pr, term: parsed.term)
+            }
+        case .pr:
+            return prs.filter { pr in
+                matchesPRState(pr, term: parsed.term)
+            }
+        case .approval:
+            return prs.filter { pr in
+                matchesApprovalCount(pr, term: parsed.term)
+            }
         }
     }
 
@@ -515,6 +615,58 @@ final class PRListViewModel: ObservableObject {
         if let category = pr.jiraStatusCategoryKey, PRSearchScope.contains(term, in: category) { return true }
         if let labels = pr.jiraLabels, labels.contains(where: { PRSearchScope.contains(term, in: $0) }) { return true }
         return false
+    }
+
+    private func matchesCIState(_ pr: PullRequest, term: String) -> Bool {
+        switch term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "", "any", "value":
+            return pr.ciStatus != nil || pr.checkTotalCount > 0 || pr.ciIsRunning
+        case "pass", "passed", "success", "green":
+            return pr.ciStatus == .success
+        case "failure", "fail", "failed", "failing", "red":
+            return pr.ciStatus == .failure || pr.ciStatus == .unknown || pr.checkFailureCount > 0
+        case "running", "pending", "inflight", "in-flight":
+            return pr.ciIsInFlight
+        default:
+            return false
+        }
+    }
+
+    private func matchesPRState(_ pr: PullRequest, term: String) -> Bool {
+        switch term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "conflict", "conflicts":
+            return pr.hasBaseConflicts
+        default:
+            return false
+        }
+    }
+
+    private func matchesApprovalCount(_ pr: PullRequest, term: String) -> Bool {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return pr.approvalCount > 0 }
+
+        let operators = [">=", "<=", "==", ">", "<", "="]
+        let matchedOperator = operators.first { trimmed.hasPrefix($0) }
+        let op = matchedOperator ?? "="
+        let numberText = String(trimmed.dropFirst(matchedOperator?.count ?? 0))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let expected = Int(numberText) else { return false }
+
+        switch op {
+        case ">=":
+            return pr.approvalCount >= expected
+        case ">":
+            return pr.approvalCount > expected
+        case "<=":
+            return pr.approvalCount <= expected
+        case "<":
+            return pr.approvalCount < expected
+        case "=", "==":
+            return pr.approvalCount == expected
+        default:
+            return false
+        }
     }
 
     private func groupByRepo(_ prs: [PullRequest], sortByMergedDate: Bool = false) -> [(String, [PullRequest])] {

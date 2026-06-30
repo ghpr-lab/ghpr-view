@@ -476,16 +476,6 @@
         }
       }
     },
-    "Auto-retry CI (3x)": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "自动重试 CI（3 次）"
-          }
-        }
-      }
-    },
     "CI checks failed on \"%@\"": {
       "localizations": {
         "zh-Hans": {
@@ -512,16 +502,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "取消"
-          }
-        }
-      }
-    },
-    "Cancel Auto-retry (%lld/3)": {
-      "localizations": {
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "取消自动重试（%1$lld/3）"
           }
         }
       }

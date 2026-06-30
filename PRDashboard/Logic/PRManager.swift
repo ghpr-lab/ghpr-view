@@ -110,14 +110,6 @@ protocol PRManagerType: AnyObject {
     func refresh()
 }
 
-struct CIRetryState {
-    var workflowRetryCount: [String: Int] = [:]  // workflow name → retries used
-    var pendingWorkflows: Set<String> = []         // workflows currently being retried
-    static let maxRetries = 3
-
-    var maxRetryRound: Int { workflowRetryCount.values.max() ?? 0 }
-}
-
 @MainActor
 final class PRManager: PRManagerType, ObservableObject {
     @Published private(set) var prList: PRList = .empty
@@ -126,7 +118,6 @@ final class PRManager: PRManagerType, ObservableObject {
     @Published var configuration: Configuration
     @Published private(set) var pinnedPRIdentifiers: Set<String>
     @Published private(set) var readReviewThreadIDs: Set<String>
-    @Published private(set) var ciRetryTracking: [String: CIRetryState] = [:]
     @Published private(set) var updatingBranchPRIDs: Set<Int> = []
     @Published private(set) var loadingHoverDetailPRIDs: Set<Int> = []
     @Published private(set) var isJiraConfigured: Bool = false
@@ -170,7 +161,6 @@ final class PRManager: PRManagerType, ObservableObject {
     private var lastAuthoredMentionReferenceCoverageUsername: String?
     private var previousPRs: [Int: PullRequest] = [:]
     private var previousPinnedMajorEvents: [Int: Set<PinnedMajorPREvent>] = [:]
-    private var pendingAutoRetryPRIds: Set<Int> = []
     private var hoverDetailTasks: [Int: Task<Void, Never>] = [:]
     private var hoverDetailCache: [Int: HoverDetailCacheEntry] = [:]
     private let cmuxStatusProvider: CmuxPRStatusProviding?
@@ -542,9 +532,6 @@ final class PRManager: PRManagerType, ObservableObject {
                     notifyPinnedMajorEvents(newPRs: prs)
                 }
 
-                // Auto-retry failed CI when workflow completes
-                checkAndAutoRetryCI(newPRs: prs)
-
                 // Enrich PRs with Jira tickets from body (fetches only for uncached PRs)
                 do {
                     let jiraCache = try await apiClient.fetchJiraTickets(for: prs + mergedPRs)
@@ -567,9 +554,6 @@ final class PRManager: PRManagerType, ObservableObject {
                     mentionedPRs: &emptyMentionedPRs,
                     mergedPRs: &mergedPRs
                 )
-
-                // Auto-retry CI for pinned PRs with retry tracking
-                checkCIAutoRetries(newPRs: prs)
 
                 // Update previous state
                 previousPRs = Self.previousPRState(from: prs + mentionedPRs)
@@ -639,9 +623,9 @@ final class PRManager: PRManagerType, ObservableObject {
 
     /// Apply `fetchIncremental` progress frame to the published `prList`. Runs on
     /// MainActor. Filters (repositories, drafts) are applied here so the partial
-    /// view is consistent with user settings. The full notification / Jira / CI
-    /// auto-retry pipeline only runs on the final (returned) result; intermediate
-    /// frames only refresh the UI.
+    /// view is consistent with user settings. Notification and enrichment work
+    /// only runs on the final (returned) result; intermediate frames only refresh
+    /// the UI.
     private func applyIncrementalProgress(
         openPRs: [PullRequest],
         mergedPRs: [PullRequest],
@@ -1633,36 +1617,6 @@ final class PRManager: PRManagerType, ObservableObject {
         }
     }
 
-    private func checkAndAutoRetryCI(newPRs: [PullRequest]) {
-        let currentIds = Set(newPRs.map { $0.id })
-        // Clean up tracking for PRs that have disappeared
-        pendingAutoRetryPRIds = pendingAutoRetryPRIds.filter { currentIds.contains($0) }
-
-        for pr in newPRs {
-            guard pr.category == .authored else { continue }
-
-            if pr.ciIsRunning && pr.checkFailureCount > 0 {
-                // Mark for auto-retry when workflow completes
-                pendingAutoRetryPRIds.insert(pr.id)
-            } else if !pr.ciIsRunning && pr.ciStatus == .failure && pendingAutoRetryPRIds.contains(pr.id) {
-                // Workflow just completed with failure — auto-retry
-                pendingAutoRetryPRIds.remove(pr.id)
-                Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    do {
-                        let count = try await self.rerunFailedCI(for: pr)
-                        logger.info("Auto-retried \(count) failed workflow(s) for PR #\(pr.number)")
-                    } catch {
-                        logger.error("Auto-retry failed for PR #\(pr.number): \(error.localizedDescription)")
-                    }
-                }
-            } else if !pr.ciIsRunning || pr.ciStatus == .success {
-                // Clean up tracking
-                pendingAutoRetryPRIds.remove(pr.id)
-            }
-        }
-    }
-
     private func checkForChangesAndNotify(newPRs: [PullRequest]) {
         for pr in newPRs {
             guard let previousPR = previousPRs[pr.id] else {
@@ -1730,115 +1684,6 @@ final class PRManager: PRManagerType, ObservableObject {
         previousPinnedMajorEvents = nextState
     }
 
-    // MARK: - CI Auto-retry (3x per workflow)
-
-    func enableCIAutoRetry(for pr: PullRequest) {
-        let pinId = pr.pinIdentifier
-        guard ciRetryTracking[pinId] == nil else { return }  // already active
-
-        ciRetryTracking[pinId] = CIRetryState()
-
-        // Immediately trigger first retry if there are failures
-        if pr.checkFailureCount > 0, let headSHA = pr.headCommitOid {
-            triggerSelectiveRetry(for: pr, pinId: pinId, headSHA: headSHA)
-        }
-    }
-
-    func cancelCIAutoRetry(for pr: PullRequest) {
-        ciRetryTracking.removeValue(forKey: pr.pinIdentifier)
-    }
-
-    private func checkCIAutoRetries(newPRs: [PullRequest]) {
-        let currentPinIds = Set(newPRs.map { $0.pinIdentifier })
-        // Clean up tracking for PRs that disappeared
-        for pinId in Array(ciRetryTracking.keys) where !currentPinIds.contains(pinId) {
-            ciRetryTracking.removeValue(forKey: pinId)
-        }
-
-        for (pinId, var state) in Array(ciRetryTracking) {
-            guard let pr = newPRs.first(where: { $0.pinIdentifier == pinId }) else { continue }
-
-            // 1. Update pendingWorkflows based on current workflow statuses
-            let currentWorkflows = pr.ciWorkflows
-            let currentNames = Set(currentWorkflows.map { $0.name })
-            // Remove pending workflows that no longer exist or have completed
-            state.pendingWorkflows = Set(state.pendingWorkflows.filter { name in
-                guard currentNames.contains(name) else { return false }
-                guard let workflow = currentWorkflows.first(where: { $0.name == name }) else { return false }
-                return workflow.pendingCount > 0  // only keep if still has pending jobs
-            })
-
-            // 2. Find eligible workflows for retry
-            let eligible = currentWorkflows.filter { workflow in
-                workflow.isWorkflow &&
-                workflow.status == .failure &&
-                workflow.pendingCount == 0 &&
-                !state.pendingWorkflows.contains(workflow.name) &&
-                (state.workflowRetryCount[workflow.name] ?? 0) < CIRetryState.maxRetries
-            }
-
-            if !eligible.isEmpty, let headSHA = pr.headCommitOid {
-                // Optimistically mark as pending to prevent duplicate retries
-                for workflow in eligible {
-                    state.pendingWorkflows.insert(workflow.name)
-                }
-                ciRetryTracking[pinId] = state
-                triggerSelectiveRetry(for: pr, pinId: pinId, headSHA: headSHA)
-            } else {
-                // 3. Check if tracking should be removed
-                let hasFailures = currentWorkflows.contains { $0.status == .failure }
-                let allExhausted = currentWorkflows
-                    .filter { $0.status == .failure }
-                    .allSatisfy { (state.workflowRetryCount[$0.name] ?? 0) >= CIRetryState.maxRetries }
-
-                if (!hasFailures && state.pendingWorkflows.isEmpty) ||
-                   (allExhausted && state.pendingWorkflows.isEmpty) {
-                    ciRetryTracking.removeValue(forKey: pinId)
-                } else {
-                    ciRetryTracking[pinId] = state
-                }
-            }
-        }
-    }
-
-    private func triggerSelectiveRetry(for pr: PullRequest, pinId: String, headSHA: String) {
-        // Build exclude set: exhausted workflows (retries >= 3)
-        let state = ciRetryTracking[pinId] ?? CIRetryState()
-        let exhausted = Set(state.workflowRetryCount.filter { $0.value >= CIRetryState.maxRetries }.map { $0.key })
-        let excludeSet = exhausted
-
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            do {
-                let retriedNames = try await self.apiClient.rerunSelectiveFailedWorkflows(
-                    owner: pr.repositoryOwner, repo: pr.repositoryName,
-                    headSHA: headSHA, excludeWorkflows: excludeSet
-                )
-                // Update retry counts
-                for name in retriedNames {
-                    self.ciRetryTracking[pinId]?.workflowRetryCount[name, default: 0] += 1
-                    self.ciRetryTracking[pinId]?.pendingWorkflows.insert(name)
-                }
-                if !retriedNames.isEmpty {
-                    logger.info("Auto-retry triggered \(retriedNames.count) workflow(s) for \(pinId): \(retriedNames.joined(separator: ", "))")
-                    // Refresh CI status after delay
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    await self.refreshSinglePRCI(for: pr)
-                }
-            } catch {
-                logger.error("Auto-retry failed for \(pinId): \(error.localizedDescription)")
-                // Remove optimistic pending on failure
-                if var s = self.ciRetryTracking[pinId] {
-                    let failedWorkflows = pr.ciWorkflows.filter { $0.status == .failure }.map { $0.name }
-                    for name in failedWorkflows {
-                        s.pendingWorkflows.remove(name)
-                    }
-                    self.ciRetryTracking[pinId] = s
-                }
-            }
-        }
-    }
-
     // MARK: - Pin PR
 
     func pinPR(_ identifier: String) {
@@ -1855,11 +1700,6 @@ final class PRManager: PRManagerType, ObservableObject {
         var updated = pinnedPRIdentifiers
         updated.remove(identifier)
         pinnedPRIdentifiers = updated
-
-        // Keep CI auto-retry tracking consistent for this PR.
-        var updatedTracking = ciRetryTracking
-        updatedTracking.removeValue(forKey: identifier)
-        ciRetryTracking = updatedTracking
 
         Self.savePinnedPRs(updated)
     }
