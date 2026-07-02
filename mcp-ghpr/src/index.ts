@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { createConnection, type Socket } from "node:net";
 import { userInfo } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -8,6 +9,22 @@ import { z } from "zod";
 const SCHEMA_VERSION = 1;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 5_000;
+const GH_COMMAND_TIMEOUT_MS = 15_000;
+const GH_PR_VIEW_FIELDS = [
+  "author",
+  "fullDatabaseId",
+  "isDraft",
+  "latestReviews",
+  "mergeStateStatus",
+  "mergeable",
+  "mergedAt",
+  "number",
+  "state",
+  "statusCheckRollup",
+  "title",
+  "updatedAt",
+  "url",
+];
 
 type Command = "ping" | "snapshot" | "pr";
 type Section = "authored" | "review" | "mentioned" | "merged" | "all";
@@ -32,6 +49,7 @@ interface SocketResponse {
 }
 
 interface PRSnapshot {
+  source?: "gh";
   id: number;
   section: Exclude<Section, "all">;
   repository: string;
@@ -87,6 +105,12 @@ interface Snapshot {
 
 class GhprSocketError extends Error {
   constructor(message: string, readonly code: string = "internal_error") {
+    super(message);
+  }
+}
+
+class GhCommandError extends Error {
+  constructor(message: string, readonly code: string = "gh_failed") {
     super(message);
   }
 }
@@ -228,6 +252,302 @@ async function fetchPr(repository: string, number: number): Promise<PRSnapshot> 
   return response.pullRequest;
 }
 
+async function fetchPrWithFallback(repository: string, number: number): Promise<PRSnapshot> {
+  try {
+    return await fetchPr(repository, number);
+  } catch (err) {
+    if (!shouldFallbackToGh(err)) throw err;
+    try {
+      return await fetchPrFromGh(repository, number);
+    } catch (fallbackErr) {
+      throw new GhprSocketError(
+        `Local API did not return ${repository}#${number} (${errorMessage(err)}); gh fallback failed: ${errorMessage(fallbackErr)}`,
+        fallbackErr instanceof GhCommandError ? fallbackErr.code : "gh_failed",
+      );
+    }
+  }
+}
+
+function shouldFallbackToGh(err: unknown): boolean {
+  return err instanceof GhprSocketError && err.code !== "invalid_request";
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function fetchPrFromGh(repository: string, number: number): Promise<PRSnapshot> {
+  const stdout = await runGh([
+    "pr",
+    "view",
+    String(number),
+    "--repo",
+    repository,
+    "--json",
+    GH_PR_VIEW_FIELDS.join(","),
+  ]);
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch (err) {
+    throw new GhCommandError(`Failed to parse gh JSON: ${errorMessage(err)}`, "gh_invalid_response");
+  }
+
+  if (!isRecord(parsed)) {
+    throw new GhCommandError("gh returned a non-object PR response.", "gh_invalid_response");
+  }
+
+  return ghPullRequestToSnapshot(parsed, repository, number);
+}
+
+function runGh(args: string[]): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    execFile(
+      "gh",
+      args,
+      { encoding: "utf8", maxBuffer: MAX_RESPONSE_BYTES, timeout: GH_COMMAND_TIMEOUT_MS },
+      (err, stdout, stderr) => {
+        if (err) {
+          const nodeErr = err as NodeJS.ErrnoException & { killed?: boolean };
+          const stderrText = stderr.trim();
+          const details = stderrText || nodeErr.message;
+          const code =
+            nodeErr.code === "ENOENT" ? "gh_not_found" : nodeErr.killed ? "gh_timeout" : "gh_failed";
+          reject(new GhCommandError(details, code));
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+function ghPullRequestToSnapshot(
+  raw: Record<string, unknown>,
+  repository: string,
+  requestedNumber: number,
+): PRSnapshot {
+  const number = numberField(raw, "number") ?? requestedNumber;
+  const mergedAt = optionalStringField(raw, "mergedAt");
+  const updatedAt = optionalStringField(raw, "updatedAt") ?? new Date(0).toISOString();
+  const title = optionalStringField(raw, "title") ?? "(untitled)";
+  const url = optionalStringField(raw, "url") ?? `https://github.com/${repository}/pull/${number}`;
+  const reviewCounts = aggregateGhReviews(raw.latestReviews);
+  const ci = deriveGhCI(raw.statusCheckRollup);
+
+  return {
+    id: numberField(raw, "fullDatabaseId") ?? stablePrId(repository, number),
+    source: "gh",
+    section: "mentioned",
+    repository,
+    number,
+    title,
+    author: ghAuthorLogin(raw.author),
+    url,
+    state: normalizeGhPRState(optionalStringField(raw, "state"), mergedAt),
+    isDraft: booleanField(raw, "isDraft") ?? false,
+    isPinned: false,
+    hasBaseConflicts: hasGhBaseConflicts(raw),
+    unresolvedCount: 0,
+    ciStatus: ci.ciStatus,
+    checkSuccessCount: ci.checkSuccessCount,
+    checkFailureCount: ci.checkFailureCount,
+    checkPendingCount: ci.checkPendingCount,
+    ciIsRunning: ci.ciIsRunning,
+    approvalCount: reviewCounts.approvalCount,
+    changesRequestedCount: reviewCounts.changesRequestedCount,
+    myReviewStatus: null,
+    jiraTicket: null,
+    updatedAt,
+    mergedAt,
+  };
+}
+
+function stablePrId(repository: string, number: number): number {
+  let hash = number;
+  for (const char of repository.toLowerCase()) {
+    hash = (hash * 31 + char.charCodeAt(0)) | 0;
+  }
+  return Math.abs(hash || number);
+}
+
+function normalizeGhPRState(state: string | null, mergedAt: string | null): string {
+  if (mergedAt) return "MERGED";
+  const normalized = state?.trim().toUpperCase();
+  if (normalized === "OPEN" || normalized === "CLOSED" || normalized === "MERGED") {
+    return normalized;
+  }
+  return "OPEN";
+}
+
+function hasGhBaseConflicts(raw: Record<string, unknown>): boolean {
+  return (
+    optionalStringField(raw, "mergeable")?.toUpperCase() === "CONFLICTING" ||
+    optionalStringField(raw, "mergeStateStatus")?.toUpperCase() === "DIRTY"
+  );
+}
+
+function aggregateGhReviews(value: unknown): { approvalCount: number; changesRequestedCount: number } {
+  const reviews = Array.isArray(value) ? value.filter(isRecord) : [];
+  let approvalCount = 0;
+  let changesRequestedCount = 0;
+  for (const review of reviews) {
+    switch (optionalStringField(review, "state")?.toUpperCase()) {
+      case "APPROVED":
+        approvalCount += 1;
+        break;
+      case "CHANGES_REQUESTED":
+        changesRequestedCount += 1;
+        break;
+      default:
+        break;
+    }
+  }
+  return { approvalCount, changesRequestedCount };
+}
+
+function deriveGhCI(value: unknown): {
+  ciStatus: string | null;
+  checkSuccessCount: number;
+  checkFailureCount: number;
+  checkPendingCount: number;
+  ciIsRunning: boolean;
+} {
+  const contexts = collectGhStatusContexts(value);
+  let checkSuccessCount = 0;
+  let checkFailureCount = 0;
+  let checkPendingCount = 0;
+  let ciIsRunning = false;
+  const seenNames = new Set<string>();
+
+  for (const context of contexts) {
+    const key = optionalStringField(context, "name") ?? optionalStringField(context, "context");
+    if (key) {
+      const normalizedKey = key.toLowerCase();
+      if (seenNames.has(normalizedKey)) continue;
+      seenNames.add(normalizedKey);
+    }
+
+    const conclusion = optionalStringField(context, "conclusion")?.toUpperCase();
+    const state = optionalStringField(context, "state")?.toUpperCase();
+    const status = optionalStringField(context, "status")?.toUpperCase();
+
+    if (conclusion) {
+      switch (conclusion) {
+        case "SUCCESS":
+          checkSuccessCount += 1;
+          break;
+        case "FAILURE":
+        case "TIMED_OUT":
+        case "ACTION_REQUIRED":
+        case "STARTUP_FAILURE":
+          checkFailureCount += 1;
+          break;
+        case "CANCELLED":
+        case "SKIPPED":
+        case "NEUTRAL":
+        case "STALE":
+          break;
+        default:
+          checkPendingCount += 1;
+          ciIsRunning = true;
+          break;
+      }
+    } else if (state) {
+      switch (state) {
+        case "SUCCESS":
+          checkSuccessCount += 1;
+          break;
+        case "FAILURE":
+        case "ERROR":
+          checkFailureCount += 1;
+          break;
+        case "PENDING":
+        case "EXPECTED":
+          checkPendingCount += 1;
+          if (state === "PENDING") ciIsRunning = true;
+          break;
+        default:
+          break;
+      }
+    } else if (status && status !== "COMPLETED") {
+      checkPendingCount += 1;
+      ciIsRunning = true;
+    }
+  }
+
+  if (contexts.length === 0 && isRecord(value)) {
+    const rollupState = optionalStringField(value, "state")?.toUpperCase();
+    switch (rollupState) {
+      case "SUCCESS":
+        checkSuccessCount = 1;
+        break;
+      case "FAILURE":
+      case "ERROR":
+        checkFailureCount = 1;
+        break;
+      case "PENDING":
+      case "EXPECTED":
+        checkPendingCount = 1;
+        if (rollupState === "PENDING") ciIsRunning = true;
+        break;
+      default:
+        break;
+    }
+  }
+
+  const ciStatus =
+    checkFailureCount > 0
+      ? "FAILURE"
+      : checkPendingCount > 0
+        ? "PENDING"
+        : checkSuccessCount > 0
+          ? "SUCCESS"
+          : null;
+
+  return { ciStatus, checkSuccessCount, checkFailureCount, checkPendingCount, ciIsRunning };
+}
+
+function collectGhStatusContexts(value: unknown): Record<string, unknown>[] {
+  if (Array.isArray(value)) return value.filter(isRecord);
+  if (!isRecord(value)) return [];
+
+  const nodes = value.nodes;
+  if (Array.isArray(nodes)) return nodes.filter(isRecord);
+
+  const contexts = value.contexts;
+  if (isRecord(contexts) && Array.isArray(contexts.nodes)) {
+    return contexts.nodes.filter(isRecord);
+  }
+
+  return [];
+}
+
+function ghAuthorLogin(value: unknown): string {
+  if (!isRecord(value)) return "unknown";
+  return optionalStringField(value, "login") ?? optionalStringField(value, "name") ?? "unknown";
+}
+
+function optionalStringField(record: Record<string, unknown>, key: string): string | null {
+  const value = record[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function numberField(record: Record<string, unknown>, key: string): number | null {
+  const value = record[key];
+  return typeof value === "number" ? value : null;
+}
+
+function booleanField(record: Record<string, unknown>, key: string): boolean | null {
+  const value = record[key];
+  return typeof value === "boolean" ? value : null;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 function flattenPrs(snapshot: Snapshot, section: Section): PRSnapshot[] {
   const { authored, reviewRequests, mentioned, mergedLast24h } = snapshot.pullRequests;
   switch (section) {
@@ -252,7 +572,7 @@ function matchesRepository(pr: PRSnapshot, query: string): boolean {
 }
 
 function compactPr(pr: PRSnapshot) {
-  return {
+  const compact = {
     section: pr.section,
     repository: pr.repository,
     number: pr.number,
@@ -276,6 +596,7 @@ function compactPr(pr: PRSnapshot) {
     updatedAt: pr.updatedAt,
     mergedAt: pr.mergedAt,
   };
+  return pr.source ? { source: pr.source, ...compact } : compact;
 }
 
 function asTextResult(payload: unknown) {
@@ -396,14 +717,14 @@ server.tool(
 
 server.tool(
   "get_pr",
-  "Fetch details for a single PR by repository and number.",
+  "Fetch details for a single PR by repository and number. Falls back to `gh pr view` if the PR is not available from PRDashboard's local snapshot.",
   {
     repository: z.string().describe("OWNER/NAME, e.g. 'kong/kong'."),
     number: z.number().int().positive().describe("PR number."),
   },
   async ({ repository, number }) => {
     try {
-      const pr = await fetchPr(repository, number);
+      const pr = await fetchPrWithFallback(repository, number);
       return asTextResult(compactPr(pr));
     } catch (err) {
       return asErrorResult(err);

@@ -3,9 +3,11 @@
 Read-only MCP server that talks **directly** to PRDashboard's local Unix socket
 (`/tmp/com.xiaocang.PRDashboard.<uid>.sock`). No `ghpr` CLI binary required.
 
-It does not call GitHub. It just reads the snapshot PRDashboard already
-maintains, so it inherits whatever data is in the app: auth, refresh interval,
-rate-limit headroom, sections, etc.
+For normal reads it uses the snapshot PRDashboard already maintains, so it
+inherits whatever data is in the app: auth, refresh interval, rate-limit
+headroom, sections, etc. If `get_pr` cannot find a requested PR in that local
+snapshot (or the app is not reachable), it automatically falls back to
+`gh pr view` for that single PR.
 
 ## Tools
 
@@ -27,7 +29,12 @@ All read-only.
 
 ## Prerequisites
 
-PRDashboard must be running locally. That's it.
+PRDashboard should be running locally for snapshot-backed tools.
+
+The `get_pr` fallback requires the GitHub CLI (`gh`) to be installed and
+authenticated for the requested repository. Fallback results include
+`source: "gh"` and do not include PRDashboard-only enrichment such as local pin
+state, Jira metadata, or unresolved review-thread tracking.
 
 The socket path defaults to `/tmp/com.xiaocang.PRDashboard.<uid>.sock` and can
 be overridden via `GHPR_SOCKET_PATH`.
