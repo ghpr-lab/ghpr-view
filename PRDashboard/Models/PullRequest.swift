@@ -94,6 +94,7 @@ struct PullRequest: Identifiable, Codable, Equatable {
     let authorAvatarURL: URL?
     let repositoryOwner: String
     let repositoryName: String
+    var repositoryIsArchived: Bool? = nil
     let url: URL
     let state: PRState
     let isDraft: Bool

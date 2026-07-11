@@ -1772,6 +1772,7 @@ final class UpdateLogicTests: XCTestCase {
             authorAvatarURL: nil,
             repositoryOwner: "owner",
             repositoryName: "repo",
+            repositoryIsArchived: nil,
             baseRefName: "master",
             headRefName: "fix/mcp-oauth2-jwt",
             baseNeedsUpdate: baseNeedsUpdate,
@@ -2260,5 +2261,170 @@ private final class MockJiraURLProtocol: URLProtocol {
 private extension CmuxCommandResult {
     static func success(stdout: String = "") -> CmuxCommandResult {
         CmuxCommandResult(exitCode: 0, stdout: stdout, stderr: "", timedOut: false)
+    }
+}
+
+// MARK: - Archived Repository Filtering Tests
+
+final class ArchivedRepoFilterTests: XCTestCase {
+
+    /// Helper: minimal IndexSearchResponse JSON for one PR node.
+    private func indexSearchJSON(isArchived: Bool) -> Data {
+        let json = """
+        {
+            "data": {
+                "search": {
+                    "nodes": [
+                        {
+                            "id": "PR_node_1",
+                            "databaseId": 42,
+                            "number": 100,
+                            "title": "Some PR",
+                            "url": "https://github.com/owner/repo/pull/100",
+                            "state": "OPEN",
+                            "isDraft": false,
+                            "baseRefName": "main",
+                            "headRefName": "feature",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                            "updatedAt": "2026-01-02T00:00:00Z",
+                            "mergedAt": null,
+                            "mergeable": "MERGEABLE",
+                            "mergeStateStatus": "CLEAN",
+                            "author": { "login": "testuser", "avatarUrl": null },
+                            "repository": {
+                                "owner": { "login": "owner" },
+                                "name": "repo",
+                                "isArchived": \(isArchived)
+                            },
+                            "reviewThreads": { "totalCount": 0, "nodes": [] },
+                            "oldestReviewThreads": { "totalCount": 0, "nodes": [] },
+                            "comments": { "totalCount": 0 },
+                            "reviews": { "totalCount": 0 },
+                            "commits": {
+                                "nodes": [{
+                                    "commit": {
+                                        "oid": "abc123",
+                                        "committedDate": "2026-01-02T00:00:00Z",
+                                        "statusCheckRollup": { "state": "SUCCESS" }
+                                    }
+                                }]
+                            }
+                        }
+                    ]
+                },
+                "rateLimit": { "cost": 1, "remaining": 4999, "resetAt": "2026-01-02T01:00:00Z" }
+            }
+        }
+        """
+        return Data(json.utf8)
+    }
+
+    private func decodeIndexNodes(from data: Data) throws -> [IndexSearchResponse.PRNode] {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let response = try decoder.decode(IndexSearchResponse.self, from: data)
+        return response.data.search.nodes
+    }
+
+    private func makePullRequest(isArchived: Bool) throws -> PullRequest {
+        let nodes = try decodeIndexNodes(from: indexSearchJSON(isArchived: isArchived))
+        let indexed = GitHubAPIClient(token: "fake").buildIndexedPRs(
+            authored: nodes,
+            reviewRequested: [],
+            reviewedBy: [],
+            mergedInvolved: [],
+            username: "testuser"
+        )
+        return try XCTUnwrap(indexed.first).placeholderPullRequest()
+    }
+
+    func testIndexSearchResponseDecodesIsArchivedTrue() throws {
+        let nodes = try decodeIndexNodes(from: indexSearchJSON(isArchived: true))
+        XCTAssertEqual(nodes.count, 1)
+        XCTAssertEqual(nodes.first?.repository.isArchived, true)
+    }
+
+    func testIndexSearchResponseDecodesIsArchivedFalse() throws {
+        let nodes = try decodeIndexNodes(from: indexSearchJSON(isArchived: false))
+        XCTAssertEqual(nodes.count, 1)
+        XCTAssertEqual(nodes.first?.repository.isArchived, false)
+    }
+
+    func testBuildIndexedPRsPreservesArchivedRepositoryStatus() throws {
+        let pr = try makePullRequest(isArchived: true)
+
+        XCTAssertEqual(pr.repositoryIsArchived, true)
+    }
+
+    func testBuildIndexedPRsPreservesNonArchivedRepositoryStatus() throws {
+        let pr = try makePullRequest(isArchived: false)
+
+        XCTAssertEqual(pr.repositoryIsArchived, false)
+    }
+
+    func testDefaultFilterExcludesArchivedRepository() throws {
+        let pr = try makePullRequest(isArchived: true)
+
+        let result = PullRequestFilter.apply([pr], configuration: .default)
+
+        XCTAssertTrue(result.isEmpty, "Archived repositories should be hidden by default")
+    }
+
+    func testDefaultFilterIncludesNonArchivedRepository() throws {
+        let pr = try makePullRequest(isArchived: false)
+
+        let result = PullRequestFilter.apply([pr], configuration: .default)
+
+        XCTAssertEqual(result.map(\.id), [pr.id])
+    }
+
+    func testExplicitRepositoryFilterIncludesArchivedRepository() throws {
+        let pr = try makePullRequest(isArchived: true)
+        var configuration = Configuration.default
+        configuration.repositories = ["OWNER/REPO"]
+
+        let result = PullRequestFilter.apply([pr], configuration: configuration)
+
+        XCTAssertEqual(result.map(\.id), [pr.id])
+    }
+
+    func testOwnerFilterDoesNotExplicitlyIncludeArchivedRepository() throws {
+        let pr = try makePullRequest(isArchived: true)
+        var configuration = Configuration.default
+        configuration.repositories = ["owner/"]
+
+        let result = PullRequestFilter.apply([pr], configuration: configuration)
+
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    func testOwnerFilterIncludesNonArchivedRepository() throws {
+        let pr = try makePullRequest(isArchived: false)
+        var configuration = Configuration.default
+        configuration.repositories = ["owner/"]
+
+        let result = PullRequestFilter.apply([pr], configuration: configuration)
+
+        XCTAssertEqual(result.map(\.id), [pr.id])
+    }
+
+    func testDifferentRepositoryFilterStillExcludesArchivedRepository() throws {
+        let pr = try makePullRequest(isArchived: true)
+        var configuration = Configuration.default
+        configuration.repositories = ["other/repo"]
+
+        let result = PullRequestFilter.apply([pr], configuration: configuration)
+
+        XCTAssertTrue(result.isEmpty)
+    }
+
+    func testDifferentRepositoryFilterExcludesNonArchivedRepository() throws {
+        let pr = try makePullRequest(isArchived: false)
+        var configuration = Configuration.default
+        configuration.repositories = ["other/repo"]
+
+        let result = PullRequestFilter.apply([pr], configuration: configuration)
+
+        XCTAssertTrue(result.isEmpty)
     }
 }

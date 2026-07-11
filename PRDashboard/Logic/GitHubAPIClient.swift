@@ -46,6 +46,7 @@ struct IndexedPR {
     let authorAvatarURL: URL?
     let repositoryOwner: String
     let repositoryName: String
+    let repositoryIsArchived: Bool?
     let baseRefName: String?
     let headRefName: String?
     let baseNeedsUpdate: Bool?
@@ -97,6 +98,7 @@ struct IndexedPR {
             authorAvatarURL: authorAvatarURL,
             repositoryOwner: repositoryOwner,
             repositoryName: repositoryName,
+            repositoryIsArchived: repositoryIsArchived,
             url: url,
             state: state,
             isDraft: isDraft,
@@ -1926,6 +1928,7 @@ final class GitHubAPIClient: ObservableObject {
                     login
                 }
                 name
+                isArchived
             }
             \(bodySection)
             reviewThreads(last: 20) {
@@ -2575,6 +2578,7 @@ final class GitHubAPIClient: ObservableObject {
                 login
             }
             name
+            isArchived
         }
         reviewThreads(last: 50) {
             totalCount
@@ -2686,7 +2690,7 @@ final class GitHubAPIClient: ObservableObject {
         return response.data.search.nodes
     }
 
-    private func buildIndexedPRs(
+    func buildIndexedPRs(
         authored: [IndexSearchResponse.PRNode],
         reviewRequested: [IndexSearchResponse.PRNode],
         reviewedBy: [IndexSearchResponse.PRNode],
@@ -2763,6 +2767,7 @@ final class GitHubAPIClient: ObservableObject {
                 authorAvatarURL: node.author?.avatarUrl,
                 repositoryOwner: node.repository.owner.login,
                 repositoryName: node.repository.name,
+                repositoryIsArchived: node.repository.isArchived,
                 baseRefName: node.baseRefName,
                 headRefName: node.headRefName,
                 baseNeedsUpdate: nil,
@@ -3161,6 +3166,7 @@ final class GitHubAPIClient: ObservableObject {
             authorAvatarURL: node.author?.avatarUrl,
             repositoryOwner: node.repository.owner.login,
             repositoryName: node.repository.name,
+            repositoryIsArchived: node.repository.isArchived,
             url: node.url,
             state: PRState(rawValue: node.state) ?? .open,
             isDraft: node.isDraft,
@@ -4002,6 +4008,7 @@ final class GitHubAPIClient: ObservableObject {
             authorAvatarURL: node.author?.avatarUrl,
             repositoryOwner: node.repository.owner.login,
             repositoryName: node.repository.name,
+            repositoryIsArchived: node.repository.isArchived,
             url: node.url,
             state: PRState(rawValue: node.state) ?? .open,
             isDraft: node.isDraft,
@@ -4639,7 +4646,7 @@ private struct MentionedBatchResponse: Decodable {
     }
 }
 
-private struct IndexSearchResponse: Decodable {
+struct IndexSearchResponse: Decodable {
     let data: DataContainer
 
     struct DataContainer: Decodable {
@@ -4715,6 +4722,7 @@ private struct IndexSearchResponse: Decodable {
     struct Repository: Decodable {
         let owner: Owner
         let name: String
+        let isArchived: Bool?
     }
 
     struct Owner: Decodable {
@@ -4804,6 +4812,7 @@ private struct GraphQLResponse: Decodable {
     struct Repository: Decodable {
         let owner: Owner
         let name: String
+        let isArchived: Bool?
     }
 
     struct Owner: Decodable {
@@ -5016,6 +5025,7 @@ private struct CombinedGraphQLResponse: Decodable {
     struct Repository: Decodable {
         let owner: Owner
         let name: String
+        let isArchived: Bool?
     }
 
     struct Owner: Decodable {

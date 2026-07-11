@@ -61,6 +61,27 @@ enum CIWatchPlanner {
     }
 }
 
+enum PullRequestFilter {
+    static func apply(_ pullRequests: [PullRequest], configuration: Configuration) -> [PullRequest] {
+        let repositoryFilters = configuration.repositories.map { $0.lowercased() }
+        return pullRequests.filter { pr in
+            let repo = pr.repoFullName.lowercased()
+            let matchesRepositoryFilter = repositoryFilters.contains { filter in
+                filter.hasSuffix("/") ? repo.hasPrefix(filter) : repo == filter
+            }
+            let isExplicitlyIncluded = repositoryFilters.contains(repo)
+
+            if !repositoryFilters.isEmpty && !matchesRepositoryFilter {
+                return false
+            }
+            if pr.repositoryIsArchived == true && !isExplicitlyIncluded {
+                return false
+            }
+            return configuration.showDrafts || !pr.isDraft
+        }
+    }
+}
+
 struct PinnedMajorPRNotificationPlan: Equatable {
     let prID: Int
     let events: [PinnedMajorPREvent]
@@ -835,24 +856,7 @@ final class PRManager: PRManagerType, ObservableObject {
     }
 
     private func filterByConfiguration(_ prs: [PullRequest]) -> [PullRequest] {
-        var result = prs
-        if !configuration.repositories.isEmpty {
-            result = result.filter { pr in
-                let repoName = pr.repoFullName.lowercased()
-                return configuration.repositories.contains { filter in
-                    let filterLower = filter.lowercased()
-                    if filterLower.hasSuffix("/") {
-                        return repoName.hasPrefix(filterLower)
-                    } else {
-                        return repoName == filterLower
-                    }
-                }
-            }
-        }
-        if !configuration.showDrafts {
-            result = result.filter { !$0.isDraft }
-        }
-        return result
+        PullRequestFilter.apply(prs, configuration: configuration)
     }
 
     private func enrichJiraMetadata(
