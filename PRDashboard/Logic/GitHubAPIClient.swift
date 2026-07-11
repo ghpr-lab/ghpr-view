@@ -3474,6 +3474,13 @@ final class GitHubAPIClient: ObservableObject {
             }
         }
 
+        return Self.mergeMentionedRefreshResults(existing: existing, refreshedByID: refreshedByID)
+    }
+
+    static func mergeMentionedRefreshResults(
+        existing: [PullRequest],
+        refreshedByID: [Int: PullRequest]
+    ) -> [PullRequest] {
         var result: [PullRequest] = []
         for old in existing {
             guard let fresh = refreshedByID[old.id] else {
@@ -3490,9 +3497,10 @@ final class GitHubAPIClient: ObservableObject {
             updated.ciExtendedInfo = fresh.ciExtendedInfo
             updated.lastCommitAt = fresh.lastCommitAt
             updated.headCommitOid = fresh.headCommitOid
+            updated.repositoryIsArchived = fresh.repositoryIsArchived
             result.append(updated)
         }
-        return Self.normalizeMentionedResults(result)
+        return normalizeMentionedResults(result)
     }
 
     private func fetchMentionedBatch(

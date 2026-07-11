@@ -80,6 +80,12 @@ enum PullRequestFilter {
             return configuration.showDrafts || !pr.isDraft
         }
     }
+
+    static func apply(to prList: inout PRList, configuration: Configuration) {
+        prList.pullRequests = apply(prList.pullRequests, configuration: configuration)
+        prList.mentionedPullRequests = apply(prList.mentionedPullRequests, configuration: configuration)
+        prList.mergedPullRequests = apply(prList.mergedPullRequests, configuration: configuration)
+    }
 }
 
 struct PinnedMajorPRNotificationPlan: Equatable {
@@ -396,6 +402,7 @@ final class PRManager: PRManagerType, ObservableObject {
         if var cached = PRCache.shared.load() {
             clearCmuxOpenStatus(in: &cached)
             applyReadState(to: &cached)
+            PullRequestFilter.apply(to: &cached, configuration: configuration)
             self.prList = cached
             // Rebuild previousPRs for change detection
             previousPRs = Self.previousPRState(from: cached.allPRs)
@@ -540,6 +547,7 @@ final class PRManager: PRManagerType, ObservableObject {
                 // but their CI can change far sooner, so refresh just the CI here to
                 // avoid a stale snapshot (e.g. stuck "running" after checks finished).
                 mentionedPRs = await self.apiClient.refreshMentionedCIStatuses(mentionedPRs)
+                mentionedPRs = self.filterByConfiguration(mentionedPRs)
 
                 self.applyReadState(to: &prs)
                 self.applyReadState(to: &mentionedPRs)
@@ -620,6 +628,7 @@ final class PRManager: PRManagerType, ObservableObject {
                 if !self.prList.hasUsableData,
                    var cached = PRCache.shared.load() {
                     self.clearCmuxOpenStatus(in: &cached)
+                    PullRequestFilter.apply(to: &cached, configuration: self.configuration)
                     self.prList = cached
                     self.prList.error = error  // Still show error to indicate stale data
                     self.previousPRs = Self.previousPRState(from: cached.allPRs)

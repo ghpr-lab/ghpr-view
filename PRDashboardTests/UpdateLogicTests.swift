@@ -2427,4 +2427,39 @@ final class ArchivedRepoFilterTests: XCTestCase {
 
         XCTAssertTrue(result.isEmpty)
     }
+
+    func testMentionedRefreshArchiveStatusIsImmediatelyFilterable() throws {
+        var old = try makePullRequest(isArchived: false)
+        var fresh = try makePullRequest(isArchived: true)
+        old.ciStatus = .pending
+        fresh.ciStatus = .success
+
+        let refreshed = GitHubAPIClient.mergeMentionedRefreshResults(
+            existing: [old],
+            refreshedByID: [fresh.id: fresh]
+        )
+
+        XCTAssertEqual(refreshed.first?.repositoryIsArchived, true)
+        XCTAssertEqual(refreshed.first?.ciStatus, .success)
+        XCTAssertTrue(PullRequestFilter.apply(refreshed, configuration: .default).isEmpty)
+    }
+
+    func testCachedPRListFilterExcludesArchivedRepositoriesFromEverySection() throws {
+        let archived = try makePullRequest(isArchived: true)
+        let active = try makePullRequest(isArchived: false)
+        var cached = PRList(
+            lastUpdated: Date(),
+            pullRequests: [archived, active],
+            mentionedPullRequests: [archived],
+            mergedPullRequests: [archived],
+            isLoading: false,
+            error: nil
+        )
+
+        PullRequestFilter.apply(to: &cached, configuration: .default)
+
+        XCTAssertEqual(cached.pullRequests.map(\.repositoryIsArchived), [false])
+        XCTAssertTrue(cached.mentionedPullRequests.isEmpty)
+        XCTAssertTrue(cached.mergedPullRequests.isEmpty)
+    }
 }
