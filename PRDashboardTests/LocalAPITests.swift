@@ -31,6 +31,13 @@ final class LocalAPITests: XCTestCase {
             category: .mentioned,
             updatedAt: now.addingTimeInterval(-180)
         )
+        let directMention = makePullRequest(
+            id: 304,
+            number: 304,
+            title: "Directly mentioned PR",
+            category: .directMention,
+            updatedAt: now.addingTimeInterval(-200)
+        )
         let mergedRecent = makePullRequest(
             id: 404,
             number: 404,
@@ -52,6 +59,7 @@ final class LocalAPITests: XCTestCase {
             lastUpdated: now.addingTimeInterval(-30),
             pullRequests: [authored, review],
             mentionedPullRequests: [mentioned],
+            directMentionPullRequests: [directMention],
             mergedPullRequests: [mergedRecent, mergedOld],
             isLoading: false,
             error: nil
@@ -74,6 +82,7 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(snapshot.summary.authored, 1)
         XCTAssertEqual(snapshot.summary.reviewRequests, 1)
         XCTAssertEqual(snapshot.summary.mentioned, 1)
+        XCTAssertEqual(snapshot.summary.directMentions, 1)
         XCTAssertEqual(snapshot.summary.mergedLast24h, 1)
         XCTAssertEqual(snapshot.summary.authoredUnresolved, 1)
         XCTAssertEqual(snapshot.summary.totalUnresolved, 1)
@@ -86,6 +95,11 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(snapshot.pullRequests.authored.first?.isPinned, true)
         XCTAssertEqual(snapshot.pullRequests.authored.first?.ciStatus, "SUCCESS")
         XCTAssertEqual(snapshot.pullRequests.reviewRequests.first?.myReviewStatus, "waiting")
+        XCTAssertEqual(snapshot.pullRequests.directMentions.map(\.number), [304])
+        XCTAssertEqual(
+            GHPRCLI.pullRequests(in: snapshot, section: .directMentions, limit: nil).map(\.number),
+            [304]
+        )
         XCTAssertEqual(snapshot.pullRequests.mergedLast24h.map(\.number), [404])
     }
 
@@ -157,6 +171,12 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(options.section, .review)
         XCTAssertEqual(options.limit, 2)
         XCTAssertEqual(options.socketPath, "/tmp/explicit.sock")
+
+        let directMentionOptions = try GHPRCLI.parse(
+            arguments: ["prs", "--section", "direct-mentions"],
+            environment: [:]
+        )
+        XCTAssertEqual(directMentionOptions.section, .directMentions)
     }
 
     func testCLIRendersStatusAndFilteredPRRows() throws {

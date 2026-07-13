@@ -4,6 +4,7 @@ enum PRCategory: String, Codable {
     case authored       // PRs created by user
     case reviewRequest  // PRs where user is requested reviewer
     case mentioned      // PRs related via body/comments/cross references
+    case directMention  // PRs outside the normal lists with pending @username mentions
 }
 
 enum PRState: String, Codable {

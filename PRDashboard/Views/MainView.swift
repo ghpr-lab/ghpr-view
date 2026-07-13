@@ -13,6 +13,7 @@ struct MainView: View {
         case authored
         case reviewRequests
         case mentioned
+        case directMentions
         case mergedToday
 
         var title: LocalizedStringKey {
@@ -23,6 +24,8 @@ struct MainView: View {
                 return "Review Requests"
             case .mentioned:
                 return "Mentioned PRs"
+            case .directMentions:
+                return "Direct Mentions"
             case .mergedToday:
                 return "Merged Today"
             }
@@ -272,6 +275,12 @@ struct MainView: View {
                     ForEach(viewModel.groupedMentionedPRs, id: \.0) { repo, prs in
                         repoSection(repo: repo, prs: prs)
                             .id("mentioned-\(repo)")
+                    }
+                }
+                collapsibleSection(.directMentions, count: viewModel.directMentionPRs.count) {
+                    ForEach(viewModel.groupedDirectMentionPRs, id: \.0) { repo, prs in
+                        repoSection(repo: repo, prs: prs)
+                            .id("direct-mentions-\(repo)")
                     }
                 }
 
@@ -568,6 +577,7 @@ struct MainView: View {
             + viewModel.pinnedReviewRequestPRs
             + viewModel.groupedReviewPRs.flatMap(\.1)
             + viewModel.groupedMentionedPRs.flatMap(\.1)
+            + viewModel.groupedDirectMentionPRs.flatMap(\.1)
             + viewModel.groupedMergedLast24hPRs.flatMap(\.1)
     }
 

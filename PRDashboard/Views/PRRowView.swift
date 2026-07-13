@@ -208,7 +208,9 @@ struct PRRowView: View {
                             .help("Opening PR")
                     }
 
-                    if pr.category == .authored || pr.category == .mentioned {
+                    if pr.category == .authored ||
+                        pr.category == .mentioned ||
+                        pr.category == .directMention {
                         if showCIStatus, let ciStatus = pr.ciStatus {
                             CIStatusIcon(
                                 status: ciStatus,

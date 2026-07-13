@@ -156,6 +156,117 @@ final class DirectMentionTrackingCache {
         }
     }
 }
+struct AuthoredMentionReferenceCacheEntry: Codable, Equatable {
+    let username: String
+    let references: [PullRequestReference]
+    let updatedAt: Date
+
+    var pullRequestReferences: Set<PullRequestReference> {
+        Set(references)
+    }
+}
+
+final class AuthoredMentionReferenceCache {
+    static let shared = AuthoredMentionReferenceCache()
+
+    private let logger = Logger(subsystem: "com.prdashboard", category: "AuthoredMentionReferenceCache")
+    private let cacheURL: URL
+    private let lock = NSLock()
+    private var entries: [String: AuthoredMentionReferenceCacheEntry]?
+    private var lastPersistedEntries: [String: AuthoredMentionReferenceCacheEntry] = [:]
+
+    private init() {
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("com.prdashboard", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        cacheURL = cacheDir.appendingPathComponent("authored_mention_reference_cache.json")
+    }
+
+    func entry(for username: String) -> AuthoredMentionReferenceCacheEntry? {
+        loadEntries()[Self.key(for: username)]
+    }
+
+    func saveEntry(
+        username: String,
+        references: Set<PullRequestReference>,
+        updatedAt: Date
+    ) {
+        let sortedReferences = references
+            .sorted { PullRequestReference.ordered($0, $1, newestFirst: false) }
+        let key = Self.key(for: username)
+        let entry = AuthoredMentionReferenceCacheEntry(
+            username: username,
+            references: sortedReferences,
+            updatedAt: updatedAt
+        )
+
+        lock.lock()
+        var updated = entries ?? readFromDisk()
+        updated[key] = entry
+        let unchanged = updated == lastPersistedEntries
+        entries = updated
+        if !unchanged {
+            lastPersistedEntries = updated
+        }
+        lock.unlock()
+
+        guard !unchanged else { return }
+        do {
+            let data = try JSONEncoder().encode(Array(updated.values))
+            try data.write(to: cacheURL, options: .atomic)
+        } catch {
+            logger.error("Failed to save authored mention reference cache: \(error.localizedDescription)")
+        }
+    }
+
+    func clear() {
+        lock.lock()
+        entries = [:]
+        lastPersistedEntries = [:]
+        lock.unlock()
+
+        try? FileManager.default.removeItem(at: cacheURL)
+        logger.debug("Authored mention reference cache cleared")
+    }
+
+    private func loadEntries() -> [String: AuthoredMentionReferenceCacheEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let entries {
+            return entries
+        }
+        let loaded = readFromDisk()
+        entries = loaded
+        lastPersistedEntries = loaded
+        return loaded
+    }
+
+    private func readFromDisk() -> [String: AuthoredMentionReferenceCacheEntry] {
+        guard FileManager.default.fileExists(atPath: cacheURL.path) else { return [:] }
+
+        do {
+            let data = try Data(contentsOf: cacheURL)
+            let decoded = try JSONDecoder().decode(
+                [AuthoredMentionReferenceCacheEntry].self,
+                from: data
+            )
+            return Dictionary(
+                decoded.map { (Self.key(for: $0.username), $0) },
+                uniquingKeysWith: { _, last in last }
+            )
+        } catch {
+            logger.error("Failed to load authored mention reference cache: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: cacheURL)
+            return [:]
+        }
+    }
+
+    private static func key(for username: String) -> String {
+        username.lowercased()
+    }
+}
+
 
 struct IndexSnapshot: Codable, Equatable {
     let updatedAt: Date

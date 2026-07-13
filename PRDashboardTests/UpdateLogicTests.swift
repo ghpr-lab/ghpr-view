@@ -505,6 +505,94 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(manager.displayedRelease?.displayVersion, "999.0.0")
     }
 
+    func testMentionParserRecognizesSameRepositoryReferences() {
+        let references = GitHubAPIClient.extractMentionedPRReferences(
+            from: "See #12, owner/repo#34, and https://github.com/owner/repo/pull/56 for context.",
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            sourcePRNumber: 99
+        )
+
+        XCTAssertEqual(
+            references,
+            Set([
+                PullRequestReference(owner: "owner", repo: "repo", number: 12),
+                PullRequestReference(owner: "owner", repo: "repo", number: 34),
+                PullRequestReference(owner: "owner", repo: "repo", number: 56)
+            ])
+        )
+    }
+
+    func testMentionParserIgnoresCrossRepoAndSelfReferences() {
+        let references = GitHubAPIClient.extractMentionedPRReferences(
+            from: "Cross repo refs like other/repo#12 and https://github.com/other/repo/pull/77 should be ignored. Self refs #99 and owner/repo#99 should also be ignored.",
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            sourcePRNumber: 99
+        )
+
+        XCTAssertTrue(references.isEmpty)
+    }
+
+    func testMentionParserDoesNotTreatCrossRepoQualifiedReferenceAsBareSameRepoReference() {
+        let references = GitHubAPIClient.extractMentionedPRReferences(
+            from: "Do not treat other/repo#12 as a repo-local pull request reference.",
+            repositoryOwner: "owner",
+            repositoryName: "repo",
+            sourcePRNumber: 88
+        )
+
+        XCTAssertTrue(references.isEmpty)
+    }
+
+    func testAuthoredMentionReferenceSearchQueryUsesCreatedWindow() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = calendar.date(from: DateComponents(year: 2026, month: 5, day: 29))!
+
+        let yearWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester", daysBack: 365, now: now
+        )
+        let quarterWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester", daysBack: 90, now: now
+        )
+        let gapWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
+            username: "tester", daysBack: 45, now: now
+        )
+
+        XCTAssertEqual(yearWindow, "is:pr author:tester created:>=2025-05-29")
+        XCTAssertEqual(quarterWindow, "is:pr author:tester created:>=2026-02-28")
+        XCTAssertEqual(gapWindow, "is:pr author:tester created:>=2026-04-14")
+    }
+
+    func testBackgroundMentionRefreshDefaultsAreLowPriorityBatches() {
+        let options = GitHubAPIClient.MentionRefreshOptions.background(mode: .hot)
+
+        XCTAssertEqual(options.authoredReferenceDaysBack, 90)
+        XCTAssertEqual(options.descriptionCandidateDaysBack, 7)
+        XCTAssertEqual(options.batchSize, 10)
+        XCTAssertEqual(options.boundedBatchSize, 10)
+        XCTAssertEqual(options.batchDelay, 60)
+    }
+
+    func testBackgroundMentionRefreshExpandsWindowsToCoverGaps() {
+        let expanded = GitHubAPIClient.MentionRefreshOptions.background(
+            mode: .hot,
+            authoredReferenceDaysBack: 120,
+            descriptionCandidateDaysBack: 10
+        )
+        let belowDefault = GitHubAPIClient.MentionRefreshOptions.background(
+            mode: .hot,
+            authoredReferenceDaysBack: 2,
+            descriptionCandidateDaysBack: 3
+        )
+
+        XCTAssertEqual(expanded.authoredReferenceDaysBack, 120)
+        XCTAssertEqual(expanded.descriptionCandidateDaysBack, 10)
+        XCTAssertEqual(belowDefault.authoredReferenceDaysBack, 90)
+        XCTAssertEqual(belowDefault.descriptionCandidateDaysBack, 7)
+    }
+
     func testDirectUsernameMentionMatcherEnforcesExactCaseInsensitiveBoundaries() {
         let text = """
         @Tester @tester @TESTER! email me@tester.example, @@tester, @tester_2,
@@ -762,7 +850,7 @@ final class UpdateLogicTests: XCTestCase {
             pendingCount: 4,
             conversationComments: [cachedComment]
         )
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("comments(last: 1)") {
                 return (
@@ -814,7 +902,7 @@ final class UpdateLogicTests: XCTestCase {
                 makeIssueComment(id: "cached", author: "other", body: "cached", createdAt: mentionDate(1))
             ]
         )
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("comments(last: 1)") {
                 return (
@@ -883,7 +971,7 @@ final class UpdateLogicTests: XCTestCase {
         let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
         let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 2, latestCommentID: "c1")
         let entry = makeTrackingEntry(id: 504, source: oldSource, pendingCount: 7)
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("comments(last: 1)") {
                 return (
@@ -928,7 +1016,7 @@ final class UpdateLogicTests: XCTestCase {
         let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 2)
         let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 2, latestCommentID: "c1")
         let entry = makeTrackingEntry(id: 505, source: oldSource, pendingCount: 6)
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("comments(last: 1)") {
                 return (
@@ -977,7 +1065,7 @@ final class UpdateLogicTests: XCTestCase {
         let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
         let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 2, latestCommentID: "c1")
         let entry = makeTrackingEntry(id: 506, source: oldSource, pendingCount: 5)
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("comments(last: 1)") {
                 return (
@@ -1023,7 +1111,7 @@ final class UpdateLogicTests: XCTestCase {
         let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
         let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 1, latestCommentID: "c1")
         let entry = makeTrackingEntry(id: 507, source: oldSource, pendingCount: 4)
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("comments(last: 1)") {
                 return (
@@ -1068,7 +1156,7 @@ final class UpdateLogicTests: XCTestCase {
     func testTrackedMentionMissingSourceAliasIsFailed() async {
         let source = makeMentionSource(updatedAt: mentionDate(10), commentCount: 1)
         let entry = makeTrackingEntry(id: 506, source: source, pendingCount: 2)
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let response: [String: Any] = [
                 "data": [
                     "rateLimit": [
@@ -1117,7 +1205,7 @@ final class UpdateLogicTests: XCTestCase {
             isDraft: false,
             title: "Excluded"
         )
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("search(") {
                 return (
@@ -1241,7 +1329,7 @@ final class UpdateLogicTests: XCTestCase {
             commentCount: 1,
             latestCommentID: "mention"
         )
-        MockGitHubGraphQLURLProtocol.reset { request in
+        MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
             if query.contains("search(") {
                 return (
@@ -1446,6 +1534,13 @@ final class UpdateLogicTests: XCTestCase {
             category: .authored,
             updatedAt: mentionDate(20)
         )
+        var legacyMentioned = makeMentionPullRequest(
+            id: 706,
+            number: 6,
+            category: .mentioned,
+            updatedAt: mentionDate(25)
+        )
+        legacyMentioned.mentionCount = 8
         let merged = makeMentionPullRequest(
             id: 705,
             number: 5,
@@ -1461,14 +1556,15 @@ final class UpdateLogicTests: XCTestCase {
         let entries = [
             701: makeTrackingEntry(id: 701, source: makeMentionSource(), pendingCount: 2),
             702: makeTrackingEntry(id: 702, source: makeMentionSource(), pendingCount: 3),
-            703: makeTrackingEntry(id: 703, pullRequest: fallbackNewer, source: makeMentionSource(), pendingCount: 4),
-            704: makeTrackingEntry(id: 704, pullRequest: fallbackOlder, source: makeMentionSource(), pendingCount: 1),
-            705: makeTrackingEntry(id: 705, pullRequest: merged, source: makeMentionSource(), pendingCount: 9)
+            703: makeTrackingEntry(id: 703, source: makeMentionSource(), pendingCount: 4, pullRequest: fallbackNewer),
+            704: makeTrackingEntry(id: 704, source: makeMentionSource(), pendingCount: 1, pullRequest: fallbackOlder),
+            705: makeTrackingEntry(id: 705, source: makeMentionSource(), pendingCount: 9, pullRequest: merged)
         ]
 
         let projection = DirectMentionProjector.project(
             entries: entries,
             onto: [authored, reviewRequest, staleOpenMerged],
+            mentionedPullRequests: [legacyMentioned, fallbackNewer],
             mergedIDs: [merged.id]
         )
 
@@ -1478,36 +1574,46 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(projection.pullRequests.first?.mentionCount, 2)
         XCTAssertEqual(projection.pullRequests[1].category, .reviewRequest)
         XCTAssertEqual(projection.pullRequests[1].mentionCount, 3)
-        XCTAssertEqual(projection.mentionedPullRequests.map(\.id), [fallbackNewer.id, fallbackOlder.id])
-        XCTAssertEqual(projection.mentionedPullRequests.map(\.category), [.mentioned, .mentioned])
-        XCTAssertFalse(projection.mentionedPullRequests.contains { $0.id == merged.id })
+        XCTAssertEqual(projection.mentionedPullRequests.map(\.id), [legacyMentioned.id])
+        XCTAssertNil(projection.mentionedPullRequests.first?.mentionCount)
+        XCTAssertEqual(
+            projection.directMentionPullRequests.map(\.id),
+            [fallbackNewer.id, fallbackOlder.id]
+        )
+        XCTAssertEqual(
+            projection.directMentionPullRequests.map(\.category),
+            [.directMention, .directMention]
+        )
+        XCTAssertFalse(projection.directMentionPullRequests.contains { $0.id == merged.id })
     }
 
     func testDirectMentionProjectorHandledStateClearsBadgeAndReactivationRestoresFallback() {
         let pr = makeMentionPullRequest(id: 706, number: 6, category: .authored)
         var handled = makeTrackingEntry(
             id: pr.id,
-            pullRequest: pr,
             source: makeMentionSource(),
-            pendingCount: 0
+            pendingCount: 0,
+            pullRequest: pr
         )
         var projection = DirectMentionProjector.project(
             entries: [pr.id: handled],
             onto: [pr],
+            mentionedPullRequests: [],
             mergedIDs: []
         )
         XCTAssertNil(projection.pullRequests.first?.mentionCount)
-        XCTAssertTrue(projection.mentionedPullRequests.isEmpty)
+        XCTAssertTrue(projection.directMentionPullRequests.isEmpty)
 
         handled.state = DirectMentionState(pendingCount: 2)
         projection = DirectMentionProjector.project(
             entries: [pr.id: handled],
             onto: [],
+            mentionedPullRequests: [],
             mergedIDs: []
         )
-        XCTAssertEqual(projection.mentionedPullRequests.map(\.id), [pr.id])
-        XCTAssertEqual(projection.mentionedPullRequests.first?.category, .mentioned)
-        XCTAssertEqual(projection.mentionedPullRequests.first?.mentionCount, 2)
+        XCTAssertEqual(projection.directMentionPullRequests.map(\.id), [pr.id])
+        XCTAssertEqual(projection.directMentionPullRequests.first?.category, .directMention)
+        XCTAssertEqual(projection.directMentionPullRequests.first?.mentionCount, 2)
     }
 
     func testCachedDetailAndPlaceholderCannotReviveMentionCount() {
@@ -1533,7 +1639,7 @@ final class UpdateLogicTests: XCTestCase {
     }
 
     @MainActor
-    func testLoadCachedDataDropsLegacyMentionedRowsAndProjectsTrackingEntries() {
+    func testLoadCachedDataPreservesLegacyMentionedRowsAndProjectsDirectTrackingEntries() {
         PRCache.shared.clear()
         PRDetailCache.shared.clear()
         DirectMentionTrackingCache.shared.clear()
@@ -1556,9 +1662,9 @@ final class UpdateLogicTests: XCTestCase {
         let tracked = makeMentionPullRequest(id: 711, number: 11, category: .mentioned)
         let trackedEntry = makeTrackingEntry(
             id: tracked.id,
-            pullRequest: tracked,
             source: makeMentionSource(),
-            pendingCount: 2
+            pendingCount: 2,
+            pullRequest: tracked
         )
 
         DirectMentionTrackingCache.shared.save([tracked.id: trackedEntry])
@@ -1583,10 +1689,42 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertEqual(manager.prList.pullRequests.map(\.id), [primary.id])
         XCTAssertTrue(manager.prList.pullRequests.allSatisfy { $0.mentionCount == nil })
-        XCTAssertEqual(manager.prList.mentionedPullRequests.map(\.id), [tracked.id])
-        XCTAssertEqual(manager.prList.mentionedPullRequests.first?.mentionCount, 2)
+        XCTAssertEqual(manager.prList.mentionedPullRequests.map(\.id), [legacyMentioned.id])
+        XCTAssertNil(manager.prList.mentionedPullRequests.first?.mentionCount)
+        XCTAssertEqual(manager.prList.directMentionPullRequests.map(\.id), [tracked.id])
+        XCTAssertEqual(manager.prList.directMentionPullRequests.first?.category, .directMention)
+        XCTAssertEqual(manager.prList.directMentionPullRequests.first?.mentionCount, 2)
         XCTAssertEqual(manager.prList.mergedPullRequests.map(\.id), [merged.id])
         XCTAssertNil(manager.prList.mergedPullRequests.first?.mentionCount)
+    }
+
+    func testPRListDecodesCacheWithoutDirectMentionSection() throws {
+        let legacyMentioned = makeMentionPullRequest(
+            id: 715,
+            number: 15,
+            category: .mentioned
+        )
+        let encoded = try JSONEncoder().encode(
+            PRList(
+                lastUpdated: mentionDate(100),
+                pullRequests: [],
+                mentionedPullRequests: [legacyMentioned],
+                isLoading: false,
+                error: nil
+            )
+        )
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        object.removeValue(forKey: "directMentionPullRequests")
+
+        let decoded = try JSONDecoder().decode(
+            PRList.self,
+            from: JSONSerialization.data(withJSONObject: object)
+        )
+
+        XCTAssertEqual(decoded.mentionedPullRequests.map(\.id), [legacyMentioned.id])
+        XCTAssertTrue(decoded.directMentionPullRequests.isEmpty)
     }
 
     func testPRListMenuNotificationCountDeduplicatesRequestsAndDirectMentions() {
@@ -1596,7 +1734,11 @@ final class UpdateLogicTests: XCTestCase {
         var authoredB = makePullRequest(id: 713, number: 13, category: .authored)
         authoredB.changesRequestedCount = 3
         authoredB.reviewThreads = [makeReviewThread(id: "unread")]
-        var duplicateMention = makePullRequest(id: authoredA.id, number: authoredA.number, category: .mentioned)
+        var duplicateMention = makePullRequest(
+            id: authoredA.id,
+            number: authoredA.number,
+            category: .directMention
+        )
         duplicateMention.mentionCount = 3
         var merged = makePullRequest(
             id: 714,
@@ -1609,7 +1751,8 @@ final class UpdateLogicTests: XCTestCase {
         let list = PRList(
             lastUpdated: mentionDate(100),
             pullRequests: [authoredA, authoredB],
-            mentionedPullRequests: [duplicateMention],
+            mentionedPullRequests: [],
+            directMentionPullRequests: [duplicateMention],
             mergedPullRequests: [merged],
             isLoading: false,
             error: nil
@@ -3878,6 +4021,22 @@ final class ArchivedRepoFilterTests: XCTestCase {
     }
 
 
+    func testMentionedRefreshArchiveStatusIsImmediatelyFilterable() throws {
+        var old = try makePullRequest(isArchived: false)
+        var fresh = try makePullRequest(isArchived: true)
+        old.ciStatus = .pending
+        fresh.ciStatus = .success
+
+        let refreshed = GitHubAPIClient.mergeMentionedRefreshResults(
+            existing: [old],
+            refreshedByID: [fresh.id: fresh]
+        )
+
+        XCTAssertEqual(refreshed.first?.repositoryIsArchived, true)
+        XCTAssertEqual(refreshed.first?.ciStatus, .success)
+        XCTAssertTrue(PullRequestFilter.apply(refreshed, configuration: .default).isEmpty)
+    }
+
     func testCachedPRListFilterExcludesArchivedRepositoriesFromEverySection() throws {
         let archived = try makePullRequest(isArchived: true)
         let active = try makePullRequest(isArchived: false)
@@ -3885,6 +4044,7 @@ final class ArchivedRepoFilterTests: XCTestCase {
             lastUpdated: Date(),
             pullRequests: [archived, active],
             mentionedPullRequests: [archived],
+            directMentionPullRequests: [archived],
             mergedPullRequests: [archived],
             isLoading: false,
             error: nil
@@ -3894,6 +4054,7 @@ final class ArchivedRepoFilterTests: XCTestCase {
 
         XCTAssertEqual(cached.pullRequests.map(\.repositoryIsArchived), [false])
         XCTAssertTrue(cached.mentionedPullRequests.isEmpty)
+        XCTAssertTrue(cached.directMentionPullRequests.isEmpty)
         XCTAssertTrue(cached.mergedPullRequests.isEmpty)
     }
 }

@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 enum LocalAPIProtocol {
-    static let schemaVersion = 1
+    static let schemaVersion = 2
 }
 
 enum LocalAPICommand: String, CaseIterable, Codable {
@@ -127,6 +127,7 @@ enum LocalAPIHandler {
             snapshot.pullRequests.authored,
             snapshot.pullRequests.reviewRequests,
             snapshot.pullRequests.mentioned,
+            snapshot.pullRequests.directMentions,
             snapshot.pullRequests.mergedLast24h
         ]
         for section in sections {
@@ -217,6 +218,7 @@ struct LocalSummarySnapshot: Codable, Equatable {
     let authored: Int
     let reviewRequests: Int
     let mentioned: Int
+    let directMentions: Int
     let mergedLast24h: Int
     let totalUnresolved: Int
     let authoredUnresolved: Int
@@ -231,6 +233,7 @@ struct LocalPRSectionsSnapshot: Codable, Equatable {
     let authored: [LocalPRSnapshot]
     let reviewRequests: [LocalPRSnapshot]
     let mentioned: [LocalPRSnapshot]
+    let directMentions: [LocalPRSnapshot]
     let mergedLast24h: [LocalPRSnapshot]
 }
 
@@ -238,6 +241,7 @@ enum LocalPRSection: String, Codable, CaseIterable {
     case authored
     case review
     case mentioned
+    case directMentions
     case merged
 }
 

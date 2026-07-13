@@ -312,6 +312,14 @@ final class GitHubAPIClient: ObservableObject {
     private static let maxGraphQLAttempts = 3
     /// Aliased-batch size used by detail and direct-mention row queries.
     private static let batchedPRQuerySize = 20
+    static let backgroundMentionBatchSize = 10
+    static let backgroundMentionBatchDelay: TimeInterval = 60
+    static let recentMentionBatchDelay: TimeInterval = 3
+    static var coldMentionScanIncompleteError: APIError {
+        APIError.unknown(
+            String(localized: "Cold mention scan did not finish; will retry on next refresh")
+        )
+    }
     private static let directMentionStateBatchSize = 5
     private static let directMentionRateFloor = 500
     private static let directMentionSearchPageSize = 100
@@ -499,6 +507,70 @@ final class GitHubAPIClient: ObservableObject {
     struct CombinedPRResult {
         let openPRs: [PullRequest]
         let mergedPRs: [PullRequest]
+    }
+    enum MentionRefreshMode {
+        case cold
+        case hot
+
+        var authoredReferenceDaysBack: Int {
+            switch self {
+            case .cold: 365
+            case .hot: 90
+            }
+        }
+
+        var descriptionCandidateDaysBack: Int {
+            switch self {
+            case .cold: 30
+            case .hot: 7
+            }
+        }
+    }
+
+    struct MentionRefreshOptions {
+        let mode: MentionRefreshMode
+        let authoredReferenceDaysBack: Int
+        let descriptionCandidateDaysBack: Int
+        let batchSize: Int
+        let batchDelay: TimeInterval
+
+        static func background(
+            mode: MentionRefreshMode,
+            authoredReferenceDaysBack: Int? = nil,
+            descriptionCandidateDaysBack: Int? = nil
+        ) -> MentionRefreshOptions {
+            MentionRefreshOptions(
+                mode: mode,
+                authoredReferenceDaysBack: max(
+                    mode.authoredReferenceDaysBack,
+                    authoredReferenceDaysBack ?? mode.authoredReferenceDaysBack
+                ),
+                descriptionCandidateDaysBack: max(
+                    mode.descriptionCandidateDaysBack,
+                    descriptionCandidateDaysBack ?? mode.descriptionCandidateDaysBack
+                ),
+                batchSize: GitHubAPIClient.backgroundMentionBatchSize,
+                batchDelay: GitHubAPIClient.backgroundMentionBatchDelay
+            )
+        }
+
+        var boundedBatchSize: Int {
+            max(1, min(100, batchSize))
+        }
+
+        func withBatchDelay(_ delay: TimeInterval) -> MentionRefreshOptions {
+            MentionRefreshOptions(
+                mode: mode,
+                authoredReferenceDaysBack: authoredReferenceDaysBack,
+                descriptionCandidateDaysBack: descriptionCandidateDaysBack,
+                batchSize: batchSize,
+                batchDelay: max(0, delay)
+            )
+        }
+
+        var boundedSearchPageSize: Int {
+            100
+        }
     }
     /// Stage of an in-flight incremental refresh. PRManager uses this to decide
     /// whether to apply filters and publish, without running the final
@@ -717,6 +789,250 @@ final class GitHubAPIClient: ObservableObject {
             mergedPRs: mergedPRs
         )
     }
+    func fetchMentionedPullRequests(
+        username: String,
+        openPRs: [PullRequest],
+        mergedPRs: [PullRequest],
+        options: MentionRefreshOptions,
+        onProgress: (@Sendable ([PullRequest]) async -> Void)? = nil
+    ) async throws -> [PullRequest] {
+        try await enrichWithMentions(
+            username: username,
+            openPRs: openPRs,
+            mergedPRs: mergedPRs,
+            options: options,
+            onProgress: onProgress
+        )
+    }
+
+    static func normalizeMentionedResults(_ prs: [PullRequest]) -> [PullRequest] {
+        var seen = Set<Int>()
+        return prs
+            .filter { $0.state == .open && seen.insert($0.id).inserted }
+            .sorted { $0.updatedAt > $1.updatedAt }
+    }
+
+    private func enrichWithMentions(
+        username: String,
+        openPRs: [PullRequest],
+        mergedPRs: [PullRequest],
+        options: MentionRefreshOptions,
+        onProgress: (@Sendable ([PullRequest]) async -> Void)? = nil
+    ) async throws -> [PullRequest] {
+        let seedPRs = openPRs + mergedPRs
+        let existingReferences = Set(
+            seedPRs.map {
+                PullRequestReference(
+                    owner: $0.repositoryOwner,
+                    repo: $0.repositoryName,
+                    number: $0.number
+                )
+            }
+        )
+        let fieldSelection = buildPRFieldSelection(
+            includeReviewMetadata: false,
+            includeMentionBodies: false
+        )
+        var fetchedByID: [Int: PullRequest] = [:]
+        var fetchedReferences = existingReferences
+
+        func ingest(_ references: Set<PullRequestReference>) async throws {
+            let toFetch = references.subtracting(fetchedReferences)
+                .sorted { PullRequestReference.ordered($0, $1, newestFirst: true) }
+            guard !toFetch.isEmpty else { return }
+            fetchedReferences.formUnion(toFetch)
+
+            let batches = toFetch.chunked(into: options.boundedBatchSize)
+            for (index, batch) in batches.enumerated() {
+                let prs = try await fetchMentionedBatch(batch, fieldSelection: fieldSelection)
+                for pr in prs {
+                    fetchedByID[pr.id] = pr
+                }
+                if let onProgress, !fetchedByID.isEmpty {
+                    await onProgress(Self.normalizeMentionedResults(Array(fetchedByID.values)))
+                }
+                if index < batches.count - 1 {
+                    try await sleepBetweenMentionBatches(Self.recentMentionBatchDelay)
+                }
+            }
+        }
+
+        guard await hasMentionHeadroom() else {
+            throw Self.coldMentionScanIncompleteError
+        }
+
+        let recentOptions = options.withBatchDelay(Self.recentMentionBatchDelay)
+        let authoredReferences = try await fetchAuthoredPullRequestReferences(
+            username: username,
+            options: recentOptions
+        )
+        guard !authoredReferences.isEmpty else { return [] }
+
+        fetchedReferences.formUnion(authoredReferences)
+        let orderedAuthored = authoredReferences
+            .sorted { PullRequestReference.ordered($0, $1, newestFirst: true) }
+        let batches = orderedAuthored.chunked(into: options.boundedBatchSize)
+
+        for (index, batch) in batches.enumerated() {
+            guard await hasMentionHeadroom() else {
+                throw Self.coldMentionScanIncompleteError
+            }
+            try await ingest(fetchInboundCrossReferenceBatch(batch))
+            if index < batches.count - 1 {
+                try await sleepBetweenMentionBatches(Self.recentMentionBatchDelay)
+            }
+        }
+
+        return Self.normalizeMentionedResults(Array(fetchedByID.values))
+    }
+
+    private func fetchInboundCrossReferenceBatch(
+        _ batch: [PullRequestReference]
+    ) async throws -> Set<PullRequestReference> {
+        guard !batch.isEmpty else { return [] }
+        let queryParts = batch.enumerated().map { index, reference in
+            """
+            pr_\(index): repository(owner: \(Self.graphQLStringLiteral(reference.owner)), name: \(Self.graphQLStringLiteral(reference.repo))) {
+                pullRequest(number: \(reference.number)) {
+                    \(buildMentionSourceFieldSelection())
+                }
+            }
+            """
+        }
+        let query = """
+        query {
+            \(queryParts.joined(separator: "\n"))
+            rateLimit {
+                cost
+                remaining
+                resetAt
+            }
+        }
+        """
+        let responseData = try await executeGraphQL(
+            query: query,
+            operation: "fetchInboundCrossReferences"
+        )
+        if let rateLimit = Self.graphQLRateLimit(in: responseData) {
+            await recordGraphQLRateLimit(rateLimit)
+        }
+
+        let response: MentionSourceBatchResponse
+        do {
+            response = try JSONDecoder.githubDecoder.decode(
+                MentionSourceBatchResponse.self,
+                from: responseData
+            )
+        } catch {
+            throw APIError.decoding(error)
+        }
+
+        var result = Set<PullRequestReference>()
+        for node in response.data.nodes {
+            let currentPR = PullRequestReference(
+                owner: node.repository.owner.login,
+                repo: node.repository.name,
+                number: node.number
+            )
+            result.formUnion(Self.inboundMentionReferences(from: node, currentPR: currentPR))
+        }
+        return result
+    }
+
+    private func hasMentionHeadroom() async -> Bool {
+        await MainActor.run { self.rateLimitInfo.hasHeadroomForMentions }
+    }
+
+    private func fetchAuthoredPullRequestReferences(
+        username: String,
+        options: MentionRefreshOptions
+    ) async throws -> Set<PullRequestReference> {
+        let searchQuery = Self.authoredMentionReferenceSearchQuery(
+            username: username,
+            daysBack: options.authoredReferenceDaysBack
+        )
+        let cachedReferences: Set<PullRequestReference> = options.mode == .cold
+            ? []
+            : AuthoredMentionReferenceCache.shared.entry(for: username)?.pullRequestReferences ?? []
+        var references = Set<PullRequestReference>()
+        var after: String?
+
+        repeat {
+            let page = try await fetchPullRequestReferencePage(
+                searchQuery: searchQuery,
+                first: options.boundedSearchPageSize,
+                after: after
+            )
+            references.formUnion(page.references)
+            after = page.pageInfo.endCursor
+            if page.pageInfo.hasNextPage {
+                try await sleepBetweenMentionBatches(options.batchDelay)
+            } else {
+                break
+            }
+        } while after != nil
+
+        let mergedReferences = cachedReferences.union(references)
+        AuthoredMentionReferenceCache.shared.saveEntry(
+            username: username,
+            references: mergedReferences,
+            updatedAt: Date()
+        )
+        logger.info(
+            "Fetched \(references.count, privacy: .public) authored PR references for mentioned-PR discovery; cachedTotal=\(mergedReferences.count, privacy: .public)"
+        )
+        return mergedReferences
+    }
+
+    private struct PullRequestReferencePage {
+        let references: Set<PullRequestReference>
+        let pageInfo: PRReferenceSearchResponse.PageInfo
+    }
+
+    private func fetchPullRequestReferencePage(
+        searchQuery: String,
+        first: Int,
+        after: String?
+    ) async throws -> PullRequestReferencePage {
+        let query = buildReferenceSearchQuery(
+            searchQuery: searchQuery,
+            first: first,
+            after: after
+        )
+        let responseData = try await executeGraphQL(
+            query: query,
+            operation: "fetchAuthoredPRReferences"
+        )
+        if let rateLimit = Self.graphQLRateLimit(in: responseData) {
+            await recordGraphQLRateLimit(rateLimit)
+        }
+        do {
+            let response = try JSONDecoder.githubDecoder.decode(
+                PRReferenceSearchResponse.self,
+                from: responseData
+            )
+            let references = Set(
+                response.data.search.nodes.map {
+                    PullRequestReference(
+                        owner: $0.repository.owner.login,
+                        repo: $0.repository.name,
+                        number: $0.number
+                    )
+                }
+            )
+            return PullRequestReferencePage(
+                references: references,
+                pageInfo: response.data.search.pageInfo
+            )
+        } catch {
+            throw APIError.decoding(error)
+        }
+    }
+
+    private func sleepBetweenMentionBatches(_ delay: TimeInterval) async throws {
+        guard delay > 0 else { return }
+        try await Task.sleep(nanoseconds: delay.nanoseconds)
+    }
     struct DirectMentionRefreshResult {
         var baseSources: [Int: DirectMentionSourceSnapshot]
         var refreshed: [Int: DirectMentionTrackingEntry]
@@ -728,6 +1044,67 @@ final class GitHubAPIClient: ObservableObject {
         var seenIDs: Set<Int>
         var discovered: [Int: DirectMentionTrackingEntry]
         var isComplete: Bool
+    }
+
+    private static let explicitPRReferenceRegex = compileRegex(
+        "([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)\\b"
+    )
+    private static let sameRepoPRReferenceRegex = compileRegex(
+        "(?<![A-Za-z0-9_.\\-/])#([0-9]+)\\b"
+    )
+    private static let pullRequestURLRegex = compileRegex(
+        "https?://github\\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)(?:\\b|/)"
+    )
+
+    static func extractMentionedPRReferences(
+        from text: String,
+        repositoryOwner: String,
+        repositoryName: String,
+        sourcePRNumber: Int
+    ) -> Set<PullRequestReference> {
+        guard text.contains("#") || text.contains("github.com/") else { return [] }
+
+        let nsText = text as NSString
+        let fullRange = NSRange(location: 0, length: nsText.length)
+        let ownerLower = repositoryOwner.lowercased()
+        let repoLower = repositoryName.lowercased()
+        var result = Set<PullRequestReference>()
+
+        func insertIfSameRepository(owner: String, repo: String, number: Int) {
+            guard number > 0, number != sourcePRNumber else { return }
+            guard owner.lowercased() == ownerLower, repo.lowercased() == repoLower else { return }
+            result.insert(
+                PullRequestReference(owner: repositoryOwner, repo: repositoryName, number: number)
+            )
+        }
+
+        for regex in [explicitPRReferenceRegex, pullRequestURLRegex] {
+            for match in regex.matches(in: text, range: fullRange) {
+                guard
+                    let ownerRange = Range(match.range(at: 1), in: text),
+                    let repoRange = Range(match.range(at: 2), in: text),
+                    let numberRange = Range(match.range(at: 3), in: text),
+                    let number = Int(text[numberRange])
+                else { continue }
+                insertIfSameRepository(
+                    owner: String(text[ownerRange]),
+                    repo: String(text[repoRange]),
+                    number: number
+                )
+            }
+        }
+
+        for match in sameRepoPRReferenceRegex.matches(in: text, range: fullRange) {
+            guard let numberRange = Range(match.range(at: 1), in: text),
+                  let number = Int(text[numberRange]) else { continue }
+            insertIfSameRepository(
+                owner: repositoryOwner,
+                repo: repositoryName,
+                number: number
+            )
+        }
+
+        return result
     }
 
     /// Count direct mentions of the exact login, excluding email addresses,
@@ -2537,6 +2914,82 @@ final class GitHubAPIClient: ObservableObject {
 
         return sections.joined(separator: "\n")
     }
+    private func buildMentionSourceFieldSelection() -> String {
+        """
+        id
+        databaseId
+        number
+        updatedAt
+        repository {
+            owner {
+                login
+            }
+            name
+        }
+        crossReferences: timelineItems(last: 50, itemTypes: [CROSS_REFERENCED_EVENT]) {
+            nodes {
+                ... on CrossReferencedEvent {
+                    source {
+                        ... on PullRequest {
+                            databaseId
+                            number
+                            state
+                            repository {
+                                owner {
+                                    login
+                                }
+                                name
+                            }
+                        }
+                    }
+                    target {
+                        ... on PullRequest {
+                            databaseId
+                            number
+                            state
+                            repository {
+                                owner {
+                                    login
+                                }
+                                name
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        """
+    }
+
+    private static func inboundMentionReferences(
+        from node: MentionSourceBatchResponse.PRNode,
+        currentPR: PullRequestReference
+    ) -> Set<PullRequestReference> {
+        let currentRepoLower = currentPR.repoFullName.lowercased()
+        var result = Set<PullRequestReference>()
+
+        func insert(_ related: MentionSourceBatchResponse.RelatedPR?) {
+            guard let related,
+                  related.state == "OPEN",
+                  related.repoFullName.lowercased() == currentRepoLower,
+                  related.number != currentPR.number else {
+                return
+            }
+            result.insert(
+                PullRequestReference(
+                    owner: related.repository.owner.login,
+                    repo: related.repository.name,
+                    number: related.number
+                )
+            )
+        }
+
+        for event in node.crossReferences?.nodes ?? [] {
+            insert(event.source)
+            insert(event.target)
+        }
+        return result
+    }
 
 
     private func parseCIContextsResponse(data: Data) throws -> CIContextsResult {
@@ -3232,6 +3685,14 @@ final class GitHubAPIClient: ObservableObject {
     }
 
 
+    static func authoredMentionReferenceSearchQuery(
+        username: String,
+        daysBack: Int,
+        now: Date = Date()
+    ) -> String {
+        "is:pr author:\(username) created:>=\(dateStringForSearch(daysBack: daysBack, now: now))"
+    }
+
     private static func dateStringForSearch(daysBack: Int, now: Date = Date()) -> String {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
@@ -3272,6 +3733,39 @@ final class GitHubAPIClient: ObservableObject {
                     hasNextPage
                     endCursor
                 }
+            }
+        }
+        """
+    }
+    private func buildReferenceSearchQuery(
+        searchQuery: String,
+        first: Int,
+        after: String?
+    ) -> String {
+        let afterClause = after.map { ", after: \(Self.graphQLStringLiteral($0))" } ?? ""
+        return """
+        query {
+            search(query: \(Self.graphQLStringLiteral(searchQuery)), type: ISSUE, first: \(first)\(afterClause)) {
+                nodes {
+                    ... on PullRequest {
+                        number
+                        repository {
+                            owner {
+                                login
+                            }
+                            name
+                        }
+                    }
+                }
+                pageInfo {
+                    hasNextPage
+                    endCursor
+                }
+            }
+            rateLimit {
+                cost
+                remaining
+                resetAt
             }
         }
         """
@@ -5075,6 +5569,110 @@ private struct DirectMentionDiscoveryResponse: Decodable {
 }
 
 // MARK: - GraphQL Response Models
+private struct MentionSourceBatchResponse: Decodable {
+    let data: BatchData
+
+    struct BatchData: Decodable {
+        let nodes: [PRNode]
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: DynamicKey.self)
+            var collected: [PRNode] = []
+            for key in container.allKeys {
+                if try container.decodeNil(forKey: key) {
+                    continue
+                }
+                if let wrapper = try? container.decode(RepositoryWrapper.self, forKey: key),
+                   let pullRequest = wrapper.pullRequest {
+                    collected.append(pullRequest)
+                }
+            }
+            nodes = collected
+        }
+    }
+
+    private struct RepositoryWrapper: Decodable {
+        let pullRequest: PRNode?
+    }
+
+    private struct DynamicKey: CodingKey {
+        let stringValue: String
+        var intValue: Int? { nil }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+
+    struct PRNode: Decodable {
+        let id: String?
+        let databaseId: Int?
+        let number: Int
+        let updatedAt: Date
+        let repository: Repository
+        let crossReferences: CrossReferencesContainer?
+    }
+
+    struct Repository: Decodable {
+        let owner: Owner
+        let name: String
+    }
+
+    struct Owner: Decodable {
+        let login: String
+    }
+
+    struct CrossReferencesContainer: Decodable {
+        let nodes: [CrossReferenceEventNode]
+    }
+
+    struct CrossReferenceEventNode: Decodable {
+        let source: RelatedPR?
+        let target: RelatedPR?
+    }
+
+    struct RelatedPR: Decodable {
+        let databaseId: Int?
+        let number: Int
+        let state: String
+        let repository: Repository
+
+        var repoFullName: String {
+            "\(repository.owner.login)/\(repository.name)"
+        }
+    }
+}
+
+private struct PRReferenceSearchResponse: Decodable {
+    let data: DataContainer
+
+    struct DataContainer: Decodable {
+        let search: SearchResult
+    }
+
+    struct SearchResult: Decodable {
+        let nodes: [PRNode]
+        let pageInfo: PageInfo
+    }
+
+    struct PageInfo: Decodable {
+        let hasNextPage: Bool
+        let endCursor: String?
+    }
+
+    struct PRNode: Decodable {
+        let number: Int
+        let repository: Repository
+    }
+
+    struct Repository: Decodable {
+        let owner: Owner
+        let name: String
+    }
+
+    struct Owner: Decodable {
+        let login: String
+    }
+}
+
 
 
 /// Decodes aliased `pr_0`, `pr_1`, ... results from `fetchDetailBatch`. Unlike

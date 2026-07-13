@@ -12,6 +12,7 @@ enum GHPRCLISection: String, CaseIterable, Codable {
     case authored
     case review
     case mentioned
+    case directMentions = "direct-mentions"
     case merged
     case all
 }
@@ -63,7 +64,7 @@ enum GHPRCLI {
     Options:
       --json                      Print JSON
       --socket PATH               Use a custom Unix socket path
-      --section authored|review|mentioned|merged|all
+      --section authored|review|mentioned|direct-mentions|merged|all
       --limit N                   Limit PR rows
       --repo OWNER/NAME           Repository for `pr` command
       --number N                  PR number for `pr` command
@@ -303,7 +304,7 @@ enum GHPRCLI {
             "Version: \(snapshot.app.version) (\(snapshot.app.build))",
             "Auth: \(authDescription)",
             "Refresh: \(refreshDescription)",
-            "Counts: authored \(snapshot.summary.authored), review \(snapshot.summary.reviewRequests), mentioned \(snapshot.summary.mentioned), merged-last-24h \(snapshot.summary.mergedLast24h)",
+            "Counts: authored \(snapshot.summary.authored), review \(snapshot.summary.reviewRequests), mentioned \(snapshot.summary.mentioned), direct-mentions \(snapshot.summary.directMentions), merged-last-24h \(snapshot.summary.mergedLast24h)",
             "Unresolved: authored \(snapshot.summary.authoredUnresolved), total \(snapshot.summary.totalUnresolved)",
             "CI: ready \(snapshot.summary.readyToMerge), changes-requested \(snapshot.summary.changesRequested), failing \(snapshot.summary.ciFailing), running \(snapshot.summary.ciRunning), waiting-review \(snapshot.summary.waitingForMyReview)",
             "Rate limit: \(snapshot.rateLimit.remaining)/\(snapshot.rateLimit.limit) remaining, resets \(formatDate(snapshot.rateLimit.resetAt))"
@@ -350,12 +351,15 @@ enum GHPRCLI {
             selected = snapshot.pullRequests.reviewRequests
         case .mentioned:
             selected = snapshot.pullRequests.mentioned
+        case .directMentions:
+            selected = snapshot.pullRequests.directMentions
         case .merged:
             selected = snapshot.pullRequests.mergedLast24h
         case .all:
             selected = snapshot.pullRequests.authored +
                 snapshot.pullRequests.reviewRequests +
                 snapshot.pullRequests.mentioned +
+                snapshot.pullRequests.directMentions +
                 snapshot.pullRequests.mergedLast24h
         }
 

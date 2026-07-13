@@ -313,6 +313,9 @@ final class PRListViewModel: ObservableObject {
     var mentionedPRs: [PullRequest] {
         filterPRs(prList.mentionedPullRequests)
     }
+    var directMentionPRs: [PullRequest] {
+        filterPRs(prList.directMentionPullRequests)
+    }
 
     var groupedAuthoredPRs: [(String, [PullRequest])] {
         groupByRepo(unpinnedAuthoredPRs)
@@ -324,6 +327,9 @@ final class PRListViewModel: ObservableObject {
 
     var groupedMentionedPRs: [(String, [PullRequest])] {
         groupByRepo(mentionedPRs)
+    }
+    var groupedDirectMentionPRs: [(String, [PullRequest])] {
+        groupByRepo(directMentionPRs)
     }
 
     private var filteredMergedPRs: [PullRequest] {
@@ -393,7 +399,12 @@ final class PRListViewModel: ObservableObject {
     }
 
     var hasAnyJiraTicket: Bool {
-        let lists = [prList.pullRequests, prList.mentionedPullRequests, prList.mergedPullRequests]
+        let lists = [
+            prList.pullRequests,
+            prList.mentionedPullRequests,
+            prList.directMentionPullRequests,
+            prList.mergedPullRequests
+        ]
         for list in lists {
             if list.contains(where: { $0.jiraTicket?.isEmpty == false }) {
                 return true

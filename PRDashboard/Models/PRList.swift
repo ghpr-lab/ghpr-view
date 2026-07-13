@@ -4,19 +4,21 @@ struct PRList: Codable {
     var lastUpdated: Date
     var pullRequests: [PullRequest]
     var mentionedPullRequests: [PullRequest]
+    var directMentionPullRequests: [PullRequest]
     var mergedPullRequests: [PullRequest]
     var isLoading: Bool
     var error: Error?
 
     // Custom Codable - only encode persistent state, not transient (isLoading, error)
     enum CodingKeys: String, CodingKey {
-        case lastUpdated, pullRequests, mentionedPullRequests, mergedPullRequests
+        case lastUpdated, pullRequests, mentionedPullRequests, directMentionPullRequests, mergedPullRequests
     }
 
     init(
         lastUpdated: Date,
         pullRequests: [PullRequest],
         mentionedPullRequests: [PullRequest] = [],
+        directMentionPullRequests: [PullRequest] = [],
         mergedPullRequests: [PullRequest] = [],
         isLoading: Bool,
         error: Error?
@@ -24,6 +26,7 @@ struct PRList: Codable {
         self.lastUpdated = lastUpdated
         self.pullRequests = pullRequests
         self.mentionedPullRequests = mentionedPullRequests
+        self.directMentionPullRequests = directMentionPullRequests
         self.mergedPullRequests = mergedPullRequests
         self.isLoading = isLoading
         self.error = error
@@ -34,6 +37,7 @@ struct PRList: Codable {
         lastUpdated = try container.decode(Date.self, forKey: .lastUpdated)
         pullRequests = try container.decode([PullRequest].self, forKey: .pullRequests)
         mentionedPullRequests = (try? container.decode([PullRequest].self, forKey: .mentionedPullRequests)) ?? []
+        directMentionPullRequests = (try? container.decode([PullRequest].self, forKey: .directMentionPullRequests)) ?? []
         mergedPullRequests = (try? container.decode([PullRequest].self, forKey: .mergedPullRequests)) ?? []
         isLoading = false
         error = nil
@@ -44,6 +48,7 @@ struct PRList: Codable {
         try container.encode(lastUpdated, forKey: .lastUpdated)
         try container.encode(pullRequests, forKey: .pullRequests)
         try container.encode(mentionedPullRequests, forKey: .mentionedPullRequests)
+        try container.encode(directMentionPullRequests, forKey: .directMentionPullRequests)
         try container.encode(mergedPullRequests, forKey: .mergedPullRequests)
     }
 
@@ -52,11 +57,12 @@ struct PRList: Codable {
     }
 
     var hasUsableData: Bool {
-        !pullRequests.isEmpty || !mentionedPullRequests.isEmpty || !mergedPullRequests.isEmpty
+        !pullRequests.isEmpty || !mentionedPullRequests.isEmpty ||
+            !directMentionPullRequests.isEmpty || !mergedPullRequests.isEmpty
     }
 
     var allPRs: [PullRequest] {
-        pullRequests + mentionedPullRequests + mergedPullRequests
+        pullRequests + mentionedPullRequests + directMentionPullRequests + mergedPullRequests
     }
 
     /// Unresolved comment count for authored PRs only.
@@ -79,7 +85,7 @@ struct PRList: Codable {
     /// Sum of pending direct-mention occurrences on open PRs, deduplicated by PR ID.
     var unansweredDirectMentionCount: Int {
         var countsByID: [Int: Int] = [:]
-        for pr in pullRequests + mentionedPullRequests where pr.state == .open {
+        for pr in pullRequests + mentionedPullRequests + directMentionPullRequests where pr.state == .open {
             guard let mentionCount = pr.mentionCount, mentionCount > 0 else { continue }
             countsByID[pr.id] = max(countsByID[pr.id] ?? 0, mentionCount)
         }
@@ -108,6 +114,7 @@ struct PRList: Codable {
             lastUpdated: Date(),
             pullRequests: [],
             mentionedPullRequests: [],
+            directMentionPullRequests: [],
             mergedPullRequests: [],
             isLoading: false,
             error: nil

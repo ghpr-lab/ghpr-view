@@ -636,6 +636,16 @@
         }
       }
     },
+    "Direct Mentions": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "直接提及"
+          }
+        }
+      }
+    },
     "Done": {
       "localizations": {
         "zh-Hans": {

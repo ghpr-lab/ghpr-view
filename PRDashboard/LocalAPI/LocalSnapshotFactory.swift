@@ -55,6 +55,16 @@ enum LocalSnapshotFactory {
                 pinnedPRIdentifiers: input.pinnedPRIdentifiers
             )
         }
+        let directMentionSnapshots = sortPRs(
+            input.prList.directMentionPullRequests,
+            pinnedPRIdentifiers: input.pinnedPRIdentifiers
+        ).map {
+            makePRSnapshot(
+                $0,
+                section: .directMentions,
+                pinnedPRIdentifiers: input.pinnedPRIdentifiers
+            )
+        }
 
         let mergedSnapshots = sortPRs(
             mergedLast24hPRs,
@@ -97,6 +107,7 @@ enum LocalSnapshotFactory {
                 authored: authoredPRs.count,
                 reviewRequests: reviewRequestPRs.count,
                 mentioned: input.prList.mentionedPullRequests.count,
+                directMentions: input.prList.directMentionPullRequests.count,
                 mergedLast24h: mergedLast24hPRs.count,
                 totalUnresolved: input.prList.totalUnresolvedCount,
                 authoredUnresolved: input.prList.authoredUnresolvedCount,
@@ -120,6 +131,7 @@ enum LocalSnapshotFactory {
                 authored: authoredSnapshots,
                 reviewRequests: reviewSnapshots,
                 mentioned: mentionedSnapshots,
+                directMentions: directMentionSnapshots,
                 mergedLast24h: mergedSnapshots
             )
         )
