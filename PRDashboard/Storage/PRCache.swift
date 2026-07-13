@@ -351,7 +351,7 @@ extension IndexSnapshot {
 }
 
 struct CachedPRDetail: Codable {
-    private static let currentCIContextParserVersion = 3
+    private static let currentCIContextParserVersion = 4
 
     let prId: Int
     let indexSnapshot: IndexSnapshot
