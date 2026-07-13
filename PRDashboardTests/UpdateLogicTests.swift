@@ -154,6 +154,37 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(summary.inFlightCount, 0)
     }
 
+    func testWorkflowRunSummaryIgnoresUnrelatedRunsForSameHead() {
+        let runs = [
+            workflowRun(
+                id: 1,
+                name: "Build & Test",
+                workflowId: 10,
+                status: "completed",
+                conclusion: "success"
+            ),
+            workflowRun(
+                id: 2,
+                name: ".github/workflows/release.yml",
+                workflowId: 11,
+                status: "completed",
+                conclusion: "failure"
+            )
+        ]
+
+        let summary = GitHubAPIClient.summarizeWorkflowRunCompletion(
+            runs,
+            includedWorkflowNames: Set(["build & test"])
+        )
+
+        XCTAssertEqual(summary.totalCount, 1)
+        XCTAssertEqual(summary.completedCount, 1)
+        XCTAssertEqual(summary.successCount, 1)
+        XCTAssertEqual(summary.failureLikeCount, 0)
+        XCTAssertEqual(summary.blockingFailureLikeCount, 0)
+        XCTAssertEqual(summary.inFlightCount, 0)
+    }
+
     func testWorkflowRunSummaryInvalidRegexFallsBackToContains() {
         let runs = [
             workflowRun(

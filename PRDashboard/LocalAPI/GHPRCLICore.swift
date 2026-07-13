@@ -384,8 +384,11 @@ enum GHPRCLI {
             lines.append("Merged: \(formatDate(mergedAt))")
         }
         lines.append("CI: \(ciDescription(for: pr))")
+        let ignoredFailureCount = pr.ciStatus == "SUCCESS" ? pr.checkFailureCount : 0
+        let effectiveFailureCount = pr.checkFailureCount - ignoredFailureCount
+        let ignoredSuffix = ignoredFailureCount > 0 ? ", ignored \(ignoredFailureCount)" : ""
         lines.append(
-            "Checks: success \(pr.checkSuccessCount), failure \(pr.checkFailureCount), pending \(pr.checkPendingCount)"
+            "Checks: success \(pr.checkSuccessCount), failure \(effectiveFailureCount), pending \(pr.checkPendingCount)\(ignoredSuffix)"
         )
         lines.append("Unresolved: \(pr.unresolvedCount)")
         lines.append("Approvals: \(pr.approvalCount)")

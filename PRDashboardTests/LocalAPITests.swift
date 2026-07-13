@@ -228,6 +228,40 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(decoded.pullRequests.map(\.number), [101])
     }
 
+    func testCLIRendersIgnoredFailuresSeparatelyFromEffectiveFailureCount() {
+        let now = Date(timeIntervalSince1970: 1_775_000_000)
+        var pr = makePullRequest(
+            id: 303,
+            number: 303,
+            title: "Ignored workflow failure",
+            category: .authored,
+            updatedAt: now,
+            ciStatus: .success
+        )
+        pr.checkFailureCount = 1
+
+        let snapshot = LocalSnapshotFactory.makeSnapshot(
+            input: makeInput(
+                prList: PRList(
+                    lastUpdated: now,
+                    pullRequests: [pr],
+                    isLoading: false,
+                    error: nil
+                )
+            ),
+            now: now
+        )
+
+        guard let snapshotPR = snapshot.pullRequests.authored.first else {
+            XCTFail("Expected authored PR in snapshot")
+            return
+        }
+        let output = GHPRCLI.renderPR(snapshotPR)
+
+        XCTAssertTrue(output.contains("CI: SUCCESS"))
+        XCTAssertTrue(output.contains("Checks: success 1, failure 0, pending 0, ignored 1"))
+    }
+
     func testLocalAPIRejectsUnsupportedCommandsWithoutBuildingSnapshot() {
         var didBuildSnapshot = false
         let response = LocalAPIHandler.response(

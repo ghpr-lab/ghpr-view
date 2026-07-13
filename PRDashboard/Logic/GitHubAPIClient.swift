@@ -2297,16 +2297,22 @@ final class GitHubAPIClient: ObservableObject {
                 workflows: Array(ciResult.workflows.values)
             )
 
-            let shouldFetchWorkflowRunGuard = ciStatus == .success || (
-                ciStatus == .failure && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            let workflowNames = Set(
+                ciResult.workflows.values
+                    .filter(\.isWorkflow)
+                    .map { $0.name.lowercased() }
             )
+            let shouldFetchWorkflowRunGuard = !workflowNames.isEmpty && (ciStatus == .success || (
+                ciStatus == .failure && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ))
             if shouldFetchWorkflowRunGuard, let headSHA = commit?.oid, !headSHA.isEmpty {
                 do {
                     let summary = try await fetchWorkflowRunCompletionSummary(
                         owner: pr.repositoryOwner,
                         repo: pr.repositoryName,
                         headSHA: headSHA,
-                        excludeFilter: excludeFilter
+                        excludeFilter: excludeFilter,
+                        includedWorkflowNames: workflowNames
                     )
                     let snapshot = Self.CIStatusSnapshot(
                         status: ciStatus,
@@ -2501,7 +2507,8 @@ final class GitHubAPIClient: ObservableObject {
         owner: String,
         repo: String,
         headSHA: String,
-        excludeFilter: String = ""
+        excludeFilter: String = "",
+        includedWorkflowNames: Set<String>? = nil
     ) async throws -> WorkflowRunCompletionSummary {
         var allRuns: [WorkflowRunSnapshot] = []
         let perPage = 100
@@ -2525,7 +2532,11 @@ final class GitHubAPIClient: ObservableObject {
             page += 1
         } while allRuns.count < (totalCount ?? allRuns.count)
 
-        return Self.summarizeWorkflowRunCompletion(allRuns, excludeFilter: excludeFilter)
+        return Self.summarizeWorkflowRunCompletion(
+            allRuns,
+            excludeFilter: excludeFilter,
+            includedWorkflowNames: includedWorkflowNames
+        )
     }
 
     struct CIContextsResult {
@@ -3264,9 +3275,17 @@ final class GitHubAPIClient: ObservableObject {
 
     static func summarizeWorkflowRunCompletion(
         _ runs: [WorkflowRunSnapshot],
-        excludeFilter: String = ""
+        excludeFilter: String = "",
+        includedWorkflowNames: Set<String>? = nil
     ) -> WorkflowRunCompletionSummary {
-        let latestRuns = latestWorkflowRunsByCurrentRound(runs)
+        let normalizedIncludedNames = includedWorkflowNames.map { names in
+            Set(names.map { $0.lowercased() })
+        }
+        let latestRuns = latestWorkflowRunsByCurrentRound(runs).filter { run in
+            guard let normalizedIncludedNames else { return true }
+            guard !normalizedIncludedNames.isEmpty else { return false }
+            return normalizedIncludedNames.contains(run.name?.lowercased() ?? "")
+        }
         let excludeMatcher = CIExcludeMatcher(pattern: excludeFilter)
         var completed = 0
         var success = 0
@@ -4248,7 +4267,13 @@ final class GitHubAPIClient: ObservableObject {
     private func applyWorkflowRunCompletionGuard(to pr: PullRequest, excludeFilter: String) async -> PullRequest {
         let shouldCheckFailureForExclude = pr.ciStatus == .failure
             && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        guard (pr.ciStatus == .success || shouldCheckFailureForExclude),
+        let includedWorkflowNames = Set(
+            pr.ciWorkflows
+                .filter(\.isWorkflow)
+                .map { $0.name.lowercased() }
+        )
+        guard !includedWorkflowNames.isEmpty,
+              (pr.ciStatus == .success || shouldCheckFailureForExclude),
               let headSHA = pr.headCommitOid,
               !headSHA.isEmpty else {
             return pr
@@ -4259,7 +4284,8 @@ final class GitHubAPIClient: ObservableObject {
                 owner: pr.repositoryOwner,
                 repo: pr.repositoryName,
                 headSHA: headSHA,
-                excludeFilter: excludeFilter
+                excludeFilter: excludeFilter,
+                includedWorkflowNames: includedWorkflowNames
             )
             guard summary.totalCount > 0 else { return pr }
 
@@ -4977,17 +5003,23 @@ final class GitHubAPIClient: ObservableObject {
 
         let responseData = try await executeGraphQL(query: query, operation: "fetchSinglePRCIStatus")
         var result = try parseSinglePRCIResponse(data: responseData)
-        let excludeFilter = Self.loadCIStatusExcludeFilter()
-        let shouldFetchWorkflowRunGuard = result.ciStatus == .success || (
-            result.ciStatus == .failure && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let includedWorkflowNames = Set(
+            result.ciExtendedInfo?.workflows
+                .filter(\.isWorkflow)
+                .map { $0.name.lowercased() } ?? []
         )
+        let excludeFilter = Self.loadCIStatusExcludeFilter()
+        let shouldFetchWorkflowRunGuard = !includedWorkflowNames.isEmpty && (result.ciStatus == .success || (
+            result.ciStatus == .failure && !excludeFilter.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        ))
         if shouldFetchWorkflowRunGuard, let headSHA = result.headSHA, !headSHA.isEmpty {
             do {
                 let summary = try await fetchWorkflowRunCompletionSummary(
                     owner: owner,
                     repo: repo,
                     headSHA: headSHA,
-                    excludeFilter: excludeFilter
+                    excludeFilter: excludeFilter,
+                    includedWorkflowNames: includedWorkflowNames
                 )
                 result = Self.applyingWorkflowRunSummary(to: result, summary: summary)
             } catch {
