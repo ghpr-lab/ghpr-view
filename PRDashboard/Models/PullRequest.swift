@@ -64,6 +64,7 @@ struct IssueCommentSummary: Identifiable, Codable, Equatable {
     let author: String
     let body: String
     let createdAt: Date
+    var lastEditedAt: Date? = nil
 }
 
 struct PullRequestReference: Hashable, Codable {
@@ -85,6 +86,28 @@ struct PullRequestReference: Hashable, Codable {
     }
 }
 
+struct DirectMentionState: Codable, Equatable {
+    var pendingCount: Int
+}
+
+struct DirectMentionSourceSnapshot: Codable, Equatable {
+    var updatedAt: Date
+    var lastEditedAt: Date?
+    var commentCount: Int
+    var latestCommentID: String?
+    var latestCommentLastEditedAt: Date?
+}
+
+struct DirectMentionTrackingEntry: Codable, Equatable {
+    let prID: Int
+    let reference: PullRequestReference
+    var pullRequest: PullRequest
+    var source: DirectMentionSourceSnapshot
+    var state: DirectMentionState
+    var lastSeenAt: Date
+}
+
+
 struct PullRequest: Identifiable, Codable, Equatable {
     let id: Int
     var graphqlNodeId: String? = nil
@@ -97,7 +120,7 @@ struct PullRequest: Identifiable, Codable, Equatable {
     var repositoryIsArchived: Bool? = nil
     let url: URL
     let state: PRState
-    let isDraft: Bool
+    var isDraft: Bool
     let createdAt: Date
     let updatedAt: Date
     let mergedAt: Date?
@@ -111,7 +134,7 @@ struct PullRequest: Identifiable, Codable, Equatable {
     var approvalAuthors: [String]? = nil
     var changesRequestedAuthors: [String]? = nil
     var reviewThreads: [ReviewThread]
-    let category: PRCategory
+    var category: PRCategory
     let hasBaseConflicts: Bool
     var ciStatus: CIStatus?
     var checkSuccessCount: Int
@@ -133,6 +156,7 @@ struct PullRequest: Identifiable, Codable, Equatable {
     var jiraUpdatedAt: Date? = nil
     var jiraMetadataFetchedAt: Date? = nil
     var isOpenInCmux: Bool? = nil
+    var mentionCount: Int? = nil
 
     var ciIsRunning: Bool { ciExtendedInfo?.isRunning ?? false }
     var ciWorkflows: [CIWorkflowInfo] { ciExtendedInfo?.workflows ?? [] }

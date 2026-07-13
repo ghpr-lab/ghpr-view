@@ -191,6 +191,10 @@ struct PRRowView: View {
                         approvalBadge
                     }
 
+                    if let mentionCount = pr.mentionCount, mentionCount > 0 {
+                        MentionBadge(count: mentionCount)
+                    }
+
                     if showConflictStatus, pr.hasBaseConflicts {
                         ConflictBadge()
                     }
@@ -850,10 +854,12 @@ private final class PRHoverDetailPanelController {
             context.duration = 0.08
             panel.animator().alphaValue = 0
         } completionHandler: { [weak self, weak panel] in
-            guard self?.visibleOwnerID == nil else { return }
-            panel?.orderOut(nil)
-            panel?.alphaValue = 1
-            self?.notifyVisibilityChanged(isVisible: false)
+            Task { @MainActor [weak self, weak panel] in
+                guard self?.visibleOwnerID == nil else { return }
+                panel?.orderOut(nil)
+                panel?.alphaValue = 1
+                self?.notifyVisibilityChanged(isVisible: false)
+            }
         }
     }
 

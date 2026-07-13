@@ -362,6 +362,25 @@ struct ApprovalBadge: View {
     }
 }
 
+struct MentionBadge: View {
+    let count: Int
+
+    var body: some View {
+        if count > 0 {
+            Text(count > 99 ? "@99+" : "@\(count)")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.blue)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Color.blue.opacity(0.15))
+                .clipShape(Capsule())
+                .delayedHoverTooltip(
+                    String(localized: "Unanswered direct mentions: \(count)")
+                )
+        }
+    }
+}
+
 struct ConflictBadge: View {
     var body: some View {
         Text("Conflict")

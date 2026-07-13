@@ -59,12 +59,38 @@ struct PRList: Codable {
         pullRequests + mentionedPullRequests + mergedPullRequests
     }
 
-    /// Unresolved comment count for authored PRs only (used for menu bar badge)
+    /// Unresolved comment count for authored PRs only.
     var authoredUnresolvedCount: Int {
         authoredPRs.reduce(0) { $0 + $1.unresolvedCount }
     }
 
-    /// Unread unresolved comment count for authored PRs only (used for menu bar badge)
+    /// Number of authored PRs with at least one requested-changes review, deduplicated by PR ID.
+    var changesRequestedPRCount: Int {
+        var seenIDs = Set<Int>()
+        var count = 0
+        for pr in authoredPRs where (pr.changesRequestedCount ?? 0) > 0 {
+            if seenIDs.insert(pr.id).inserted {
+                count += 1
+            }
+        }
+        return count
+    }
+
+    /// Sum of pending direct-mention occurrences on open PRs, deduplicated by PR ID.
+    var unansweredDirectMentionCount: Int {
+        var countsByID: [Int: Int] = [:]
+        for pr in pullRequests + mentionedPullRequests where pr.state == .open {
+            guard let mentionCount = pr.mentionCount, mentionCount > 0 else { continue }
+            countsByID[pr.id] = max(countsByID[pr.id] ?? 0, mentionCount)
+        }
+        return countsByID.values.reduce(0, +)
+    }
+
+    var menuNotificationCount: Int {
+        changesRequestedPRCount + unansweredDirectMentionCount
+    }
+
+    /// Unread unresolved comment count for authored PRs only (used for other UI/data purposes).
     var authoredUnreadUnresolvedCount: Int {
         authoredPRs.reduce(0) { $0 + $1.unreadUnresolvedCount }
     }

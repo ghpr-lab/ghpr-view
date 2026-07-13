@@ -423,9 +423,9 @@ final class PRListViewModel: ObservableObject {
     }
 
     func clearCaches() {
+        prManager.clearDirectMentionTracking()
         PRCache.shared.clear()
         PRDetailCache.shared.clear()
-        MentionCache.shared.clear()
         AvatarCache.shared.clear()
         JiraMetadataCache.shared.clear()
         prManager.refresh()

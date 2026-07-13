@@ -44,34 +44,116 @@ class PRCache {
         logger.debug("Cache cleared")
     }
 }
+final class DirectMentionTrackingCache {
+    static let shared = DirectMentionTrackingCache()
 
-struct MentionCacheEntry: Codable, Equatable {
-    let sourcePRID: Int
-    let sourceUpdatedAt: Date
-    let references: [PullRequestReference]
-    let cachedAt: Date
+    private let logger = Logger(subsystem: "com.prdashboard", category: "DirectMentionTrackingCache")
+    private let cacheURL: URL
+    private let maxEntries = 500
+    private let lock = NSLock()
+    private var entries: [Int: DirectMentionTrackingEntry]?
+    private var lastPersistedData: Data?
+    private var lastPersistedEntries: [Int: DirectMentionTrackingEntry] = [:]
+    private var needsPersistenceRetry = false
 
-    var pullRequestReferences: Set<PullRequestReference> {
-        Set(references)
+    private init() {
+        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("com.prdashboard", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        cacheURL = cacheDir.appendingPathComponent("direct_mention_tracking_cache.json")
     }
 
-    /// Cache hit (skip network) when: TTL unexpired AND
-    /// (source PR unchanged OR still within cooldown window).
-    func isUsable(currentUpdatedAt: Date, now: Date, ttl: TimeInterval, cooldown: TimeInterval) -> Bool {
-        let age = now.timeIntervalSince(cachedAt)
-        guard age < ttl else { return false }
-        if sourceUpdatedAt == currentUpdatedAt { return true }
-        return age < cooldown
+    func load() -> [Int: DirectMentionTrackingEntry] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let cached = entries { return cached }
+
+        let loaded = readFromDisk()
+        entries = loaded
+        lastPersistedData = try? encodedData(for: loaded)
+        lastPersistedEntries = loaded
+        needsPersistenceRetry = false
+        return loaded
     }
-}
 
-struct AuthoredMentionReferenceCacheEntry: Codable, Equatable {
-    let username: String
-    let references: [PullRequestReference]
-    let updatedAt: Date
+    func save(_ newEntries: [Int: DirectMentionTrackingEntry], force: Bool = false) {
+        let trimmed = trim(newEntries)
 
-    var pullRequestReferences: Set<PullRequestReference> {
-        Set(references)
+        lock.lock()
+        defer { lock.unlock() }
+        entries = trimmed
+        guard force || needsPersistenceRetry || trimmed != lastPersistedEntries else { return }
+
+        do {
+            let data = try encodedData(for: trimmed)
+            if data != lastPersistedData {
+                try data.write(to: cacheURL, options: .atomic)
+                lastPersistedData = data
+            }
+            lastPersistedEntries = trimmed
+            needsPersistenceRetry = false
+        } catch {
+            needsPersistenceRetry = true
+            logger.error("Failed to save direct mention tracking cache: \(error.localizedDescription)")
+        }
+    }
+
+    func clear() {
+        lock.lock()
+        entries = [:]
+        lastPersistedData = nil
+        lastPersistedEntries = [:]
+        needsPersistenceRetry = false
+        lock.unlock()
+
+        try? FileManager.default.removeItem(at: cacheURL)
+        logger.debug("Direct mention tracking cache cleared")
+    }
+
+    private func encodedData(for entries: [Int: DirectMentionTrackingEntry]) throws -> Data {
+        let values = entries.values.sorted { lhs, rhs in
+            lhs.prID < rhs.prID
+        }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return try encoder.encode(values)
+    }
+
+    private func trim(_ input: [Int: DirectMentionTrackingEntry]) -> [Int: DirectMentionTrackingEntry] {
+        guard input.count > maxEntries else { return input }
+
+        let handledToRemove = input.values
+            .filter { $0.state.pendingCount == 0 }
+            .sorted {
+                if $0.lastSeenAt != $1.lastSeenAt {
+                    return $0.lastSeenAt < $1.lastSeenAt
+                }
+                return $0.prID < $1.prID
+            }
+            .prefix(input.count - maxEntries)
+
+        guard !handledToRemove.isEmpty else { return input }
+
+        var retained = input
+        for entry in handledToRemove {
+            retained.removeValue(forKey: entry.prID)
+        }
+        return retained
+    }
+
+    private func readFromDisk() -> [Int: DirectMentionTrackingEntry] {
+        guard FileManager.default.fileExists(atPath: cacheURL.path) else { return [:] }
+
+        do {
+            let data = try Data(contentsOf: cacheURL)
+            let decoded = try JSONDecoder().decode([DirectMentionTrackingEntry].self, from: data)
+            return Dictionary(decoded.map { ($0.prID, $0) }, uniquingKeysWith: { _, last in last })
+        } catch {
+            logger.error("Failed to load direct mention tracking cache: \(error.localizedDescription)")
+            try? FileManager.default.removeItem(at: cacheURL)
+            return [:]
+        }
     }
 }
 
@@ -166,6 +248,14 @@ struct CachedPRDetail: Codable {
     let detailFetchedAt: Date
     let ciContextParserVersion: Int?
 
+    private enum CodingKeys: String, CodingKey {
+        case prId
+        case indexSnapshot
+        case detail
+        case detailFetchedAt
+        case ciContextParserVersion
+    }
+
     init(
         prId: Int,
         indexSnapshot: IndexSnapshot,
@@ -175,9 +265,33 @@ struct CachedPRDetail: Codable {
     ) {
         self.prId = prId
         self.indexSnapshot = indexSnapshot
-        self.detail = detail
+        var sanitizedDetail = detail
+        sanitizedDetail.mentionCount = nil
+        self.detail = sanitizedDetail
         self.detailFetchedAt = detailFetchedAt
         self.ciContextParserVersion = ciContextParserVersion
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        prId = try container.decode(Int.self, forKey: .prId)
+        indexSnapshot = try container.decode(IndexSnapshot.self, forKey: .indexSnapshot)
+        var sanitizedDetail = try container.decode(PullRequest.self, forKey: .detail)
+        sanitizedDetail.mentionCount = nil
+        detail = sanitizedDetail
+        detailFetchedAt = try container.decode(Date.self, forKey: .detailFetchedAt)
+        ciContextParserVersion = try container.decodeIfPresent(Int.self, forKey: .ciContextParserVersion)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(prId, forKey: .prId)
+        try container.encode(indexSnapshot, forKey: .indexSnapshot)
+        var sanitizedDetail = detail
+        sanitizedDetail.mentionCount = nil
+        try container.encode(sanitizedDetail, forKey: .detail)
+        try container.encode(detailFetchedAt, forKey: .detailFetchedAt)
+        try container.encodeIfPresent(ciContextParserVersion, forKey: .ciContextParserVersion)
     }
 
     /// Cache hit when index scalars match, the entry is still within TTL, and
@@ -297,175 +411,3 @@ extension CachedPRDetail: Equatable {
     }
 }
 
-final class MentionCache {
-    static let shared = MentionCache()
-
-    static let ttl: TimeInterval = 30 * 60
-    static let cooldown: TimeInterval = 5 * 60
-
-    private let logger = Logger(subsystem: "com.prdashboard", category: "MentionCache")
-    private let cacheURL: URL
-    private let maxEntries = 500
-    private let lock = NSLock()
-    private var entries: [Int: MentionCacheEntry]?
-    private var lastPersistedEntries: [Int: MentionCacheEntry] = [:]
-
-    private init() {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("com.prdashboard", isDirectory: true)
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        cacheURL = cacheDir.appendingPathComponent("mention_cache.json")
-    }
-
-    func loadEntries() -> [Int: MentionCacheEntry] {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if let cached = entries { return cached }
-
-        let loaded = readFromDisk()
-        entries = loaded
-        lastPersistedEntries = loaded
-        return loaded
-    }
-
-    func saveEntries(_ newEntries: [Int: MentionCacheEntry]) {
-        let trimmed = trim(newEntries)
-
-        lock.lock()
-        let unchanged = trimmed == lastPersistedEntries
-        entries = trimmed
-        if !unchanged { lastPersistedEntries = trimmed }
-        lock.unlock()
-
-        if unchanged { return }
-
-        do {
-            let data = try JSONEncoder().encode(Array(trimmed.values))
-            try data.write(to: cacheURL, options: .atomic)
-        } catch {
-            logger.error("Failed to save mention cache: \(error.localizedDescription)")
-        }
-    }
-
-    func clear() {
-        lock.lock()
-        entries = [:]
-        lastPersistedEntries = [:]
-        lock.unlock()
-
-        try? FileManager.default.removeItem(at: cacheURL)
-        logger.debug("Mention cache cleared")
-    }
-
-    private func trim(_ input: [Int: MentionCacheEntry]) -> [Int: MentionCacheEntry] {
-        guard input.count > maxEntries else { return input }
-        let retained = input.values
-            .sorted { $0.cachedAt > $1.cachedAt }
-            .prefix(maxEntries)
-        return Dictionary(uniqueKeysWithValues: retained.map { ($0.sourcePRID, $0) })
-    }
-
-    private func readFromDisk() -> [Int: MentionCacheEntry] {
-        guard FileManager.default.fileExists(atPath: cacheURL.path) else { return [:] }
-
-        do {
-            let data = try Data(contentsOf: cacheURL)
-            let decoded = try JSONDecoder().decode([MentionCacheEntry].self, from: data)
-            return Dictionary(uniqueKeysWithValues: decoded.map { ($0.sourcePRID, $0) })
-        } catch {
-            logger.error("Failed to load mention cache: \(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: cacheURL)
-            return [:]
-        }
-    }
-}
-
-final class AuthoredMentionReferenceCache {
-    static let shared = AuthoredMentionReferenceCache()
-
-    private let logger = Logger(subsystem: "com.prdashboard", category: "AuthoredMentionReferenceCache")
-    private let cacheURL: URL
-    private let lock = NSLock()
-    private var entries: [String: AuthoredMentionReferenceCacheEntry]?
-    private var lastPersistedEntries: [String: AuthoredMentionReferenceCacheEntry] = [:]
-
-    private init() {
-        let cacheDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("com.prdashboard", isDirectory: true)
-        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
-        cacheURL = cacheDir.appendingPathComponent("authored_mention_reference_cache.json")
-    }
-
-    func entry(for username: String) -> AuthoredMentionReferenceCacheEntry? {
-        loadEntries()[Self.key(for: username)]
-    }
-
-    func saveEntry(username: String, references: Set<PullRequestReference>, updatedAt: Date) {
-        let sortedReferences = references
-            .sorted { PullRequestReference.ordered($0, $1, newestFirst: false) }
-        let key = Self.key(for: username)
-        let entry = AuthoredMentionReferenceCacheEntry(
-            username: username,
-            references: sortedReferences,
-            updatedAt: updatedAt
-        )
-
-        lock.lock()
-        var updated = entries ?? readFromDisk()
-        updated[key] = entry
-        let unchanged = updated == lastPersistedEntries
-        entries = updated
-        if !unchanged { lastPersistedEntries = updated }
-        lock.unlock()
-
-        if unchanged { return }
-
-        do {
-            let data = try JSONEncoder().encode(Array(updated.values))
-            try data.write(to: cacheURL, options: .atomic)
-        } catch {
-            logger.error("Failed to save authored mention reference cache: \(error.localizedDescription)")
-        }
-    }
-
-    func clear() {
-        lock.lock()
-        entries = [:]
-        lastPersistedEntries = [:]
-        lock.unlock()
-
-        try? FileManager.default.removeItem(at: cacheURL)
-        logger.debug("Authored mention reference cache cleared")
-    }
-
-    private func loadEntries() -> [String: AuthoredMentionReferenceCacheEntry] {
-        lock.lock()
-        defer { lock.unlock() }
-
-        if let cached = entries { return cached }
-
-        let loaded = readFromDisk()
-        entries = loaded
-        lastPersistedEntries = loaded
-        return loaded
-    }
-
-    private func readFromDisk() -> [String: AuthoredMentionReferenceCacheEntry] {
-        guard FileManager.default.fileExists(atPath: cacheURL.path) else { return [:] }
-
-        do {
-            let data = try Data(contentsOf: cacheURL)
-            let decoded = try JSONDecoder().decode([AuthoredMentionReferenceCacheEntry].self, from: data)
-            return Dictionary(uniqueKeysWithValues: decoded.map { (Self.key(for: $0.username), $0) })
-        } catch {
-            logger.error("Failed to load authored mention reference cache: \(error.localizedDescription)")
-            try? FileManager.default.removeItem(at: cacheURL)
-            return [:]
-        }
-    }
-
-    private static func key(for username: String) -> String {
-        username.lowercased()
-    }
-}

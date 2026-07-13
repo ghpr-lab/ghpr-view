@@ -86,11 +86,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
 
-        // 9. Observe PR list changes to update unread badge (authored PRs only)
+        // Observe PR list changes to update menu bar notification badge
         prManager?.$prList
             .receive(on: DispatchQueue.main)
             .sink { [weak self] prList in
-                self?.statusBarController?.updateBadge(count: prList.authoredUnreadUnresolvedCount)
+                self?.statusBarController?.updateBadge(count: prList.menuNotificationCount)
             }
             .store(in: &cancellables)
 

@@ -505,92 +505,1120 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(manager.displayedRelease?.displayVersion, "999.0.0")
     }
 
-    func testMentionParserRecognizesSameRepositoryReferences() {
-        let references = GitHubAPIClient.extractMentionedPRReferences(
-            from: "See #12, owner/repo#34, and https://github.com/owner/repo/pull/56 for context.",
-            repositoryOwner: "owner",
-            repositoryName: "repo",
-            sourcePRNumber: 99
+    func testDirectUsernameMentionMatcherEnforcesExactCaseInsensitiveBoundaries() {
+        let text = """
+        @Tester @tester @TESTER! email me@tester.example, @@tester, @tester_2,
+        @tester-other, @org/team, @tester/path, and (@tester).
+        """
+
+        XCTAssertEqual(
+            GitHubAPIClient.directUsernameMentionCount(username: "Tester", in: text),
+            4,
+            "Only standalone @login tokens should be counted"
+        )
+    }
+
+    func testDirectUsernameMentionMatcherEscapesLoginCharacters() {
+        XCTAssertEqual(
+            GitHubAPIClient.directUsernameMentionCount(
+                username: "build.bot",
+                in: "Ping @BUILD.BOT, @build.bot-ops, and email build@build.bot."
+            ),
+            1
+        )
+    }
+
+    func testPendingDirectMentionStateMachineUsesLatestOrdinaryReplyAndIgnoresSelfMentions() {
+        let firstMentionAt = mentionDate(10)
+        let secondMentionAt = mentionDate(20)
+        let replyAt = mentionDate(30)
+        let laterMentionAt = mentionDate(40)
+        let comments = [
+            makeIssueComment(id: "first", author: "other", body: "@tester", createdAt: firstMentionAt),
+            makeIssueComment(id: "second", author: "other", body: "@tester @tester", createdAt: secondMentionAt),
+            makeIssueComment(id: "reply", author: "TESTER", body: "@tester", createdAt: replyAt),
+            makeIssueComment(id: "later", author: "other", body: "@tester", createdAt: laterMentionAt),
+            makeIssueComment(id: "self", author: "tester", body: "@tester", createdAt: mentionDate(25))
+        ]
+
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: "tester",
+                pullRequestAuthor: "author",
+                title: "No mention",
+                body: nil,
+                contentCreatedAt: mentionDate(0),
+                contentLastEditedAt: nil,
+                comments: Array(comments.prefix(2))
+            ),
+            3,
+            "Two ordinary comments contribute all three occurrences"
+        )
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: "tester",
+                pullRequestAuthor: "author",
+                title: "No mention",
+                body: nil,
+                contentCreatedAt: mentionDate(0),
+                contentLastEditedAt: nil,
+                comments: Array(comments.prefix(3))
+            ),
+            0,
+            "A later ordinary reply clears earlier mentions"
+        )
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: "tester",
+                pullRequestAuthor: "author",
+                title: "No mention",
+                body: nil,
+                contentCreatedAt: mentionDate(0),
+                contentLastEditedAt: nil,
+                comments: comments
+            ),
+            1,
+            "Only an ordinary mention after the latest reply is pending"
+        )
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: "tester",
+                pullRequestAuthor: "tester",
+                title: "@tester",
+                body: "@tester",
+                contentCreatedAt: mentionDate(0),
+                contentLastEditedAt: nil,
+                comments: []
+            ),
+            0,
+            "Self-authored PR content and self-authored comments are not direct mentions"
+        )
+    }
+
+    func testPendingDirectMentionTitleBodyHonorsLastEditedTimestampAndEqualReply() {
+        let replyAt = mentionDate(20)
+        let arguments = (
+            username: "tester",
+            pullRequestAuthor: "other",
+            title: "@tester",
+            body: "Please see @tester",
+            contentCreatedAt: mentionDate(0),
+            comments: [
+                makeIssueComment(id: "reply", author: "tester", body: "Handled", createdAt: replyAt)
+            ]
         )
 
         XCTAssertEqual(
-            references,
-            Set([
-                PullRequestReference(owner: "owner", repo: "repo", number: 12),
-                PullRequestReference(owner: "owner", repo: "repo", number: 34),
-                PullRequestReference(owner: "owner", repo: "repo", number: 56)
-            ])
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: arguments.username,
+                pullRequestAuthor: arguments.pullRequestAuthor,
+                title: arguments.title,
+                body: arguments.body,
+                contentCreatedAt: arguments.contentCreatedAt,
+                contentLastEditedAt: nil,
+                comments: arguments.comments
+            ),
+            0
+        )
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: arguments.username,
+                pullRequestAuthor: arguments.pullRequestAuthor,
+                title: arguments.title,
+                body: arguments.body,
+                contentCreatedAt: arguments.contentCreatedAt,
+                contentLastEditedAt: replyAt,
+                comments: arguments.comments
+            ),
+            0,
+            "A source edited at exactly the reply timestamp is treated as handled"
+        )
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: arguments.username,
+                pullRequestAuthor: arguments.pullRequestAuthor,
+                title: arguments.title,
+                body: arguments.body,
+                contentCreatedAt: arguments.contentCreatedAt,
+                contentLastEditedAt: mentionDate(21),
+                comments: arguments.comments
+            ),
+            2,
+            "Editing title/body after the reply reactivates both current occurrences"
         )
     }
 
-    func testMentionParserIgnoresCrossRepoAndSelfReferences() {
-        let references = GitHubAPIClient.extractMentionedPRReferences(
-            from: "Cross repo refs like other/repo#12 and https://github.com/other/repo/pull/77 should be ignored. Self refs #99 and owner/repo#99 should also be ignored.",
-            repositoryOwner: "owner",
-            repositoryName: "repo",
-            sourcePRNumber: 99
+    func testPendingDirectMentionCommentEditReactivatesMentionAfterReply() {
+        let replyAt = mentionDate(20)
+        let editedComment = makeIssueComment(
+            id: "comment",
+            author: "other",
+            body: "Now @tester",
+            createdAt: mentionDate(10),
+            lastEditedAt: mentionDate(30)
         )
 
-        XCTAssertTrue(references.isEmpty)
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: "tester",
+                pullRequestAuthor: "other",
+                title: "No mention",
+                body: nil,
+                contentCreatedAt: mentionDate(0),
+                contentLastEditedAt: nil,
+                comments: [
+                    makeIssueComment(
+                        id: "comment",
+                        author: "other",
+                        body: "Old text",
+                        createdAt: mentionDate(10)
+                    ),
+                    makeIssueComment(id: "reply", author: "tester", body: "Done", createdAt: replyAt)
+                ]
+            ),
+            0
+        )
+        XCTAssertEqual(
+            GitHubAPIClient.pendingDirectMentionCount(
+                username: "tester",
+                pullRequestAuthor: "other",
+                title: "No mention",
+                body: nil,
+                contentCreatedAt: mentionDate(0),
+                contentLastEditedAt: nil,
+                comments: [
+                    editedComment,
+                    makeIssueComment(id: "reply", author: "tester", body: "Done", createdAt: replyAt)
+                ]
+            ),
+            1,
+            "An edited ordinary comment is a new source after the reply"
+        )
     }
 
-    func testMentionParserDoesNotTreatCrossRepoQualifiedReferenceAsBareSameRepoReference() {
-        let references = GitHubAPIClient.extractMentionedPRReferences(
-            from: "Do not treat other/repo#12 as a repo-local pull request reference.",
-            repositoryOwner: "owner",
-            repositoryName: "repo",
-            sourcePRNumber: 88
+    func testTrackedMentionSourceSnapshotSkipsStateQueryWhenUnchanged() async {
+        let source = makeMentionSource(
+            updatedAt: mentionDate(10),
+            commentCount: 2,
+            latestCommentID: "latest",
+            latestCommentLastEditedAt: mentionDate(9)
+        )
+        let entry = makeTrackingEntry(
+            id: 501,
+            source: source,
+            pendingCount: 2,
+            conversationComments: [
+                makeIssueComment(id: "cached", author: "other", body: "cached", createdAt: mentionDate(1))
+            ]
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            XCTAssertTrue(query.contains("comments(last: 1)"))
+            XCTAssertTrue(query.contains("isDraft"))
+            XCTAssertTrue(query.contains("isArchived"))
+            XCTAssertFalse(query.contains("comments(first: 100"))
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directSourceResponse(
+                    id: entry.prID,
+                    source: source,
+                    isDraft: true,
+                    isArchived: true
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let client = makeGraphQLClient()
+        let result = await client.refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
         )
 
-        XCTAssertTrue(references.isEmpty)
+        XCTAssertEqual(MockGitHubGraphQLURLProtocol.requestedQueries.count, 1)
+        XCTAssertTrue(result.failedIDs.isEmpty)
+        XCTAssertEqual(result.refreshed[entry.prID]?.state, entry.state)
+        XCTAssertEqual(result.refreshed[entry.prID]?.pullRequest.isDraft, true)
+        XCTAssertEqual(result.refreshed[entry.prID]?.pullRequest.repositoryIsArchived, true)
+        XCTAssertTrue(result.baseSources[entry.prID] == source)
     }
 
-    func testAuthoredMentionReferenceSearchQueryUsesCreatedWindow() {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
-        let now = calendar.date(from: DateComponents(year: 2026, month: 5, day: 29))!
+    func testTrackedMentionSourceChangeRefreshesStateWithoutAppendingComments() async {
+        let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
+        let newSource = makeMentionSource(
+            updatedAt: mentionDate(20),
+            commentCount: 1,
+            latestCommentID: "new-comment"
+        )
+        let cachedComment = makeIssueComment(
+            id: "cached",
+            author: "other",
+            body: "cached",
+            createdAt: mentionDate(1)
+        )
+        let entry = makeTrackingEntry(
+            id: 502,
+            source: oldSource,
+            pendingCount: 4,
+            conversationComments: [cachedComment]
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("comments(last: 1)") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directSourceResponse(id: entry.prID, source: newSource)
+                )
+            }
+            XCTAssertTrue(query.contains("comments(first: 100"))
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: entry.prID,
+                    title: "No mention",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(20),
+                    comments: [
+                        Self.directCommentJSON(
+                            id: "new-comment",
+                            author: "other",
+                            body: "@tester",
+                            createdAt: mentionDate(20)
+                        )
+                    ],
+                    hasNextPage: false
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
 
-        let yearWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
-            username: "tester", daysBack: 365, now: now
+        let result = await makeGraphQLClient().refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
         )
-        let quarterWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
-            username: "tester", daysBack: 90, now: now
-        )
-        let gapWindow = GitHubAPIClient.authoredMentionReferenceSearchQuery(
-            username: "tester", daysBack: 45, now: now
-        )
-
-        XCTAssertEqual(yearWindow, "is:pr author:tester created:>=2025-05-29")
-        XCTAssertEqual(quarterWindow, "is:pr author:tester created:>=2026-02-28")
-        XCTAssertEqual(gapWindow, "is:pr author:tester created:>=2026-04-14")
+        XCTAssertEqual(result.refreshed[entry.prID]?.state.pendingCount, 1)
+        XCTAssertEqual(result.refreshed[entry.prID]?.pullRequest.conversationComments.map(\.id), ["cached"])
+        XCTAssertEqual(result.refreshed[entry.prID]?.source, newSource)
     }
 
-    func testBackgroundMentionRefreshDefaultsAreLowPriorityBatches() {
-        let options = GitHubAPIClient.MentionRefreshOptions.background(mode: .hot)
+    func testTrackedMentionPaginationDeduplicatesCommentIDs() async {
+        let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 1)
+        let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 3, latestCommentID: "c3")
+        let entry = makeTrackingEntry(
+            id: 503,
+            source: oldSource,
+            pendingCount: 9,
+            conversationComments: [
+                makeIssueComment(id: "cached", author: "other", body: "cached", createdAt: mentionDate(1))
+            ]
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("comments(last: 1)") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directSourceResponse(id: entry.prID, source: newSource)
+                )
+            }
+            let secondPage = query.contains("after: \"cursor-1\"")
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: entry.prID,
+                    title: "No mention",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(20),
+                    comments: secondPage
+                        ? [
+                            Self.directCommentJSON(
+                                id: "c2",
+                                author: "other",
+                                body: "duplicate page",
+                                createdAt: mentionDate(11)
+                            ),
+                            Self.directCommentJSON(
+                                id: "c3",
+                                author: "other",
+                                body: "@tester",
+                                createdAt: mentionDate(21)
+                            )
+                        ]
+                        : [
+                            Self.directCommentJSON(
+                                id: "c1",
+                                author: "other",
+                                body: "@tester",
+                                createdAt: mentionDate(10)
+                            ),
+                            Self.directCommentJSON(
+                                id: "c2",
+                                author: "other",
+                                body: "duplicate page",
+                                createdAt: mentionDate(11)
+                            )
+                        ],
+                    hasNextPage: !secondPage,
+                    endCursor: secondPage ? nil : "cursor-1"
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
 
-        XCTAssertEqual(options.authoredReferenceDaysBack, 30)
-        XCTAssertEqual(options.descriptionCandidateDaysBack, 7)
-        XCTAssertEqual(options.batchSize, 10)
-        XCTAssertEqual(options.boundedBatchSize, 10)
-        XCTAssertEqual(options.batchDelay, 60)
+        let result = await makeGraphQLClient().refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
+        )
+        let refreshed = result.refreshed[entry.prID]
+
+        XCTAssertTrue(result.failedIDs.isEmpty)
+        XCTAssertEqual(refreshed?.state.pendingCount, 2)
+        XCTAssertEqual(refreshed?.pullRequest.conversationComments.map(\.id), ["cached"])
     }
 
-    func testBackgroundMentionRefreshExpandsWindowsToCoverGaps() {
-        let expanded = GitHubAPIClient.MentionRefreshOptions.background(
-            mode: .hot,
-            authoredReferenceDaysBack: 45,
-            descriptionCandidateDaysBack: 10
-        )
-        let belowDefault = GitHubAPIClient.MentionRefreshOptions.background(
-            mode: .hot,
-            authoredReferenceDaysBack: 2,
-            descriptionCandidateDaysBack: 3
+    func testTrackedMentionTruncatedFinalPageRetainsOldState() async {
+        let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
+        let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 2, latestCommentID: "c1")
+        let entry = makeTrackingEntry(id: 504, source: oldSource, pendingCount: 7)
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("comments(last: 1)") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directSourceResponse(id: entry.prID, source: newSource)
+                )
+            }
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: entry.prID,
+                    title: "No mention",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(20),
+                    comments: [
+                        Self.directCommentJSON(
+                            id: "c1",
+                            author: "other",
+                            body: "@tester",
+                            createdAt: mentionDate(20)
+                        )
+                    ],
+                    hasNextPage: false
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
         )
 
-        XCTAssertEqual(expanded.authoredReferenceDaysBack, 45)
-        XCTAssertEqual(expanded.descriptionCandidateDaysBack, 10)
-        XCTAssertEqual(belowDefault.authoredReferenceDaysBack, 30)
-        XCTAssertEqual(belowDefault.descriptionCandidateDaysBack, 7)
+        XCTAssertTrue(result.failedIDs.contains(entry.prID), "A final page missing expected comments must fail")
+        XCTAssertNil(result.refreshed[entry.prID])
+        XCTAssertEqual(entry.state.pendingCount, 7, "The old state is retained for manager-side failure handling")
+    }
+
+    func testTrackedMentionEmptyNonterminalPageRetainsOldState() async {
+        let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 2)
+        let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 2, latestCommentID: "c1")
+        let entry = makeTrackingEntry(id: 505, source: oldSource, pendingCount: 6)
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("comments(last: 1)") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directSourceResponse(id: entry.prID, source: newSource)
+                )
+            }
+            let secondPage = query.contains("after: \"cursor-1\"")
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: entry.prID,
+                    title: "No mention",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(20),
+                    comments: secondPage
+                        ? []
+                        : [
+                            Self.directCommentJSON(
+                                id: "c1",
+                                author: "other",
+                                body: "@tester",
+                                createdAt: mentionDate(20)
+                            )
+                        ],
+                    hasNextPage: true,
+                    endCursor: secondPage ? "cursor-2" : "cursor-1"
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
+        )
+
+        XCTAssertTrue(result.failedIDs.contains(entry.prID))
+        XCTAssertNil(result.refreshed[entry.prID])
+        XCTAssertEqual(entry.state.pendingCount, 6)
+    }
+
+    func testTrackedMentionRepeatedPageRetainsOldState() async {
+        let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
+        let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 2, latestCommentID: "c1")
+        let entry = makeTrackingEntry(id: 506, source: oldSource, pendingCount: 5)
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("comments(last: 1)") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directSourceResponse(id: entry.prID, source: newSource)
+                )
+            }
+            let repeatedPage = query.contains("after: \"cursor-1\"")
+            let comment = Self.directCommentJSON(
+                id: "c1",
+                author: "other",
+                body: "@tester",
+                createdAt: mentionDate(20)
+            )
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: entry.prID,
+                    title: "No mention",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(20),
+                    comments: [comment],
+                    hasNextPage: !repeatedPage,
+                    endCursor: repeatedPage ? nil : "cursor-1"
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
+        )
+
+        XCTAssertTrue(result.failedIDs.contains(entry.prID), "A repeated page must not be accepted as complete")
+        XCTAssertNil(result.refreshed[entry.prID])
+        XCTAssertEqual(entry.state.pendingCount, 5)
+    }
+
+    func testTrackedMentionNullCommentNodeRetainsOldState() async {
+        let oldSource = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
+        let newSource = makeMentionSource(updatedAt: mentionDate(20), commentCount: 1, latestCommentID: "c1")
+        let entry = makeTrackingEntry(id: 507, source: oldSource, pendingCount: 4)
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("comments(last: 1)") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directSourceResponse(id: entry.prID, source: newSource)
+                )
+            }
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: entry.prID,
+                    title: "No mention",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(20),
+                    comments: [
+                        Self.directCommentJSON(
+                            id: "c1",
+                            author: "other",
+                            body: "@tester",
+                            createdAt: mentionDate(20)
+                        )
+                    ],
+                    hasNextPage: false,
+                    includeNullCommentNode: true
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
+        )
+
+        XCTAssertTrue(result.failedIDs.contains(entry.prID))
+        XCTAssertNil(result.refreshed[entry.prID])
+        XCTAssertEqual(entry.state.pendingCount, 4)
+    }
+
+    func testTrackedMentionMissingSourceAliasIsFailed() async {
+        let source = makeMentionSource(updatedAt: mentionDate(10), commentCount: 1)
+        let entry = makeTrackingEntry(id: 506, source: source, pendingCount: 2)
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let response: [String: Any] = [
+                "data": [
+                    "rateLimit": [
+                        "cost": 1,
+                        "remaining": 4_999,
+                        "resetAt": Self.isoDateString(mentionDate(100))
+                    ]
+                ]
+            ]
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                try JSONSerialization.data(withJSONObject: response)
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().refreshTrackedMentions(
+            username: "tester",
+            entries: [entry.prID: entry]
+        )
+
+        XCTAssertTrue(result.failedIDs.contains(entry.prID))
+        XCTAssertNil(result.refreshed[entry.prID])
+        XCTAssertEqual(entry.state.pendingCount, 2)
+    }
+
+    func testDirectMentionDiscoveryCreatesEntryAndFiltersBeforeDetail() async {
+        var configuration = Configuration.default
+        configuration.repositories = ["owner/in"]
+        configuration.showDrafts = false
+        let included = Self.directDiscoveryNode(
+            id: 601,
+            number: 10,
+            owner: "owner",
+            repo: "in",
+            isDraft: false,
+            title: "Included",
+            commentCount: 1,
+            latestCommentID: "mention"
+        )
+        let excluded = Self.directDiscoveryNode(
+            id: 602,
+            number: 11,
+            owner: "owner",
+            repo: "out",
+            isDraft: false,
+            title: "Excluded"
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("search(") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directDiscoveryResponse(nodes: [included, excluded], issueCount: 2)
+                )
+            }
+            if query.contains("comments(last: 20)") {
+                XCTAssertTrue(query.contains("name: \"in\""))
+                XCTAssertFalse(query.contains("name: \"out\""), "Scope must be checked before row detail")
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directRowResponse(id: 601, number: 10, owner: "owner", repo: "in", title: "Included")
+                )
+            }
+            XCTAssertTrue(query.contains("comments(first: 100"))
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: 601,
+                    title: "Included",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(10),
+                    comments: [
+                        Self.directCommentJSON(
+                            id: "mention",
+                            author: "other",
+                            body: "@tester",
+                            createdAt: mentionDate(10)
+                        )
+                    ],
+                    hasNextPage: false
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().discoverDirectMentions(
+            username: "tester",
+            configuration: configuration,
+            existingEntries: [:]
+        )
+        let entry = result.discovered[601]
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.seenIDs, Set([601]))
+        XCTAssertEqual(entry?.state.pendingCount, 1)
+        XCTAssertEqual(entry?.pullRequest.category, .mentioned)
+        XCTAssertEqual(MockGitHubGraphQLURLProtocol.requestedQueries.count, 3)
+    }
+
+    func testDirectMentionDiscoveryHandledEntryNeedsNoStateRefreshWhenSourceUnchanged() async {
+        let source = makeMentionSource(updatedAt: mentionDate(10), commentCount: 0)
+        let entry = makeTrackingEntry(id: 603, source: source, pendingCount: 0)
+        let node = Self.directDiscoveryNode(
+            id: entry.prID,
+            number: entry.reference.number,
+            owner: entry.reference.owner,
+            repo: entry.reference.repo,
+            title: "Handled"
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            XCTAssertTrue(query.contains("search("))
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directDiscoveryResponse(nodes: [node], issueCount: 1)
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().discoverDirectMentions(
+            username: "tester",
+            configuration: .default,
+            existingEntries: [entry.prID: entry]
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertEqual(result.seenIDs, Set([entry.prID]))
+        XCTAssertTrue(result.discovered.isEmpty)
+        XCTAssertEqual(MockGitHubGraphQLURLProtocol.requestedQueries.count, 1)
+    }
+
+    func testDirectMentionDiscoveryCompleteAbsenceReportsCompleteWithoutCandidates() async {
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            XCTAssertTrue(query.contains("mentions:tester"))
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directDiscoveryResponse(nodes: [], issueCount: 0)
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().discoverDirectMentions(
+            username: "tester",
+            configuration: .default,
+            existingEntries: [
+                604: makeTrackingEntry(
+                    id: 604,
+                    source: makeMentionSource(updatedAt: mentionDate(1), commentCount: 0),
+                    pendingCount: 1
+                )
+            ]
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertTrue(result.seenIDs.isEmpty)
+        XCTAssertTrue(result.discovered.isEmpty)
+    }
+
+    func testDirectMentionDiscoveryCapAndDroppedNodeArePartial() async {
+        let valid = Self.directDiscoveryNode(
+            id: 605,
+            number: 15,
+            owner: "owner",
+            repo: "repo",
+            title: "Partial",
+            commentCount: 1,
+            latestCommentID: "mention"
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("search(") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directDiscoveryResponse(
+                        nodes: [valid, NSNull()],
+                        issueCount: 1_000
+                    )
+                )
+            }
+            if query.contains("comments(last: 20)") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directRowResponse(id: 605, number: 15, owner: "owner", repo: "repo", title: "Partial")
+                )
+            }
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directStateResponse(
+                    id: 605,
+                    title: "Partial",
+                    body: nil,
+                    author: "other",
+                    createdAt: mentionDate(0),
+                    updatedAt: mentionDate(10),
+                    comments: [
+                        Self.directCommentJSON(
+                            id: "mention",
+                            author: "other",
+                            body: "@tester",
+                            createdAt: mentionDate(10)
+                        )
+                    ],
+                    hasNextPage: false
+                )
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().discoverDirectMentions(
+            username: "tester",
+            configuration: .default,
+            existingEntries: [:]
+        )
+
+        XCTAssertFalse(result.isComplete, "Search cap and dropped nodes must preserve unseen cache entries")
+        XCTAssertEqual(result.seenIDs, Set([605]))
+        XCTAssertEqual(result.discovered[605]?.state.pendingCount, 1)
+    }
+
+    func testDirectMentionDiscoveryRowAliasFailureIsPartial() async {
+        let valid = Self.directDiscoveryNode(
+            id: 608,
+            number: 18,
+            owner: "owner",
+            repo: "repo",
+            title: "Row failure"
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("search(") {
+                return (
+                    Self.httpResponse(for: request, statusCode: 200),
+                    Self.directDiscoveryResponse(nodes: [valid], issueCount: 1)
+                )
+            }
+            let response: [String: Any] = [
+                "data": [
+                    "pr_0": NSNull(),
+                    "rateLimit": Self.rateLimitJSON()
+                ]
+            ]
+            return (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.graphQLData(response)
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().discoverDirectMentions(
+            username: "tester",
+            configuration: .default,
+            existingEntries: [:]
+        )
+
+        XCTAssertFalse(result.isComplete)
+        XCTAssertEqual(result.seenIDs, Set([608]))
+        XCTAssertTrue(result.discovered.isEmpty)
+        XCTAssertEqual(MockGitHubGraphQLURLProtocol.requestedQueries.count, 2)
+    }
+
+    func testDirectMentionDiscoveryMissingAliasIsPartial() async {
+        let malformed = Self.directDiscoveryNode(
+            id: nil,
+            number: 16,
+            owner: "owner",
+            repo: "repo",
+            title: "Malformed"
+        )
+        MockGitHubGraphQLURLProtocol.reset { request in
+            (
+                Self.httpResponse(for: request, statusCode: 200),
+                Self.directDiscoveryResponse(nodes: [malformed], issueCount: 1)
+            )
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let result = await makeGraphQLClient().discoverDirectMentions(
+            username: "tester",
+            configuration: .default,
+            existingEntries: [:]
+        )
+
+        XCTAssertFalse(result.isComplete)
+        XCTAssertTrue(result.seenIDs.isEmpty)
+        XCTAssertTrue(result.discovered.isEmpty)
+        XCTAssertEqual(MockGitHubGraphQLURLProtocol.requestedQueries.count, 1)
+    }
+
+    func testPullRequestFilterScopeMatchesExactOwnerDraftAndArchiveRules() {
+        var all = Configuration.default
+        all.repositories = []
+        XCTAssertTrue(
+            PullRequestFilter.includes(
+                repoFullName: "owner/repo",
+                isArchived: false,
+                isDraft: false,
+                configuration: all
+            )
+        )
+        XCTAssertFalse(
+            PullRequestFilter.includes(
+                repoFullName: "owner/repo",
+                isArchived: true,
+                isDraft: false,
+                configuration: all
+            )
+        )
+
+        var exact = all
+        exact.repositories = ["OWNER/REPO"]
+        XCTAssertTrue(
+            PullRequestFilter.includes(
+                repoFullName: "owner/repo",
+                isArchived: true,
+                isDraft: false,
+                configuration: exact
+            )
+        )
+        XCTAssertFalse(
+            PullRequestFilter.includes(
+                repoFullName: "owner/other",
+                isArchived: false,
+                isDraft: false,
+                configuration: exact
+            )
+        )
+
+        var owner = all
+        owner.repositories = ["owner/"]
+        owner.showDrafts = false
+        XCTAssertTrue(
+            PullRequestFilter.includes(
+                repoFullName: "owner/repo",
+                isArchived: false,
+                isDraft: false,
+                configuration: owner
+            )
+        )
+        XCTAssertFalse(
+            PullRequestFilter.includes(
+                repoFullName: "owner/repo",
+                isArchived: false,
+                isDraft: true,
+                configuration: owner
+            )
+        )
+        XCTAssertFalse(
+            PullRequestFilter.includes(
+                repoFullName: "owner/repo",
+                isArchived: true,
+                isDraft: false,
+                configuration: owner
+            )
+        )
+    }
+
+    func testDirectMentionProjectorKeepsFreshCategoryAndAddsOnlyFallbackRows() {
+        var authored = makeMentionPullRequest(id: 701, number: 1, category: .authored)
+        authored.approvalCount = 2
+        authored.mentionCount = nil
+        let reviewRequest = makeMentionPullRequest(id: 702, number: 2, category: .reviewRequest)
+        let fallbackNewer = makeMentionPullRequest(
+            id: 703,
+            number: 3,
+            category: .mentioned,
+            updatedAt: mentionDate(30)
+        )
+        let fallbackOlder = makeMentionPullRequest(
+            id: 704,
+            number: 4,
+            category: .authored,
+            updatedAt: mentionDate(20)
+        )
+        let merged = makeMentionPullRequest(
+            id: 705,
+            number: 5,
+            category: .mentioned,
+            state: .merged,
+            mergedAt: mentionDate(40)
+        )
+        let staleOpenMerged = makeMentionPullRequest(
+            id: merged.id,
+            number: merged.number,
+            category: .authored
+        )
+        let entries = [
+            701: makeTrackingEntry(id: 701, source: makeMentionSource(), pendingCount: 2),
+            702: makeTrackingEntry(id: 702, source: makeMentionSource(), pendingCount: 3),
+            703: makeTrackingEntry(id: 703, pullRequest: fallbackNewer, source: makeMentionSource(), pendingCount: 4),
+            704: makeTrackingEntry(id: 704, pullRequest: fallbackOlder, source: makeMentionSource(), pendingCount: 1),
+            705: makeTrackingEntry(id: 705, pullRequest: merged, source: makeMentionSource(), pendingCount: 9)
+        ]
+
+        let projection = DirectMentionProjector.project(
+            entries: entries,
+            onto: [authored, reviewRequest, staleOpenMerged],
+            mergedIDs: [merged.id]
+        )
+
+        XCTAssertEqual(projection.pullRequests.map(\.id), [authored.id, reviewRequest.id])
+        XCTAssertEqual(projection.pullRequests.first?.category, .authored)
+        XCTAssertEqual(projection.pullRequests.first?.approvalCount, 2)
+        XCTAssertEqual(projection.pullRequests.first?.mentionCount, 2)
+        XCTAssertEqual(projection.pullRequests[1].category, .reviewRequest)
+        XCTAssertEqual(projection.pullRequests[1].mentionCount, 3)
+        XCTAssertEqual(projection.mentionedPullRequests.map(\.id), [fallbackNewer.id, fallbackOlder.id])
+        XCTAssertEqual(projection.mentionedPullRequests.map(\.category), [.mentioned, .mentioned])
+        XCTAssertFalse(projection.mentionedPullRequests.contains { $0.id == merged.id })
+    }
+
+    func testDirectMentionProjectorHandledStateClearsBadgeAndReactivationRestoresFallback() {
+        let pr = makeMentionPullRequest(id: 706, number: 6, category: .authored)
+        var handled = makeTrackingEntry(
+            id: pr.id,
+            pullRequest: pr,
+            source: makeMentionSource(),
+            pendingCount: 0
+        )
+        var projection = DirectMentionProjector.project(
+            entries: [pr.id: handled],
+            onto: [pr],
+            mergedIDs: []
+        )
+        XCTAssertNil(projection.pullRequests.first?.mentionCount)
+        XCTAssertTrue(projection.mentionedPullRequests.isEmpty)
+
+        handled.state = DirectMentionState(pendingCount: 2)
+        projection = DirectMentionProjector.project(
+            entries: [pr.id: handled],
+            onto: [],
+            mergedIDs: []
+        )
+        XCTAssertEqual(projection.mentionedPullRequests.map(\.id), [pr.id])
+        XCTAssertEqual(projection.mentionedPullRequests.first?.category, .mentioned)
+        XCTAssertEqual(projection.mentionedPullRequests.first?.mentionCount, 2)
+    }
+
+    func testCachedDetailAndPlaceholderCannotReviveMentionCount() {
+        var cached = makePullRequest(id: 707, number: 7, category: .authored)
+        cached.mentionCount = 9
+        var visible = makePullRequest(id: cached.id, number: cached.number, category: .authored)
+        visible.mentionCount = 3
+        let indexed = makeIndexedPR(id: cached.id, number: cached.number, baseNeedsUpdate: nil)
+
+        let placeholder = indexed.placeholderPullRequest(using: cached, preserving: visible)
+        XCTAssertEqual(placeholder.mentionCount, 3)
+
+        let detail = CachedPRDetail(
+            prId: cached.id,
+            indexSnapshot: makeIndexSnapshot(),
+            detail: cached,
+            detailFetchedAt: mentionDate(0)
+        )
+        XCTAssertNil(detail.detail.mentionCount)
+        let encoded = try? JSONEncoder().encode(detail)
+        let decoded = encoded.flatMap { try? JSONDecoder().decode(CachedPRDetail.self, from: $0) }
+        XCTAssertNil(decoded?.detail.mentionCount)
+    }
+
+    @MainActor
+    func testLoadCachedDataDropsLegacyMentionedRowsAndProjectsTrackingEntries() {
+        PRCache.shared.clear()
+        PRDetailCache.shared.clear()
+        DirectMentionTrackingCache.shared.clear()
+        defer {
+            PRCache.shared.clear()
+            PRDetailCache.shared.clear()
+            DirectMentionTrackingCache.shared.clear()
+        }
+
+        let primary = makeMentionPullRequest(id: 708, number: 8, category: .authored)
+        var legacyMentioned = makeMentionPullRequest(id: 709, number: 9, category: .mentioned)
+        legacyMentioned.mentionCount = 8
+        let merged = makeMentionPullRequest(
+            id: 710,
+            number: 10,
+            category: .authored,
+            state: .merged,
+            mergedAt: mentionDate(50)
+        )
+        let tracked = makeMentionPullRequest(id: 711, number: 11, category: .mentioned)
+        let trackedEntry = makeTrackingEntry(
+            id: tracked.id,
+            pullRequest: tracked,
+            source: makeMentionSource(),
+            pendingCount: 2
+        )
+
+        DirectMentionTrackingCache.shared.save([tracked.id: trackedEntry])
+        PRCache.shared.save(
+            PRList(
+                lastUpdated: mentionDate(100),
+                pullRequests: [primary],
+                mentionedPullRequests: [legacyMentioned],
+                mergedPullRequests: [merged],
+                isLoading: false,
+                error: nil
+            )
+        )
+
+        let manager = PRManager(
+            apiClient: GitHubAPIClient(token: ""),
+            notificationManager: NotificationManager(),
+            oauthManager: GitHubOAuthManager(loadSavedAuth: false)
+        )
+        manager.configuration = .default
+        manager.loadCachedData()
+
+        XCTAssertEqual(manager.prList.pullRequests.map(\.id), [primary.id])
+        XCTAssertTrue(manager.prList.pullRequests.allSatisfy { $0.mentionCount == nil })
+        XCTAssertEqual(manager.prList.mentionedPullRequests.map(\.id), [tracked.id])
+        XCTAssertEqual(manager.prList.mentionedPullRequests.first?.mentionCount, 2)
+        XCTAssertEqual(manager.prList.mergedPullRequests.map(\.id), [merged.id])
+        XCTAssertNil(manager.prList.mergedPullRequests.first?.mentionCount)
+    }
+
+    func testPRListMenuNotificationCountDeduplicatesRequestsAndDirectMentions() {
+        var authoredA = makePullRequest(id: 712, number: 12, category: .authored)
+        authoredA.changesRequestedCount = 1
+        authoredA.mentionCount = 3
+        var authoredB = makePullRequest(id: 713, number: 13, category: .authored)
+        authoredB.changesRequestedCount = 3
+        authoredB.reviewThreads = [makeReviewThread(id: "unread")]
+        var duplicateMention = makePullRequest(id: authoredA.id, number: authoredA.number, category: .mentioned)
+        duplicateMention.mentionCount = 3
+        var merged = makePullRequest(
+            id: 714,
+            number: 14,
+            category: .mentioned,
+            mergedAt: mentionDate(60)
+        )
+        merged.mentionCount = 99
+
+        let list = PRList(
+            lastUpdated: mentionDate(100),
+            pullRequests: [authoredA, authoredB],
+            mentionedPullRequests: [duplicateMention],
+            mergedPullRequests: [merged],
+            isLoading: false,
+            error: nil
+        )
+
+        XCTAssertEqual(list.changesRequestedPRCount, 2)
+        XCTAssertEqual(list.unansweredDirectMentionCount, 3)
+        XCTAssertEqual(list.menuNotificationCount, 5)
+        XCTAssertEqual(list.authoredUnreadUnresolvedCount, 1)
     }
 
     func testPATScopeMatcherAcceptsBroaderUserScopeForReadUserRequirement() {
@@ -1581,6 +2609,360 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertFalse(viewModel.isOpeningPR(pr))
     }
 
+    private func mentionDate(_ offset: TimeInterval) -> Date {
+        Date(timeIntervalSince1970: 1_767_225_600 + offset)
+    }
+
+    private func makeGraphQLClient() -> GitHubAPIClient {
+        GitHubAPIClient(
+            token: "token",
+            graphQLEndpoint: "https://example.test/graphql",
+            session: makeMockGitHubGraphQLSession()
+        )
+    }
+
+    private func makeMockGitHubGraphQLSession() -> URLSession {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockGitHubGraphQLURLProtocol.self]
+        return URLSession(configuration: configuration)
+    }
+
+    private func makeIssueComment(
+        id: String,
+        author: String,
+        body: String,
+        createdAt: Date,
+        lastEditedAt: Date? = nil
+    ) -> IssueCommentSummary {
+        IssueCommentSummary(
+            id: id,
+            author: author,
+            body: body,
+            createdAt: createdAt,
+            lastEditedAt: lastEditedAt
+        )
+    }
+
+    private func makeMentionSource(
+        updatedAt: Date = Date(timeIntervalSince1970: 1_767_225_610),
+        lastEditedAt: Date? = nil,
+        commentCount: Int = 0,
+        latestCommentID: String? = nil,
+        latestCommentLastEditedAt: Date? = nil
+    ) -> DirectMentionSourceSnapshot {
+        DirectMentionSourceSnapshot(
+            updatedAt: updatedAt,
+            lastEditedAt: lastEditedAt,
+            commentCount: commentCount,
+            latestCommentID: latestCommentID,
+            latestCommentLastEditedAt: latestCommentLastEditedAt
+        )
+    }
+
+    private func makeTrackingEntry(
+        id: Int,
+        source: DirectMentionSourceSnapshot,
+        pendingCount: Int,
+        pullRequest: PullRequest? = nil,
+        conversationComments: [IssueCommentSummary] = []
+    ) -> DirectMentionTrackingEntry {
+        let row = pullRequest ?? makeMentionPullRequest(
+            id: id,
+            number: id,
+            category: .mentioned,
+            conversationComments: conversationComments
+        )
+        return DirectMentionTrackingEntry(
+            prID: id,
+            reference: PullRequestReference(
+                owner: row.repositoryOwner,
+                repo: row.repositoryName,
+                number: row.number
+            ),
+            pullRequest: row,
+            source: source,
+            state: DirectMentionState(pendingCount: pendingCount),
+            lastSeenAt: mentionDate(0)
+        )
+    }
+
+    private func makeMentionPullRequest(
+        id: Int,
+        number: Int,
+        category: PRCategory,
+        state: PRState = .open,
+        mergedAt: Date? = nil,
+        author: String = "other",
+        title: String? = nil,
+        body: String? = nil,
+        createdAt: Date? = nil,
+        updatedAt: Date? = nil,
+        repositoryOwner: String = "owner",
+        repositoryName: String = "repo",
+        repositoryIsArchived: Bool? = false,
+        isDraft: Bool = false,
+        conversationComments: [IssueCommentSummary] = []
+    ) -> PullRequest {
+        PullRequest(
+            id: id,
+            number: number,
+            title: title ?? "PR #\(number)",
+            author: author,
+            authorAvatarURL: nil,
+            repositoryOwner: repositoryOwner,
+            repositoryName: repositoryName,
+            repositoryIsArchived: repositoryIsArchived,
+            url: URL(string: "https://github.com/\(repositoryOwner)/\(repositoryName)/pull/\(number)")!,
+            state: state,
+            isDraft: isDraft,
+            createdAt: createdAt ?? mentionDate(0),
+            updatedAt: updatedAt ?? mentionDate(10),
+            mergedAt: mergedAt,
+            body: body,
+            conversationComments: conversationComments,
+            lastCommitAt: mentionDate(5),
+            headCommitOid: "abc123",
+            reviewThreads: [],
+            category: category,
+            hasBaseConflicts: false,
+            ciStatus: .success,
+            checkSuccessCount: 1,
+            checkFailureCount: 0,
+            checkPendingCount: 0,
+            githubCIState: "SUCCESS",
+            myLastReviewState: nil,
+            myLastReviewAt: nil,
+            reviewRequestedAt: nil,
+            myThreadsAllResolved: false,
+            approvalCount: 0,
+            changesRequestedCount: 0,
+            ciExtendedInfo: nil
+        )
+    }
+
+    private static func graphQLQuery(from request: URLRequest) -> String? {
+        guard let body = request.httpBody,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
+            return nil
+        }
+        return object["query"] as? String
+    }
+
+    private static func optionalJSONValue<T>(_ value: T?) -> Any {
+        value.map { $0 as Any } ?? NSNull()
+    }
+
+    private static func graphQLData(_ object: [String: Any]) -> Data {
+        (try? JSONSerialization.data(withJSONObject: object)) ?? Data()
+    }
+
+    private static func isoDateString(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+
+    private static func rateLimitJSON() -> [String: Any] {
+        [
+            "cost": 1,
+            "remaining": 4_999,
+            "resetAt": isoDateString(Date(timeIntervalSince1970: 1_767_226_000))
+        ]
+    }
+
+    private static func directSourceResponse(
+        id: Int,
+        source: DirectMentionSourceSnapshot,
+        state: String = "OPEN",
+        isDraft: Bool = false,
+        isArchived: Bool = false
+    ) -> Data {
+        let latestNodes: [[String: Any]]
+        if let latestID = source.latestCommentID {
+            latestNodes = [[
+                "id": latestID,
+                "lastEditedAt": optionalJSONValue(source.latestCommentLastEditedAt.map(isoDateString))
+            ]]
+        } else {
+            latestNodes = []
+        }
+        return graphQLData([
+            "data": [
+                "pr_0": [
+                    "pullRequest": [
+                        "databaseId": id,
+                        "state": state,
+                        "isDraft": isDraft,
+                        "repository": ["isArchived": isArchived],
+                        "updatedAt": isoDateString(source.updatedAt),
+                        "lastEditedAt": optionalJSONValue(source.lastEditedAt.map(isoDateString)),
+                        "comments": ["totalCount": source.commentCount],
+                        "latestComments": ["nodes": latestNodes]
+                    ]
+                ],
+                "rateLimit": rateLimitJSON()
+            ]
+        ])
+    }
+
+    private static func directCommentJSON(
+        id: String,
+        author: String?,
+        body: String,
+        createdAt: Date,
+        lastEditedAt: Date? = nil
+    ) -> [String: Any] {
+        [
+            "id": id,
+            "author": optionalJSONValue(author.map { ["login": $0] as [String: Any] }),
+            "body": body,
+            "createdAt": isoDateString(createdAt),
+            "lastEditedAt": optionalJSONValue(lastEditedAt.map(isoDateString))
+        ]
+    }
+
+    private static func directStateResponse(
+        id: Int,
+        title: String,
+        body: String?,
+        author: String?,
+        createdAt: Date,
+        updatedAt: Date,
+        comments: [[String: Any]],
+        hasNextPage: Bool,
+        endCursor: String? = nil,
+        state: String = "OPEN",
+        includeNullCommentNode: Bool = false
+    ) -> Data {
+        var rawComments: [Any] = comments.map { $0 as Any }
+        if includeNullCommentNode {
+            rawComments.append(NSNull())
+        }
+        return graphQLData([
+            "data": [
+                "pr_0": [
+                    "pullRequest": [
+                        "databaseId": id,
+                        "state": state,
+                        "title": title,
+                        "body": optionalJSONValue(body),
+                        "author": optionalJSONValue(author.map { ["login": $0] as [String: Any] }),
+                        "createdAt": isoDateString(createdAt),
+                        "updatedAt": isoDateString(updatedAt),
+                        "lastEditedAt": NSNull(),
+                        "comments": [
+                            "nodes": rawComments,
+                            "pageInfo": [
+                                "hasNextPage": hasNextPage,
+                                "endCursor": optionalJSONValue(endCursor)
+                            ]
+                        ]
+                    ]
+                ],
+                "rateLimit": rateLimitJSON()
+            ]
+        ])
+    }
+
+    private static func directDiscoveryNode(
+        id: Int?,
+        number: Int,
+        owner: String,
+        repo: String,
+        isDraft: Bool = false,
+        isArchived: Bool? = false,
+        title: String = "Candidate",
+        body: String? = nil,
+        author: String? = "other",
+        updatedAt: Date = Date(timeIntervalSince1970: 1_767_225_610),
+        commentCount: Int = 0,
+        latestCommentID: String? = nil
+    ) -> [String: Any] {
+        [
+            "databaseId": optionalJSONValue(id),
+            "number": number,
+            "title": title,
+            "body": optionalJSONValue(body),
+            "author": optionalJSONValue(author.map { ["login": $0] as [String: Any] }),
+            "createdAt": isoDateString(Date(timeIntervalSince1970: 1_767_225_600)),
+            "updatedAt": isoDateString(updatedAt),
+            "lastEditedAt": NSNull(),
+            "isDraft": isDraft,
+            "repository": [
+                "owner": ["login": owner],
+                "name": repo,
+                "isArchived": optionalJSONValue(isArchived)
+            ],
+            "comments": ["totalCount": commentCount],
+            "latestComments": [
+                "nodes": latestCommentID.map { ["id": $0, "lastEditedAt": NSNull()] } ?? []
+            ]
+        ]
+    }
+
+    private static func directDiscoveryResponse(nodes: [Any], issueCount: Int) -> Data {
+        graphQLData([
+            "data": [
+                "search": [
+                    "issueCount": issueCount,
+                    "nodes": nodes,
+                    "pageInfo": [
+                        "hasNextPage": false,
+                        "endCursor": NSNull()
+                    ]
+                ],
+                "rateLimit": rateLimitJSON()
+            ]
+        ])
+    }
+
+    private static func directRowResponse(
+        id: Int,
+        number: Int,
+        owner: String,
+        repo: String,
+        title: String
+    ) -> Data {
+        graphQLData([
+            "data": [
+                "pr_0": [
+                    "pullRequest": [
+                        "id": "PR_node_\(id)",
+                        "databaseId": id,
+                        "number": number,
+                        "title": title,
+                        "body": NSNull(),
+                        "url": "https://github.com/\(owner)/\(repo)/pull/\(number)",
+                        "state": "OPEN",
+                        "isDraft": false,
+                        "baseRefName": "main",
+                        "headRefName": "feature",
+                        "createdAt": isoDateString(Date(timeIntervalSince1970: 1_767_225_600)),
+                        "updatedAt": isoDateString(Date(timeIntervalSince1970: 1_767_225_610)),
+                        "mergedAt": NSNull(),
+                        "mergeable": "MERGEABLE",
+                        "mergeStateStatus": "CLEAN",
+                        "author": ["login": "other", "avatarUrl": NSNull()],
+                        "repository": [
+                            "owner": ["login": owner],
+                            "name": repo,
+                            "isArchived": false
+                        ],
+                        "comments": ["nodes": []],
+                        "reviewThreads": [
+                            "nodes": [],
+                            "pageInfo": [
+                                "hasPreviousPage": false,
+                                "startCursor": NSNull()
+                            ]
+                        ],
+                        "commits": ["nodes": []],
+                        "latestReviews": ["nodes": []]
+                    ]
+                ],
+                "rateLimit": rateLimitJSON()
+            ]
+        ])
+    }
+
     private func makeRelease(assets: [String]) throws -> ReleaseInfo {
         let json = """
         {
@@ -2087,6 +3469,73 @@ private final class FakeCmuxCommandRunner: CmuxCommandRunning, @unchecked Sendab
     }
 }
 
+private final class MockGitHubGraphQLURLProtocol: URLProtocol {
+    typealias RequestHandler = (URLRequest) throws -> (HTTPURLResponse, Data)
+
+    private static let lock = NSLock()
+    private static var handler: RequestHandler?
+    private static var queries: [String] = []
+
+    static var requestedQueries: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return queries
+    }
+
+    static func reset(handler: RequestHandler? = nil) {
+        lock.lock()
+        self.handler = handler
+        queries = []
+        lock.unlock()
+    }
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.recordQuery(from: request)
+
+        guard let handler = Self.currentHandler else {
+            client?.urlProtocol(self, didFailWithError: URLError(.badServerResponse))
+            return
+        }
+
+        do {
+            let (response, data) = try handler(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+
+    private static var currentHandler: RequestHandler? {
+        lock.lock()
+        defer { lock.unlock() }
+        return handler
+    }
+
+    private static func recordQuery(from request: URLRequest) {
+        guard let body = request.httpBody,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let query = object["query"] as? String else {
+            return
+        }
+
+        lock.lock()
+        queries.append(query)
+        lock.unlock()
+    }
+}
+
 private final class MockUpdateURLProtocol: URLProtocol {
     typealias RequestHandler = (URLRequest) throws -> (HTTPURLResponse, Data)
 
@@ -2428,21 +3877,6 @@ final class ArchivedRepoFilterTests: XCTestCase {
         XCTAssertTrue(result.isEmpty)
     }
 
-    func testMentionedRefreshArchiveStatusIsImmediatelyFilterable() throws {
-        var old = try makePullRequest(isArchived: false)
-        var fresh = try makePullRequest(isArchived: true)
-        old.ciStatus = .pending
-        fresh.ciStatus = .success
-
-        let refreshed = GitHubAPIClient.mergeMentionedRefreshResults(
-            existing: [old],
-            refreshedByID: [fresh.id: fresh]
-        )
-
-        XCTAssertEqual(refreshed.first?.repositoryIsArchived, true)
-        XCTAssertEqual(refreshed.first?.ciStatus, .success)
-        XCTAssertTrue(PullRequestFilter.apply(refreshed, configuration: .default).isEmpty)
-    }
 
     func testCachedPRListFilterExcludesArchivedRepositoriesFromEverySection() throws {
         let archived = try makePullRequest(isArchived: true)

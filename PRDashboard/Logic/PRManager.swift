@@ -62,22 +62,36 @@ enum CIWatchPlanner {
 }
 
 enum PullRequestFilter {
-    static func apply(_ pullRequests: [PullRequest], configuration: Configuration) -> [PullRequest] {
+    static func includes(
+        repoFullName: String,
+        isArchived: Bool?,
+        isDraft: Bool,
+        configuration: Configuration
+    ) -> Bool {
         let repositoryFilters = configuration.repositories.map { $0.lowercased() }
-        return pullRequests.filter { pr in
-            let repo = pr.repoFullName.lowercased()
-            let matchesRepositoryFilter = repositoryFilters.contains { filter in
-                filter.hasSuffix("/") ? repo.hasPrefix(filter) : repo == filter
-            }
-            let isExplicitlyIncluded = repositoryFilters.contains(repo)
+        let repo = repoFullName.lowercased()
+        let matchesRepositoryFilter = repositoryFilters.contains { filter in
+            filter.hasSuffix("/") ? repo.hasPrefix(filter) : repo == filter
+        }
+        let isExplicitlyIncluded = repositoryFilters.contains(repo)
 
-            if !repositoryFilters.isEmpty && !matchesRepositoryFilter {
-                return false
-            }
-            if pr.repositoryIsArchived == true && !isExplicitlyIncluded {
-                return false
-            }
-            return configuration.showDrafts || !pr.isDraft
+        if !repositoryFilters.isEmpty && !matchesRepositoryFilter {
+            return false
+        }
+        if isArchived == true && !isExplicitlyIncluded {
+            return false
+        }
+        return configuration.showDrafts || !isDraft
+    }
+
+    static func apply(_ pullRequests: [PullRequest], configuration: Configuration) -> [PullRequest] {
+        pullRequests.filter {
+            includes(
+                repoFullName: $0.repoFullName,
+                isArchived: $0.repositoryIsArchived,
+                isDraft: $0.isDraft,
+                configuration: configuration
+            )
         }
     }
 
@@ -85,6 +99,64 @@ enum PullRequestFilter {
         prList.pullRequests = apply(prList.pullRequests, configuration: configuration)
         prList.mentionedPullRequests = apply(prList.mentionedPullRequests, configuration: configuration)
         prList.mergedPullRequests = apply(prList.mergedPullRequests, configuration: configuration)
+    }
+}
+
+struct DirectMentionProjection {
+    var pullRequests: [PullRequest]
+    var mentionedPullRequests: [PullRequest]
+}
+
+enum DirectMentionProjector {
+    static func project(
+        entries: [Int: DirectMentionTrackingEntry],
+        onto pullRequests: [PullRequest],
+        mergedIDs: Set<Int>
+    ) -> DirectMentionProjection {
+        var projectedPullRequests: [PullRequest] = []
+        projectedPullRequests.reserveCapacity(pullRequests.count)
+        var freshIDs = Set<Int>()
+        freshIDs.reserveCapacity(pullRequests.count)
+
+        for var pullRequest in pullRequests {
+            guard pullRequest.state == .open,
+                  !mergedIDs.contains(pullRequest.id),
+                  freshIDs.insert(pullRequest.id).inserted else {
+                continue
+            }
+            let entryIsOpen = entries[pullRequest.id].map { $0.pullRequest.state == .open } ?? true
+            let pendingCount = entryIsOpen
+                ? (entries[pullRequest.id]?.state.pendingCount ?? 0)
+                : 0
+            pullRequest.mentionCount = pendingCount > 0 ? pendingCount : nil
+            projectedPullRequests.append(pullRequest)
+        }
+
+        var fallback: [PullRequest] = []
+        for (id, entry) in entries {
+            guard entry.state.pendingCount > 0,
+                  !freshIDs.contains(id),
+                  !mergedIDs.contains(id),
+                  entry.pullRequest.state == .open else {
+                continue
+            }
+
+            var pullRequest = entry.pullRequest
+            pullRequest.category = .mentioned
+            pullRequest.mentionCount = entry.state.pendingCount
+            fallback.append(pullRequest)
+        }
+        fallback.sort {
+            if $0.updatedAt != $1.updatedAt {
+                return $0.updatedAt > $1.updatedAt
+            }
+            return $0.id < $1.id
+        }
+
+        return DirectMentionProjection(
+            pullRequests: projectedPullRequests,
+            mentionedPullRequests: fallback
+        )
     }
 }
 
@@ -177,15 +249,13 @@ final class PRManager: PRManagerType, ObservableObject {
     private var ciWatchTimer: Timer?
     private var activeRefreshTask: Task<Void, Never>?
     private var ciWatchTask: Task<Void, Never>?
-    private var mentionedRefreshTask: Task<Void, Never>?
+    private var directMentionTask: Task<Void, Never>?
+    private var directMentionTracking: [Int: DirectMentionTrackingEntry] = [:]
     private var recoveryRetryTask: Task<Void, Never>?
     private var queuedRefresh = false
     private var consecutiveTransientFailures = 0
     private var backgroundRefreshGeneration = 0
-    private var lastMentionedRefreshStartedAt: Date?
-    private var lastMentionedRefreshSucceededAt: Date?
-    private var lastAuthoredMentionReferenceCoverageAt: Date?
-    private var lastAuthoredMentionReferenceCoverageUsername: String?
+    private var lastDirectMentionDiscoveryAt: Date?
     private var previousPRs: [Int: PullRequest] = [:]
     private var previousPinnedMajorEvents: [Int: Set<PinnedMajorPREvent>] = [:]
     private var hoverDetailTasks: [Int: Task<Void, Never>] = [:]
@@ -196,11 +266,9 @@ final class PRManager: PRManagerType, ObservableObject {
     private var isLowPowerMode: Bool = ProcessInfo.processInfo.isLowPowerModeEnabled
     private var isOnExpensiveNetwork: Bool = false
     private let networkMonitor = NWPathMonitor()
-    private static let mentionedRefreshThrottle: TimeInterval = 30 * 60
+    private static let directMentionDiscoveryInterval: TimeInterval = 60 * 60
     private static let ciWatchInterval: TimeInterval = 30
-    private static let lastMentionedRefreshSucceededAtKey = "PRDashboard.LastMentionedRefreshSucceededAt"
-    private static let lastAuthoredMentionReferenceCoverageAtKey = "PRDashboard.LastAuthoredMentionReferenceCoverageAt"
-    private static let lastAuthoredMentionReferenceCoverageUsernameKey = "PRDashboard.LastAuthoredMentionReferenceCoverageUsername"
+    private static let lastDirectMentionDiscoveryAtKey = "PRDashboard.LastDirectMentionDiscoveryAt"
 
     private struct HoverDetailCacheEntry {
         let metadata: GitHubAPIClient.PRHoverMetadata
@@ -231,14 +299,8 @@ final class PRManager: PRManagerType, ObservableObject {
         self.configuration = Self.loadConfiguration()
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
         self.readReviewThreadIDs = Self.loadReadReviewThreadIDs()
-        self.lastMentionedRefreshSucceededAt = Self.loadDate(
-            forKey: Self.lastMentionedRefreshSucceededAtKey
-        )
-        self.lastAuthoredMentionReferenceCoverageAt = Self.loadDate(
-            forKey: Self.lastAuthoredMentionReferenceCoverageAtKey
-        )
-        self.lastAuthoredMentionReferenceCoverageUsername = UserDefaults.standard.string(
-            forKey: Self.lastAuthoredMentionReferenceCoverageUsernameKey
+        self.lastDirectMentionDiscoveryAt = Self.loadDate(
+            forKey: Self.lastDirectMentionDiscoveryAtKey
         )
 
         apiClient.updateGraphQLEndpoint(self.configuration.graphQLEndpoint)
@@ -266,7 +328,7 @@ final class PRManager: PRManagerType, ObservableObject {
         activeRefreshTask?.cancel()
         ciWatchTask?.cancel()
         ciWatchTimer?.invalidate()
-        mentionedRefreshTask?.cancel()
+        directMentionTask?.cancel()
         recoveryRetryTask?.cancel()
         hoverDetailTasks.values.forEach { $0.cancel() }
     }
@@ -294,7 +356,7 @@ final class PRManager: PRManagerType, ObservableObject {
 
         // Re-evaluate the fast CI watch whenever the snapshot changes. Deriving it from
         // the single source of truth means any path that surfaces in-flight CI (main poll,
-        // manual refresh, mentioned-PR refresh, cache load, single-PR refresh) arms the
+        // manual refresh, direct-mention maintenance, cache load, single-PR refresh) arms the
         // watch — no manual call site can be forgotten. Debounced so a burst of per-field
         // mutations during a refresh collapses into one evaluation, and so the closure reads
         // the committed `prList` rather than the pre-update value @Published delivers.
@@ -335,6 +397,7 @@ final class PRManager: PRManagerType, ObservableObject {
             timer?.invalidate()
             timer = nil
             stopCIWatchTimer(reason: "expensive_network")
+            invalidateBackgroundRefreshWork(reason: "expensive_network")
             cancelRecoveryRetry()
         } else if !isOnExpensiveNetwork && wasExpensive {
             if oauthManager.authState.isAuthenticated {
@@ -354,6 +417,7 @@ final class PRManager: PRManagerType, ObservableObject {
             timer?.invalidate()
             timer = nil
             stopCIWatchTimer(reason: "low_power_mode")
+            invalidateBackgroundRefreshWork(reason: "low_power_mode")
             cancelRecoveryRetry()
         } else if !isLowPowerMode && wasLowPowerMode {
             if oauthManager.authState.isAuthenticated {
@@ -376,6 +440,7 @@ final class PRManager: PRManagerType, ObservableObject {
             stopCIWatchTimer(reason: "sign_out")
             cancelRefreshWork(reason: "sign_out")
             prList = .empty
+            directMentionTracking = [:]
             previousPRs = [:]
             previousPinnedMajorEvents = [:]
             hoverDetailTasks.values.forEach { $0.cancel() }
@@ -385,29 +450,46 @@ final class PRManager: PRManagerType, ObservableObject {
             // Clear caches on sign-out
             PRCache.shared.clear()
             PRDetailCache.shared.clear()
-            MentionCache.shared.clear()
-            AuthoredMentionReferenceCache.shared.clear()
+            DirectMentionTrackingCache.shared.clear()
             AvatarCache.shared.clear()
-            lastMentionedRefreshSucceededAt = nil
-            lastAuthoredMentionReferenceCoverageAt = nil
-            lastAuthoredMentionReferenceCoverageUsername = nil
-            Self.saveDate(nil, forKey: Self.lastMentionedRefreshSucceededAtKey)
-            Self.saveDate(nil, forKey: Self.lastAuthoredMentionReferenceCoverageAtKey)
-            UserDefaults.standard.removeObject(forKey: Self.lastAuthoredMentionReferenceCoverageUsernameKey)
+            lastDirectMentionDiscoveryAt = nil
+            Self.saveDate(nil, forKey: Self.lastDirectMentionDiscoveryAtKey)
         }
     }
 
-    /// Load cached PR data on startup for immediate display
+    /// Load cached PR data on startup for immediate display. Tracking state is the
+    /// source of truth for mention counts; legacy mentioned rows are discarded.
     func loadCachedData() {
+        directMentionTracking = DirectMentionTrackingCache.shared.load()
         if var cached = PRCache.shared.load() {
-            clearCmuxOpenStatus(in: &cached)
-            applyReadState(to: &cached)
-            PullRequestFilter.apply(to: &cached, configuration: configuration)
+            prepareCachedPRList(&cached)
             self.prList = cached
-            // Rebuild previousPRs for change detection
             previousPRs = Self.previousPRState(from: cached.allPRs)
             updateCIWatchTimer()
+            persistProjectedCaches()
         }
+    }
+
+    private func prepareCachedPRList(_ cached: inout PRList) {
+        clearCmuxOpenStatus(in: &cached)
+
+        var openPRs = filterByConfiguration(
+            cached.pullRequests.filter { $0.category != .mentioned }
+        )
+        var mergedPRs = filterByConfiguration(cached.mergedPullRequests)
+        let projection = projectDirectMentions(onto: openPRs, mergedPRs: mergedPRs)
+        openPRs = projection.pullRequests
+        let mentionedPRs = projection.mentionedPullRequests
+        mergedPRs = mergedPRs.map { pr in
+            var copy = pr
+            copy.mentionCount = nil
+            return copy
+        }
+
+        cached.pullRequests = openPRs
+        cached.mentionedPullRequests = mentionedPRs
+        cached.mergedPullRequests = mergedPRs
+        applyReadState(to: &cached)
     }
 
     func enablePolling(_ enabled: Bool) {
@@ -459,6 +541,19 @@ final class PRManager: PRManagerType, ObservableObject {
         }
         RunLoop.main.add(newTimer, forMode: .common)
         timer = newTimer
+    }
+
+    func clearDirectMentionTracking() {
+        invalidateBackgroundRefreshWork(reason: "cache_cleared")
+        directMentionTracking = [:]
+        DirectMentionTrackingCache.shared.clear()
+        let projection = DirectMentionProjector.project(
+            entries: [:],
+            onto: prList.pullRequests,
+            mergedIDs: Set(prList.mergedPullRequests.map(\.id))
+        )
+        prList.pullRequests = projection.pullRequests
+        prList.mentionedPullRequests = []
     }
 
     func refresh() {
@@ -536,26 +631,14 @@ final class PRManager: PRManagerType, ObservableObject {
                     existingPRs: visiblePRs,
                     onProgress: onProgress
                 )
-                let unfilteredOpenPRs = result.openPRs
-                let unfilteredMergedPRs = result.mergedPRs
                 var prs = self.filterByConfiguration(result.openPRs)
-                var mentionedPRs = self.filterByConfiguration(self.prList.mentionedPullRequests)
                 var mergedPRs = self.filterByConfiguration(result.mergedPRs)
 
-                // Keep known mentioned PRs' CI fresh on every poll. Discovering *which*
-                // PRs are mentioned is expensive and stays on the 30-minute throttle,
-                // but their CI can change far sooner, so refresh just the CI here to
-                // avoid a stale snapshot (e.g. stuck "running" after checks finished).
-                mentionedPRs = await self.apiClient.refreshMentionedCIStatuses(mentionedPRs)
-                mentionedPRs = self.filterByConfiguration(mentionedPRs)
-
                 self.applyReadState(to: &prs)
-                self.applyReadState(to: &mentionedPRs)
                 self.applyReadState(to: &mergedPRs)
 
-                logger.info("After filters: \(prs.count) open PRs, \(mentionedPRs.count) mentioned PRs, \(mergedPRs.count) merged PRs")
+                logger.info("After filters: \(prs.count) open PRs, \(mergedPRs.count) merged PRs")
 
-                // Check for changes and notify
                 if configuration.notificationsEnabled {
                     checkForChangesAndNotify(newPRs: prs)
                     notifyPinnedMajorEvents(newPRs: prs)
@@ -584,33 +667,31 @@ final class PRManager: PRManagerType, ObservableObject {
                     mergedPRs: &mergedPRs
                 )
 
-                // Update previous state
-                previousPRs = Self.previousPRState(from: prs + mentionedPRs)
-
+                let projection = projectDirectMentions(onto: prs, mergedPRs: mergedPRs)
                 let newPRList = PRList(
                     lastUpdated: Date(),
-                    pullRequests: prs,
-                    mentionedPullRequests: mentionedPRs,
-                    mergedPullRequests: mergedPRs,
+                    pullRequests: projection.pullRequests,
+                    mentionedPullRequests: projection.mentionedPullRequests,
+                    mergedPullRequests: mergedPRs.map { pr in
+                        var copy = pr
+                        copy.mentionCount = nil
+                        return copy
+                    },
                     isLoading: false,
                     error: nil
                 )
                 self.prList = newPRList
+                self.applyReadState(to: &self.prList)
+                self.previousPRs = Self.previousPRState(from: self.prList.allPRs)
                 self.refreshState = .idle
                 self.consecutiveTransientFailures = 0
                 self.cancelRecoveryRetry(resetFailureCount: true)
 
-                // Save to cache after successful refresh
-                PRCache.shared.save(newPRList)
+                self.persistProjectedCaches()
                 self.updateCIWatchTimer()
-                self.scheduleMentionedRefreshIfNeeded(
-                    username: username,
-                    openPRs: unfilteredOpenPRs,
-                    mergedPRs: unfilteredMergedPRs,
-                    mode: hadUsableData ? .hot : .cold
-                )
+                self.scheduleDirectMentionMaintenanceIfNeeded(username: username)
                 logger.info(
-                    "Refresh succeeded: trigger=\(trigger.rawValue, privacy: .public) openPRs=\(prs.count) mentionedPRs=\(mentionedPRs.count) mergedPRs=\(mergedPRs.count)"
+                    "Refresh succeeded: trigger=\(trigger.rawValue, privacy: .public) openPRs=\(self.prList.pullRequests.count, privacy: .public) mentionedPRs=\(self.prList.mentionedPullRequests.count, privacy: .public) mergedPRs=\(self.prList.mergedPullRequests.count, privacy: .public)"
                 )
 
             } catch {
@@ -627,10 +708,9 @@ final class PRManager: PRManagerType, ObservableObject {
                 // Try to fallback to stale cache on API error
                 if !self.prList.hasUsableData,
                    var cached = PRCache.shared.load() {
-                    self.clearCmuxOpenStatus(in: &cached)
-                    PullRequestFilter.apply(to: &cached, configuration: self.configuration)
+                    self.prepareCachedPRList(&cached)
                     self.prList = cached
-                    self.prList.error = error  // Still show error to indicate stale data
+                    self.prList.error = error
                     self.previousPRs = Self.previousPRState(from: cached.allPRs)
                 } else {
                     self.prList.isLoading = false
@@ -646,6 +726,10 @@ final class PRManager: PRManagerType, ObservableObject {
                 if !self.queuedRefresh {
                     self.scheduleRecoveryRetry(after: error, trigger: trigger, showingStaleData: showingStaleData)
                 }
+                self.scheduleDirectMentionMaintenanceIfNeeded(
+                    username: username,
+                    allowDiscovery: false
+                )
                 self.updateCIWatchTimer()
             }
         }
@@ -653,215 +737,295 @@ final class PRManager: PRManagerType, ObservableObject {
 
     /// Apply `fetchIncremental` progress frame to the published `prList`. Runs on
     /// MainActor. Filters (repositories, drafts) are applied here so the partial
-    /// view is consistent with user settings. Notification and enrichment work
-    /// only runs on the final (returned) result; intermediate frames only refresh
-    /// the UI.
+    /// view is consistent with user settings; mention state is projected from the
+    /// current tracking store without changing the row's category or placement.
     private func applyIncrementalProgress(
         openPRs: [PullRequest],
         mergedPRs: [PullRequest],
         stage: GitHubAPIClient.IncrementalStage
     ) {
-        var filteredOpen = filterByConfiguration(openPRs)
-        var filteredMerged = filterByConfiguration(mergedPRs)
-        applyReadState(to: &filteredOpen)
-        applyReadState(to: &filteredMerged)
+        let filteredOpen = filterByConfiguration(openPRs)
+        let filteredMerged = filterByConfiguration(mergedPRs)
+        let projection = projectDirectMentions(onto: filteredOpen, mergedPRs: filteredMerged)
 
         var updated = prList
-        updated.pullRequests = filteredOpen
-        updated.mergedPullRequests = filteredMerged
+        updated.pullRequests = projection.pullRequests
+        updated.mentionedPullRequests = projection.mentionedPullRequests
+        updated.mergedPullRequests = filteredMerged.map { pr in
+            var copy = pr
+            copy.mentionCount = nil
+            return copy
+        }
         updated.isLoading = true
         updated.error = nil
+        applyReadState(to: &updated)
         prList = updated
         logger.debug(
-            "Incremental progress: stage=\(stage.rawValue, privacy: .public) open=\(filteredOpen.count, privacy: .public) merged=\(filteredMerged.count, privacy: .public)"
+            "Incremental progress: stage=\(stage.rawValue, privacy: .public) open=\(projection.pullRequests.count, privacy: .public) mentioned=\(projection.mentionedPullRequests.count, privacy: .public) merged=\(filteredMerged.count, privacy: .public)"
         )
     }
 
-    private func scheduleMentionedRefreshIfNeeded(
+    private func scheduleDirectMentionMaintenanceIfNeeded(
         username: String,
-        openPRs: [PullRequest],
-        mergedPRs: [PullRequest],
-        mode: GitHubAPIClient.MentionRefreshMode
+        allowDiscovery: Bool = true
     ) {
         guard oauthManager.authState.isAuthenticated,
-              oauthManager.authState.username == username else { return }
-        guard configuration.isValid else { return }
-        guard mentionedRefreshTask == nil else {
-            logger.info("Skipping mentioned refresh because a previous run is still active")
+              oauthManager.authState.username == username,
+              configuration.isValid else { return }
+        guard directMentionTask == nil else {
+            logger.info("Skipping direct mention maintenance because a previous run is still active")
             return
         }
-        guard !isRateLimitCritical else {
-            logger.info("Skipping mentioned refresh because rate limit is critical")
+        guard !isRateLimitCritical,
+              rateLimitInfo.hasHeadroomForMentions else {
+            logger.info("Skipping direct mention maintenance because rate limit floor is active")
             return
         }
         guard !isAutomaticRecoveryPaused else {
-            logger.info("Skipping mentioned refresh because background polling is paused")
+            logger.info("Skipping direct mention maintenance because background polling is paused")
             return
         }
 
         let now = Date()
-        if let lastMentionedRefreshStartedAt,
-           now.timeIntervalSince(lastMentionedRefreshStartedAt) < Self.mentionedRefreshThrottle {
-            logger.debug("Skipping mentioned refresh due to 30-minute throttle")
-            return
-        }
+        let shouldDiscover = allowDiscovery && (lastDirectMentionDiscoveryAt.map {
+            now.timeIntervalSince($0) >= Self.directMentionDiscoveryInterval
+        } ?? true)
+        let discoveryStartedAt = shouldDiscover ? now : nil
 
-        let effectiveMode = effectiveMentionRefreshMode(requestedMode: mode, username: username)
-        let options = mentionRefreshOptions(mode: effectiveMode, username: username, now: now)
-        lastMentionedRefreshStartedAt = now
         let generation = backgroundRefreshGeneration
-        logger.info(
-            "Starting background mentioned refresh: mode=\(String(describing: effectiveMode), privacy: .public) authoredWindowDays=\(options.authoredReferenceDaysBack, privacy: .public) candidateWindowDays=\(options.descriptionCandidateDaysBack, privacy: .public)"
-        )
-
-        mentionedRefreshTask = Task(priority: .utility) { @MainActor [weak self] in
+        let entries = scopedDirectMentionTracking()
+        let scopedIDs = Set(directMentionTracking.keys)
+        directMentionTask = Task(priority: .utility) { @MainActor [weak self] in
             guard let self else { return }
-            // Prevent App Nap from suspending this long-running refresh while the
-            // menu-bar app is idle (popover closed). Without it the task can be
-            // frozen mid-pipeline and never complete, leaving mentionedRefreshTask
-            // non-nil and blocking every future mentioned refresh.
             let activityToken = ProcessInfo.processInfo.beginActivity(
                 options: .userInitiatedAllowingIdleSystemSleep,
-                reason: "Background mentioned PR refresh"
+                reason: "Background direct mention maintenance"
             )
             defer {
                 ProcessInfo.processInfo.endActivity(activityToken)
                 if self.backgroundRefreshGeneration == generation {
-                    self.mentionedRefreshTask = nil
+                    self.directMentionTask = nil
                 }
             }
 
-            // Publish each fetched batch as it arrives so the UI fills
-            // incrementally instead of waiting for the whole pipeline. The final,
-            // fully-enriched list is applied below.
-            let onProgress: @Sendable ([PullRequest]) async -> Void = { [weak self] partial in
-                guard let self else { return }
-                await self.applyMentionedProgress(partial, generation: generation, username: username)
+            guard !Task.isCancelled else { return }
+            let refreshResult = await self.apiClient.refreshTrackedMentions(
+                username: username,
+                entries: entries
+            )
+            guard self.canApplyDirectMentionWork(generation: generation, username: username) else { return }
+            self.applyDirectMentionRefresh(refreshResult, generation: generation, username: username)
+
+            guard self.rateLimitInfo.hasHeadroomForMentions,
+                  !self.isRateLimitCritical else {
+                return
             }
-
-            do {
-                var mentionedPRs = try await self.apiClient.fetchMentionedPullRequests(
-                    username: username,
-                    openPRs: openPRs,
-                    mergedPRs: mergedPRs,
-                    options: options,
-                    onProgress: onProgress
-                )
-
-                guard self.canApplyMentionedRefresh(generation: generation, username: username) else { return }
-
-                mentionedPRs = self.filterByConfiguration(mentionedPRs)
-                self.applyReadState(to: &mentionedPRs)
-
-                do {
-                    let jiraCache = try await self.apiClient.fetchJiraTickets(for: mentionedPRs)
-                    GitHubAPIClient.applyJiraTickets(to: &mentionedPRs, cache: jiraCache)
-                } catch {
-                    logger.error("Failed to enrich mentioned Jira tickets: \(error.localizedDescription)")
-                }
-
-                guard self.canApplyMentionedRefresh(generation: generation, username: username) else { return }
-
-                var emptyOpenPRs: [PullRequest] = []
-                var emptyMergedPRs: [PullRequest] = []
-                await self.enrichJiraMetadata(
-                    openPRs: &emptyOpenPRs,
-                    mentionedPRs: &mentionedPRs,
-                    mergedPRs: &emptyMergedPRs
-                )
-                await self.refreshCmuxOpenStatuses(
-                    openPRs: &emptyOpenPRs,
-                    mentionedPRs: &mentionedPRs,
-                    mergedPRs: &emptyMergedPRs
-                )
-
-                guard self.canApplyMentionedRefresh(generation: generation, username: username) else { return }
-
-                self.prList.mentionedPullRequests = mentionedPRs
-                self.prList.error = nil
-                self.recordMentionedRefreshSucceeded(mode: effectiveMode, username: username, at: Date())
-                PRCache.shared.save(self.prList)
-                logger.info("Background mentioned refresh succeeded: mentionedPRs=\(mentionedPRs.count, privacy: .public)")
-            } catch {
-                if error is CancellationError || ((error as? APIError)?.isCancellation == true) {
-                    logger.debug("Background mentioned refresh cancelled")
-                    return
-                }
-                logger.error("Background mentioned refresh failed: \(error.localizedDescription, privacy: .public)")
+            guard shouldDiscover,
+                  !Task.isCancelled,
+                  self.canApplyDirectMentionWork(generation: generation, username: username) else {
+                return
             }
+            let startedAt = discoveryStartedAt ?? now
+            self.lastDirectMentionDiscoveryAt = startedAt
+            Self.saveDate(startedAt, forKey: Self.lastDirectMentionDiscoveryAtKey)
+            let discoveryResult = await self.apiClient.discoverDirectMentions(
+                username: username,
+                configuration: self.configuration,
+                existingEntries: self.scopedDirectMentionTracking()
+            )
+            guard self.canApplyDirectMentionWork(generation: generation, username: username) else { return }
+            self.applyDirectMentionDiscovery(
+                discoveryResult,
+                generation: generation,
+                username: username,
+                startedAt: startedAt,
+                scopedIDs: scopedIDs
+            )
         }
     }
 
-    private func effectiveMentionRefreshMode(
-        requestedMode: GitHubAPIClient.MentionRefreshMode,
-        username: String
-    ) -> GitHubAPIClient.MentionRefreshMode {
-        if requestedMode == .hot, !hasAuthoredMentionReferenceCoverage(for: username) {
-            return .cold
-        }
-        return requestedMode
-    }
-
-    private func mentionRefreshOptions(
-        mode: GitHubAPIClient.MentionRefreshMode,
-        username: String,
-        now: Date
-    ) -> GitHubAPIClient.MentionRefreshOptions {
-        let authoredCoverageAt = hasAuthoredMentionReferenceCoverage(for: username)
-            ? lastAuthoredMentionReferenceCoverageAt : nil
-        let authoredGapDays = gapDaysBack(since: authoredCoverageAt, now: now)
-        let candidateGapDays = gapDaysBack(since: lastMentionedRefreshSucceededAt, now: now)
-        return GitHubAPIClient.MentionRefreshOptions.background(
-            mode: mode,
-            authoredReferenceDaysBack: mode == .hot ? authoredGapDays : nil,
-            descriptionCandidateDaysBack: mode == .hot ? candidateGapDays : nil
-        )
-    }
-
-    private func gapDaysBack(since date: Date?, now: Date) -> Int? {
-        guard let date else { return nil }
-        let elapsed = max(0, now.timeIntervalSince(date))
-        return max(1, Int(ceil(elapsed / 86_400))) + 1
-    }
-
-    private func recordMentionedRefreshSucceeded(
-        mode: GitHubAPIClient.MentionRefreshMode,
-        username: String,
-        at date: Date
-    ) {
-        lastMentionedRefreshSucceededAt = date
-        lastAuthoredMentionReferenceCoverageAt = date
-        lastAuthoredMentionReferenceCoverageUsername = username
-        Self.saveDate(date, forKey: Self.lastMentionedRefreshSucceededAtKey)
-        Self.saveDate(date, forKey: Self.lastAuthoredMentionReferenceCoverageAtKey)
-        UserDefaults.standard.set(username, forKey: Self.lastAuthoredMentionReferenceCoverageUsernameKey)
-
-        if mode == .cold {
-            logger.debug("Recorded cold mentioned refresh coverage timestamp")
-        }
-    }
-
-    private func hasAuthoredMentionReferenceCoverage(for username: String) -> Bool {
-        lastAuthoredMentionReferenceCoverageAt != nil &&
-            lastAuthoredMentionReferenceCoverageUsername?.caseInsensitiveCompare(username) == .orderedSame
-    }
-
-    private func canApplyMentionedRefresh(generation: Int, username: String) -> Bool {
+    private func canApplyDirectMentionWork(generation: Int, username: String) -> Bool {
         backgroundRefreshGeneration == generation &&
             oauthManager.authState.isAuthenticated &&
             oauthManager.authState.username == username &&
+            !isAutomaticRecoveryPaused &&
             configuration.isValid
     }
 
-    /// Apply an incremental batch of mentioned PRs to the published list. Filters
-    /// and read-state are applied so partial frames match user settings; Jira/cmux
-    /// enrichment is deferred to the final publish in `scheduleMentionedRefreshIfNeeded`.
-    private func applyMentionedProgress(_ partial: [PullRequest], generation: Int, username: String) {
-        guard canApplyMentionedRefresh(generation: generation, username: username) else { return }
-        var prs = filterByConfiguration(partial)
-        applyReadState(to: &prs)
-        prList.mentionedPullRequests = prs
-        logger.debug("Mentioned refresh progress: published \(prs.count, privacy: .public) partial mentioned PRs")
+    private func applyDirectMentionRefresh(
+        _ result: GitHubAPIClient.DirectMentionRefreshResult,
+        generation: Int,
+        username: String
+    ) {
+        guard canApplyDirectMentionWork(generation: generation, username: username) else { return }
+
+        var changed = false
+        for (id, baseSource) in result.baseSources {
+            guard let current = directMentionTracking[id],
+                  current.source == baseSource,
+                  !result.failedIDs.contains(id) else {
+                continue
+            }
+
+            if result.closedIDs.contains(id) {
+                directMentionTracking.removeValue(forKey: id)
+                prList.pullRequests.removeAll { $0.id == id }
+                prList.mentionedPullRequests.removeAll { $0.id == id }
+                changed = true
+                continue
+            }
+            if let refreshed = result.refreshed[id] {
+                let rebased = rebaseDirectMentionEntry(refreshed, preserving: current)
+                if current != rebased
+                    || current.pullRequest.isDraft != rebased.pullRequest.isDraft
+                    || current.pullRequest.repositoryIsArchived != rebased.pullRequest.repositoryIsArchived {
+                    directMentionTracking[id] = rebased
+                    changed = true
+                }
+            }
+        }
+
+        guard changed else { return }
+        applyDirectMentionProjectionAndPersist()
+    }
+    private func rebaseDirectMentionEntry(
+        _ refreshed: DirectMentionTrackingEntry,
+        preserving current: DirectMentionTrackingEntry
+    ) -> DirectMentionTrackingEntry {
+        var rebased = refreshed
+        rebased.pullRequest.graphqlNodeId = current.pullRequest.graphqlNodeId
+        rebased.pullRequest.lastCommitAt = current.pullRequest.lastCommitAt
+        rebased.pullRequest.headCommitOid = current.pullRequest.headCommitOid
+        rebased.pullRequest.baseRefName = current.pullRequest.baseRefName
+        rebased.pullRequest.headRefName = current.pullRequest.headRefName
+        rebased.pullRequest.baseNeedsUpdate = current.pullRequest.baseNeedsUpdate
+        rebased.pullRequest.approvalAuthors = current.pullRequest.approvalAuthors
+        rebased.pullRequest.changesRequestedAuthors = current.pullRequest.changesRequestedAuthors
+        rebased.pullRequest.reviewThreads = current.pullRequest.reviewThreads
+        rebased.pullRequest.category = current.pullRequest.category
+        rebased.pullRequest.ciStatus = current.pullRequest.ciStatus
+        rebased.pullRequest.checkSuccessCount = current.pullRequest.checkSuccessCount
+        rebased.pullRequest.checkFailureCount = current.pullRequest.checkFailureCount
+        rebased.pullRequest.checkPendingCount = current.pullRequest.checkPendingCount
+        rebased.pullRequest.githubCIState = current.pullRequest.githubCIState
+        rebased.pullRequest.myLastReviewState = current.pullRequest.myLastReviewState
+        rebased.pullRequest.myLastReviewAt = current.pullRequest.myLastReviewAt
+        rebased.pullRequest.reviewRequestedAt = current.pullRequest.reviewRequestedAt
+        rebased.pullRequest.myThreadsAllResolved = current.pullRequest.myThreadsAllResolved
+        rebased.pullRequest.approvalCount = current.pullRequest.approvalCount
+        rebased.pullRequest.changesRequestedCount = current.pullRequest.changesRequestedCount
+        rebased.pullRequest.ciExtendedInfo = current.pullRequest.ciExtendedInfo
+        rebased.pullRequest.jiraTicket = current.pullRequest.jiraTicket
+        rebased.pullRequest.jiraTitle = current.pullRequest.jiraTitle
+        rebased.pullRequest.jiraLabels = current.pullRequest.jiraLabels
+        rebased.pullRequest.jiraStatusName = current.pullRequest.jiraStatusName
+        rebased.pullRequest.jiraStatusCategoryKey = current.pullRequest.jiraStatusCategoryKey
+        rebased.pullRequest.jiraUpdatedAt = current.pullRequest.jiraUpdatedAt
+        rebased.pullRequest.jiraMetadataFetchedAt = current.pullRequest.jiraMetadataFetchedAt
+        rebased.pullRequest.isOpenInCmux = current.pullRequest.isOpenInCmux
+        rebased.pullRequest.mentionCount = nil
+        return rebased
+    }
+
+
+    private func applyDirectMentionDiscovery(
+        _ result: GitHubAPIClient.DirectMentionDiscoveryResult,
+        generation: Int,
+        username: String,
+        startedAt: Date,
+        scopedIDs: Set<Int>
+    ) {
+        guard canApplyDirectMentionWork(generation: generation, username: username) else { return }
+
+        let now = Date()
+        var changed = false
+        for (id, discovered) in result.discovered {
+            guard PullRequestFilter.includes(
+                repoFullName: discovered.pullRequest.repoFullName,
+                isArchived: discovered.pullRequest.repositoryIsArchived,
+                isDraft: discovered.pullRequest.isDraft,
+                configuration: configuration
+            ) else {
+                continue
+            }
+            let candidate = directMentionTracking[id].map {
+                rebaseDirectMentionEntry(discovered, preserving: $0)
+            } ?? discovered
+            if directMentionTracking[id] != candidate {
+                directMentionTracking[id] = candidate
+                changed = true
+            }
+        }
+
+        for id in result.seenIDs {
+            guard var entry = directMentionTracking[id] else { continue }
+            let seenAt = max(entry.lastSeenAt, now)
+            if entry.lastSeenAt != seenAt {
+                entry.lastSeenAt = seenAt
+                directMentionTracking[id] = entry
+                changed = true
+            }
+        }
+
+        if result.isComplete {
+            for (id, entry) in directMentionTracking
+            where scopedIDs.contains(id) &&
+                !result.seenIDs.contains(id) &&
+                entry.lastSeenAt <= startedAt {
+                directMentionTracking.removeValue(forKey: id)
+                changed = true
+            }
+        }
+
+        guard changed else { return }
+        applyDirectMentionProjectionAndPersist()
+    }
+
+    private func scopedDirectMentionTracking() -> [Int: DirectMentionTrackingEntry] {
+        directMentionTracking.filter { _, entry in
+            PullRequestFilter.includes(
+                repoFullName: entry.pullRequest.repoFullName,
+                isArchived: entry.pullRequest.repositoryIsArchived,
+                isDraft: entry.pullRequest.isDraft,
+                configuration: configuration
+            )
+        }
+    }
+
+    private func projectDirectMentions(
+        onto openPRs: [PullRequest],
+        mergedPRs: [PullRequest]
+    ) -> DirectMentionProjection {
+        DirectMentionProjector.project(
+            entries: scopedDirectMentionTracking(),
+            onto: openPRs,
+            mergedIDs: Set(mergedPRs.map(\.id))
+        )
+    }
+
+    private func applyDirectMentionProjectionAndPersist() {
+        let projection = projectDirectMentions(
+            onto: prList.pullRequests,
+            mergedPRs: prList.mergedPullRequests
+        )
+        prList.pullRequests = projection.pullRequests
+        prList.mentionedPullRequests = projection.mentionedPullRequests
+        prList.mergedPullRequests = prList.mergedPullRequests.map { pr in
+            var copy = pr
+            copy.mentionCount = nil
+            return copy
+        }
+        applyReadState(to: &prList)
+        persistProjectedCaches(forceTrackingWrite: true)
+        updateCIWatchTimer()
+    }
+
+    private func persistProjectedCaches(forceTrackingWrite: Bool = false) {
+        DirectMentionTrackingCache.shared.save(
+            directMentionTracking,
+            force: forceTrackingWrite
+        )
+        PRCache.shared.save(prList)
     }
 
     private func filterByConfiguration(_ prs: [PullRequest]) -> [PullRequest] {
@@ -933,8 +1097,8 @@ final class PRManager: PRManagerType, ObservableObject {
         activeRefreshTask?.cancel()
         activeRefreshTask = nil
         queuedRefresh = false
-        mentionedRefreshTask?.cancel()
-        mentionedRefreshTask = nil
+        directMentionTask?.cancel()
+        directMentionTask = nil
         cancelRecoveryRetry(resetFailureCount: true)
         refreshState = .idle
         logger.info("Cancelled refresh work: reason=\(reason, privacy: .public)")
@@ -942,9 +1106,10 @@ final class PRManager: PRManagerType, ObservableObject {
 
     private func invalidateBackgroundRefreshWork(reason: String) {
         backgroundRefreshGeneration += 1
-        lastMentionedRefreshStartedAt = nil
-        mentionedRefreshTask?.cancel()
-        mentionedRefreshTask = nil
+        lastDirectMentionDiscoveryAt = nil
+        Self.saveDate(nil, forKey: Self.lastDirectMentionDiscoveryAtKey)
+        directMentionTask?.cancel()
+        directMentionTask = nil
         logger.debug("Invalidated background refresh work: reason=\(reason, privacy: .public)")
     }
 
@@ -1192,9 +1357,25 @@ final class PRManager: PRManagerType, ObservableObject {
         apply(to: &prList.pullRequests)
         apply(to: &prList.mentionedPullRequests)
         apply(to: &prList.mergedPullRequests)
+        var trackingChanged = false
+        if var trackingEntry = directMentionTracking[pr.id] {
+            trackingEntry.pullRequest.ciStatus = result.ciStatus
+            trackingEntry.pullRequest.checkSuccessCount = result.checkSuccessCount
+            trackingEntry.pullRequest.checkFailureCount = result.checkFailureCount
+            trackingEntry.pullRequest.checkPendingCount = result.checkPendingCount
+            trackingEntry.pullRequest.githubCIState = result.ciStatus?.rawValue
+            trackingEntry.pullRequest.ciExtendedInfo = result.ciExtendedInfo
+            if let headSHA = result.headSHA, !headSHA.isEmpty {
+                trackingEntry.pullRequest.headCommitOid = headSHA
+            }
+            directMentionTracking[pr.id] = trackingEntry
+            trackingChanged = true
+        }
+
 
         guard let updatedPR else { return }
         previousPRs[updatedPR.id] = updatedPR
+        persistProjectedCaches(forceTrackingWrite: trackingChanged)
 
         guard notifyOnTerminalChange,
               configuration.notificationsEnabled,
@@ -1254,8 +1435,8 @@ final class PRManager: PRManagerType, ObservableObject {
     private func startCIWatchRefresh() {
         guard ciWatchTask == nil else { return }
         // Intentionally NOT gated on activeRefreshTask. A full refresh runs for tens of
-        // seconds (incremental fetch + staged mentioned refresh); on a >=60s poll interval
-        // that leaves gaps shorter than the 30s watch cadence, so gating here starved the
+        // seconds (incremental fetch + background direct-mention maintenance); on a
+        // >=60s poll interval
         // watch — nearly every tick landed inside a refresh and was dropped. The watch only
         // fetches in-flight PRs and self-pauses under rate-limit pressure, so running it
         // alongside a full refresh is acceptable: snapshot writes are MainActor-serialized
@@ -1462,7 +1643,17 @@ final class PRManager: PRManagerType, ObservableObject {
         apply(to: &prList.pullRequests)
         apply(to: &prList.mentionedPullRequests)
         apply(to: &prList.mergedPullRequests)
-        PRCache.shared.save(prList)
+        var trackingChanged = false
+        if var trackingEntry = directMentionTracking[metadata.databaseId],
+           var visible = prList.pullRequests.first(where: { $0.id == metadata.databaseId })
+            ?? prList.mentionedPullRequests.first(where: { $0.id == metadata.databaseId })
+            ?? prList.mergedPullRequests.first(where: { $0.id == metadata.databaseId }) {
+            visible.mentionCount = nil
+            trackingEntry.pullRequest = visible
+            directMentionTracking[metadata.databaseId] = trackingEntry
+            trackingChanged = true
+        }
+        persistProjectedCaches(forceTrackingWrite: trackingChanged)
     }
 
     private func setBranchUpdating(_ isUpdating: Bool, for prID: Int) {

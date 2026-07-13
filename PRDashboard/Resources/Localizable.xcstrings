@@ -1929,6 +1929,16 @@
         }
       }
     },
+    "Unanswered direct mentions: %lld": {
+      "localizations": {
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未回复的直接 @ 提及：%1$lld"
+          }
+        }
+      }
+    },
     "Updated %@": {
       "localizations": {
         "zh-Hans": {
