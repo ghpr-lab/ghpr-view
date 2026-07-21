@@ -244,14 +244,14 @@ final class CmuxBrowserRouter: CmuxBrowserRouting, CmuxPRStatusProviding {
 
         for window in tree.windows {
             for workspace in window.workspaces {
-                guard let workspaceHandle = workspace.ref ?? workspace.id else {
+                guard let workspaceHandle = workspace.id ?? workspace.ref else {
                     continue
                 }
 
                 for pane in workspace.panes {
                     for surface in pane.surfaces {
                         guard surface.type?.lowercased() == Self.browserSurfaceType,
-                              let surfaceHandle = surface.ref ?? surface.id,
+                              let surfaceHandle = surface.id ?? surface.ref,
                               let urlString = surface.url,
                               let surfaceURL = URL(string: urlString),
                               GitHubPRIdentity(url: surfaceURL) == target else {
@@ -259,7 +259,7 @@ final class CmuxBrowserRouter: CmuxBrowserRouting, CmuxPRStatusProviding {
                         }
 
                         return BrowserMatch(
-                            windowHandle: window.ref ?? window.id,
+                            windowHandle: window.id ?? window.ref,
                             workspaceHandle: workspaceHandle,
                             surfaceHandle: surfaceHandle
                         )
@@ -351,7 +351,11 @@ private final class DrainedOutput: @unchecked Sendable {
     var stderr = Data()
 }
 
-private final class ProcessCmuxCommandRunner: CmuxCommandRunning {
+final class ProcessCmuxCommandRunner: CmuxCommandRunning {
+    private static let processTerminationGracePeriod: TimeInterval = 0.5
+    private static let outputDrainGracePeriod: TimeInterval = 0.25
+    private static let pipeCloseGracePeriod: TimeInterval = 0.1
+
     private let executableURL: URL
     private let socketPath: String?
 
@@ -409,12 +413,34 @@ private final class ProcessCmuxCommandRunner: CmuxCommandRunning {
             drainGroup.leave()
         }
 
+        func closePipeEnds() {
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForReading.close()
+            try? stderrPipe.fileHandleForWriting.close()
+        }
+
+        func collectOutput() -> (stdout: String, stderr: String) {
+            guard drainGroup.wait(
+                timeout: .now() + Self.outputDrainGracePeriod
+            ) == .success else {
+                closePipeEnds()
+                _ = drainGroup.wait(timeout: .now() + Self.pipeCloseGracePeriod)
+                prLinkLogger.warning("cmux command output drain timed out; returning without captured output")
+                return ("", "")
+            }
+
+            return (
+                String(data: drained.stdout, encoding: .utf8) ?? "",
+                String(data: drained.stderr, encoding: .utf8) ?? ""
+            )
+        }
+
         do {
             try process.run()
         } catch {
-            try? stdoutPipe.fileHandleForWriting.close()
-            try? stderrPipe.fileHandleForWriting.close()
-            drainGroup.wait()
+            closePipeEnds()
+            _ = drainGroup.wait(timeout: .now() + Self.pipeCloseGracePeriod)
             return CmuxCommandResult(
                 exitCode: -1,
                 stdout: "",
@@ -430,25 +456,39 @@ private final class ProcessCmuxCommandRunner: CmuxCommandRunning {
             exitGroup.leave()
         }
 
-        var timedOut = false
-        if exitGroup.wait(timeout: .now() + timeout) == .timedOut {
-            timedOut = true
-            process.terminate()
-            if exitGroup.wait(timeout: .now() + 0.5) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
-                exitGroup.wait()
+        let requestTimeout = max(timeout, 0)
+        var processDidExit = exitGroup.wait(
+            timeout: .now() + requestTimeout
+        ) == .success
+        let timedOut = !processDidExit
+
+        if timedOut {
+            if process.isRunning {
+                process.terminate()
+            }
+            processDidExit = exitGroup.wait(
+                timeout: .now() + Self.processTerminationGracePeriod
+            ) == .success
+
+            if !processDidExit {
+                if process.isRunning {
+                    kill(process.processIdentifier, SIGKILL)
+                }
+                processDidExit = exitGroup.wait(
+                    timeout: .now() + Self.processTerminationGracePeriod
+                ) == .success
+            }
+
+            if !processDidExit {
+                prLinkLogger.warning("cmux command did not exit after bounded termination")
             }
         }
 
-        drainGroup.wait()
-
-        let stdout = String(data: drained.stdout, encoding: .utf8) ?? ""
-        let stderr = String(data: drained.stderr, encoding: .utf8) ?? ""
-
+        let output = collectOutput()
         return CmuxCommandResult(
-            exitCode: process.terminationStatus,
-            stdout: stdout,
-            stderr: stderr,
+            exitCode: processDidExit ? process.terminationStatus : -1,
+            stdout: output.stdout,
+            stderr: output.stderr,
             timedOut: timedOut
         )
     }

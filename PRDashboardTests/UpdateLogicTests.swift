@@ -1,4 +1,5 @@
 import XCTest
+import Darwin
 @testable import PRDashboard
 
 final class UpdateLogicTests: XCTestCase {
@@ -3415,9 +3416,9 @@ final class CmuxBrowserRouterTests: XCTestCase {
         XCTAssertEqual(
             match,
             CmuxBrowserRouter.BrowserMatch(
-                windowHandle: "window:1",
-                workspaceHandle: "workspace:2",
-                surfaceHandle: "surface:3"
+                windowHandle: "window-id",
+                workspaceHandle: "workspace-id",
+                surfaceHandle: "surface-id"
             )
         )
     }
@@ -3462,9 +3463,9 @@ final class CmuxBrowserRouterTests: XCTestCase {
         XCTAssertTrue(handled)
         XCTAssertEqual(runner.commands, [
             ["--json", "--id-format", "uuids", "tree", "--all"],
-            ["focus-window", "--window", "window:1"],
-            ["select-workspace", "--workspace", "workspace:2"],
-            ["focus-panel", "--workspace", "workspace:2", "--panel", "surface:3"]
+            ["focus-window", "--window", "window-id"],
+            ["select-workspace", "--workspace", "workspace-id"],
+            ["focus-panel", "--workspace", "workspace-id", "--panel", "surface-id"]
         ])
     }
 
@@ -3539,6 +3540,80 @@ final class CmuxBrowserRouterTests: XCTestCase {
           ]
         }
         """
+    }
+}
+
+final class ProcessCmuxCommandRunnerTests: XCTestCase {
+    func testRunReturnsAfterTimeoutWhenDescendantKeepsPipeOpen() {
+        let pidFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PRDashboard-cmux-child-\(UUID().uuidString).pid")
+        let escapedPIDPath = pidFile.path.replacingOccurrences(of: "'", with: "'\\''")
+        let command = "trap '' TERM; sleep 30 & child=$!; echo $child > '\(escapedPIDPath)'; wait"
+        let resultBox = LockedCmuxCommandResult()
+        let completion = DispatchSemaphore(value: 0)
+        defer {
+            terminateProcessRecorded(in: pidFile)
+            try? FileManager.default.removeItem(at: pidFile)
+        }
+
+        DispatchQueue.global(qos: .utility).async {
+            let result = ProcessCmuxCommandRunner(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                socketPath: nil
+            ).run(
+                arguments: ["-c", command],
+                timeout: 0.05
+            )
+            resultBox.store(result)
+            completion.signal()
+        }
+
+        let returnedBeforeCleanup = completion.wait(timeout: .now() + 2) == .success
+        if !returnedBeforeCleanup {
+            terminateProcessRecorded(in: pidFile)
+            _ = completion.wait(timeout: .now() + 1)
+        }
+
+        XCTAssertTrue(
+            returnedBeforeCleanup,
+            "cmux runner remained blocked after its subprocess timed out"
+        )
+        XCTAssertTrue(resultBox.value?.timedOut == true)
+    }
+
+    private func terminateProcessRecorded(in pidFile: URL) {
+        let deadline = Date().addingTimeInterval(1)
+        while Date() < deadline {
+            guard
+                let pidText = try? String(contentsOf: pidFile, encoding: .utf8),
+                pidText.hasSuffix("\n"),
+                let pid = Int32(pidText.trimmingCharacters(in: .whitespacesAndNewlines)),
+                pid > 1,
+                pid != getpid()
+            else {
+                Thread.sleep(forTimeInterval: 0.01)
+                continue
+            }
+            _ = kill(pid, SIGKILL)
+            return
+        }
+    }
+}
+
+private final class LockedCmuxCommandResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedResult: CmuxCommandResult?
+
+    var value: CmuxCommandResult? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedResult
+    }
+
+    func store(_ result: CmuxCommandResult) {
+        lock.lock()
+        storedResult = result
+        lock.unlock()
     }
 }
 
