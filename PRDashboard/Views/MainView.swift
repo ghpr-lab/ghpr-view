@@ -5,6 +5,7 @@ struct MainView: View {
     @ObservedObject var onboardingManager: OnboardingManager
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
+    @State private var footerTimelineAnchor = Date()
     @State private var firstVisibleReviewStatusPRID: Int?
     @State private var expandedSections: Set<PRSectionID> = Set(PRSectionID.allCases)
     @AppStorage("PRDashboard.JiraSetupTipDismissed") private var jiraSetupTipDismissed: Bool = false
@@ -514,7 +515,7 @@ struct MainView: View {
                     .foregroundColor(.secondary)
             } else {
                 // Use TimelineView to update relative time every 10 seconds
-                TimelineView(.periodic(from: .now, by: 10)) { _ in
+                TimelineView(.periodic(from: footerTimelineAnchor, by: 10)) { _ in
                     Text("Updated \(formatRelativeTime(viewModel.prList.lastUpdated))")
                         .font(.system(size: 10))
                         .foregroundColor(.secondary)
