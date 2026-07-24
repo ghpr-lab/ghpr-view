@@ -2251,6 +2251,7 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertEqual(list.authoredUnresolvedCount, 2)
         XCTAssertEqual(list.authoredUnreadUnresolvedCount, 1)
+        XCTAssertEqual(list.menuNotificationCount, 1)
         XCTAssertEqual(list.totalUnresolvedCount, 3)
     }
 
