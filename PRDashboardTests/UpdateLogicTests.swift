@@ -2095,7 +2095,7 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(decoded.directMentionPullRequests.isEmpty)
     }
 
-    func testPRListMenuNotificationCountCombinesUnreadCommentsRequestsAndDirectMentions() {
+    func testPRListMenuNotificationCountCombinesUnreadCommentsAndDirectMentions() {
         var authoredA = makePullRequest(id: 712, number: 12, category: .authored)
         authoredA.changesRequestedCount = 1
         authoredA.mentionCount = 3
@@ -2128,8 +2128,23 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertEqual(list.changesRequestedPRCount, 2)
         XCTAssertEqual(list.unansweredDirectMentionCount, 3)
-        XCTAssertEqual(list.menuNotificationCount, 13)
+        XCTAssertEqual(list.menuNotificationCount, 11)
         XCTAssertEqual(list.authoredUnreadUnresolvedCount, 8)
+    }
+
+    func testPRListMenuNotificationCountExcludesChangesRequestedPRs() {
+        var authored = makePullRequest(id: 715, number: 15, category: .authored)
+        authored.changesRequestedCount = 1
+
+        let list = PRList(
+            lastUpdated: Date(),
+            pullRequests: [authored],
+            isLoading: false,
+            error: nil
+        )
+
+        XCTAssertEqual(list.changesRequestedPRCount, 1)
+        XCTAssertEqual(list.menuNotificationCount, 0)
     }
 
     func testPATScopeMatcherAcceptsBroaderUserScopeForReadUserRequirement() {

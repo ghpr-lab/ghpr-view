@@ -93,7 +93,7 @@ struct PRList: Codable {
     }
 
     var menuNotificationCount: Int {
-        authoredUnreadUnresolvedCount + changesRequestedPRCount + unansweredDirectMentionCount
+        authoredUnreadUnresolvedCount + unansweredDirectMentionCount
     }
 
     /// Unread unresolved comment count for authored PRs only (used for the menu bar badge).
