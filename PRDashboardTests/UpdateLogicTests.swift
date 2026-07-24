@@ -3469,7 +3469,14 @@ final class UpdateLogicTests: XCTestCase {
         commentCount: Int = 0,
         latestCommentID: String? = nil
     ) -> [String: Any] {
-        [
+        let latestNodes: [[String: Any]]
+        if let latestCommentID {
+            latestNodes = [["id": latestCommentID, "lastEditedAt": NSNull()]]
+        } else {
+            latestNodes = []
+        }
+
+        return [
             "databaseId": optionalJSONValue(id),
             "number": number,
             "title": title,
@@ -3485,9 +3492,7 @@ final class UpdateLogicTests: XCTestCase {
                 "isArchived": optionalJSONValue(isArchived)
             ],
             "comments": ["totalCount": commentCount],
-            "latestComments": [
-                "nodes": latestCommentID.map { ["id": $0, "lastEditedAt": NSNull()] } ?? []
-            ]
+            "latestComments": ["nodes": latestNodes]
         ]
     }
 
@@ -4182,6 +4187,7 @@ private final class MockGitHubGraphQLURLProtocol: URLProtocol {
     }
 
     override func startLoading() {
+        let request = Self.materializedRequest(from: request)
         Self.recordQuery(from: request)
 
         guard let handler = Self.currentHandler else {
@@ -4205,6 +4211,31 @@ private final class MockGitHubGraphQLURLProtocol: URLProtocol {
         lock.lock()
         defer { lock.unlock() }
         return handler
+    }
+
+    private static func materializedRequest(from request: URLRequest) -> URLRequest {
+        guard request.httpBody == nil, let stream = request.httpBodyStream else {
+            return request
+        }
+
+        stream.open()
+        defer { stream.close() }
+
+        let capacity = 4_096
+        let buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
+        defer { buffer.deallocate() }
+
+        var body = Data()
+        while true {
+            let count = stream.read(buffer, maxLength: capacity)
+            guard count > 0 else { break }
+            body.append(buffer, count: count)
+        }
+
+        var materialized = request
+        materialized.httpBodyStream = nil
+        materialized.httpBody = body
+        return materialized
     }
 
     private static func recordQuery(from request: URLRequest) {
