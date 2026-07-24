@@ -328,7 +328,10 @@ final class GitHubAPIClient: ObservableObject {
     private static let batchedPRQueryConcurrency = 3
     static let defaultGraphQLURL = URL(string: "https://api.github.com/graphql")!
     private var graphQLURL: URL = GitHubAPIClient.defaultGraphQLURL
+    private let tokenLock = NSLock()
     private var token: String
+    private var reportedUnauthorizedToken: String?
+    private var unauthorizedHandler: (@Sendable (String) -> Void)?
     private var session: URLSession
     private let sessionDelegate = ProxyAuthDelegate()
     private var proxyConfig: HTTPProxyConfig?
@@ -418,7 +421,67 @@ final class GitHubAPIClient: ObservableObject {
     }
 
     func updateToken(_ newToken: String) {
-        self.token = newToken
+        tokenLock.lock()
+        if token != newToken {
+            reportedUnauthorizedToken = nil
+        }
+        token = newToken
+        tokenLock.unlock()
+    }
+
+    func setUnauthorizedHandler(_ handler: (@Sendable (String) -> Void)?) {
+        tokenLock.lock()
+        unauthorizedHandler = handler
+        tokenLock.unlock()
+    }
+
+    private func currentToken() -> String {
+        tokenLock.lock()
+        defer { tokenLock.unlock() }
+        return token
+    }
+
+    private func reportUnauthorized(rejectedToken: String) {
+        tokenLock.lock()
+        guard !rejectedToken.isEmpty,
+              token == rejectedToken,
+              reportedUnauthorizedToken != rejectedToken else {
+            tokenLock.unlock()
+            return
+        }
+
+        reportedUnauthorizedToken = rejectedToken
+        token = ""
+        let handler = unauthorizedHandler
+        tokenLock.unlock()
+        handler?(rejectedToken)
+    }
+
+    private static func isAuthenticationFailure(statusCode: Int, data: Data) -> Bool {
+        if statusCode == 401 {
+            return true
+        }
+        guard statusCode == 403,
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return false
+        }
+
+        var messages: [String] = []
+        if let message = payload["message"] as? String {
+            messages.append(message)
+        }
+        if let errors = payload["errors"] as? [[String: Any]] {
+            messages.append(contentsOf: errors.compactMap { $0["message"] as? String })
+        }
+
+        return messages.contains(where: isAuthenticationFailureMessage)
+    }
+
+    private static func isAuthenticationFailureMessage(_ message: String) -> Bool {
+        let lowered = message.lowercased()
+        return lowered.contains("bad credentials")
+            || lowered.contains("requires authentication")
+            || lowered.contains("must authenticate")
     }
 
     func updateGraphQLEndpoint(_ endpoint: String?) {
@@ -2412,7 +2475,8 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let requestToken = currentToken()
+        request.setValue("Bearer \(requestToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
 
         let (data, response): (Data, URLResponse)
@@ -2428,7 +2492,8 @@ final class GitHubAPIClient: ObservableObject {
         updateRateLimitInfo(from: httpResponse)
 
         guard httpResponse.statusCode == 200 else {
-            if httpResponse.statusCode == 401 {
+            if Self.isAuthenticationFailure(statusCode: httpResponse.statusCode, data: data) {
+                reportUnauthorized(rejectedToken: requestToken)
                 throw APIError.unauthorized
             }
             throw APIError.http(statusCode: httpResponse.statusCode)
@@ -2584,7 +2649,8 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         var request = URLRequest(url: url)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let requestToken = currentToken()
+        request.setValue("Bearer \(requestToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("2022-11-28", forHTTPHeaderField: "X-GitHub-Api-Version")
 
@@ -2600,7 +2666,8 @@ final class GitHubAPIClient: ObservableObject {
         }
         updateRateLimitInfo(from: httpResponse)
         guard httpResponse.statusCode == 200 else {
-            if httpResponse.statusCode == 401 {
+            if Self.isAuthenticationFailure(statusCode: httpResponse.statusCode, data: data) {
+                reportUnauthorized(rejectedToken: requestToken)
                 throw APIError.unauthorized
             }
             throw APIError.unknown(String(localized: "Failed to fetch workflow runs: HTTP \(httpResponse.statusCode)"))
@@ -3820,7 +3887,8 @@ final class GitHubAPIClient: ObservableObject {
     ) async throws -> Data {
         var request = URLRequest(url: graphQLURL)
         request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let requestToken = currentToken()
+        request.setValue("Bearer \(requestToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
 
@@ -3847,6 +3915,10 @@ final class GitHubAPIClient: ObservableObject {
                     if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
                         let messages = errors.compactMap { $0["message"] as? String }
+                        if messages.contains(where: Self.isAuthenticationFailureMessage) {
+                            reportUnauthorized(rejectedToken: requestToken)
+                            throw APIError.unauthorized
+                        }
                         if messages.contains(where: Self.isRateLimitMessage) {
                             let resetDate = rateLimitResetDate(from: httpResponse) ?? Date().addingTimeInterval(60)
                             throw APIError.rateLimited(resetDate: resetDate)
@@ -3874,12 +3946,17 @@ final class GitHubAPIClient: ObservableObject {
                     }
                     return data
                 case 401:
+                    reportUnauthorized(rejectedToken: requestToken)
                     throw APIError.unauthorized
                 case 403:
                     if let rateLimitError = rateLimitError(from: httpResponse) {
                         throw rateLimitError
                     }
-                    throw APIError.unauthorized
+                    if Self.isAuthenticationFailure(statusCode: httpResponse.statusCode, data: data) {
+                        reportUnauthorized(rejectedToken: requestToken)
+                        throw APIError.unauthorized
+                    }
+                    throw APIError.http(statusCode: httpResponse.statusCode)
                 case 429:
                     if let rateLimitError = rateLimitError(from: httpResponse) {
                         throw rateLimitError
@@ -5156,7 +5233,8 @@ final class GitHubAPIClient: ObservableObject {
         // 1. Fetch workflow runs for this commit
         let runsURL = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/actions/runs?head_sha=\(headSHA)")!
         var runsRequest = URLRequest(url: runsURL)
-        runsRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        let runsRequestToken = currentToken()
+        runsRequest.setValue("Bearer \(runsRequestToken)", forHTTPHeaderField: "Authorization")
         runsRequest.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
 
         let (runsData, runsResponse): (Data, URLResponse)
@@ -5171,7 +5249,8 @@ final class GitHubAPIClient: ObservableObject {
         }
 
         guard httpResponse.statusCode == 200 else {
-            if httpResponse.statusCode == 401 {
+            if Self.isAuthenticationFailure(statusCode: httpResponse.statusCode, data: runsData) {
+                reportUnauthorized(rejectedToken: runsRequestToken)
                 throw APIError.unauthorized
             }
             throw APIError.unknown(String(localized: "Failed to fetch workflow runs: HTTP \(httpResponse.statusCode)"))
@@ -5200,17 +5279,24 @@ final class GitHubAPIClient: ObservableObject {
             let rerunURL = URL(string: "https://api.github.com/repos/\(owner)/\(repo)/actions/runs/\(runId)/rerun-failed-jobs")!
             var rerunRequest = URLRequest(url: rerunURL)
             rerunRequest.httpMethod = "POST"
-            rerunRequest.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+            let rerunRequestToken = currentToken()
+            rerunRequest.setValue("Bearer \(rerunRequestToken)", forHTTPHeaderField: "Authorization")
             rerunRequest.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
 
             do {
-                let (_, rerunResponse) = try await session.data(for: rerunRequest)
+                let (rerunData, rerunResponse) = try await session.data(for: rerunRequest)
                 if let rerunHttp = rerunResponse as? HTTPURLResponse, rerunHttp.statusCode == 201 {
                     rerunCount += 1
                     logger.info("Rerun triggered for workflow run \(runId)")
                 } else if let rerunHttp = rerunResponse as? HTTPURLResponse {
+                    if Self.isAuthenticationFailure(statusCode: rerunHttp.statusCode, data: rerunData) {
+                        reportUnauthorized(rejectedToken: rerunRequestToken)
+                        throw APIError.unauthorized
+                    }
                     logger.warning("Failed to rerun workflow run \(runId): HTTP \(rerunHttp.statusCode)")
                 }
+            } catch APIError.unauthorized {
+                throw APIError.unauthorized
             } catch {
                 logger.warning("Network error rerunning workflow run \(runId): \(error.localizedDescription)")
             }

@@ -32,6 +32,342 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(configuration.jiraRefreshInterval, 1800)
     }
 
+    func testKeychainCachesSensitiveValuesAndClearsCacheOnDelete() throws {
+        let service = "com.xiaocang.PRDashboard.Tests.\(UUID().uuidString)"
+        let writer = Keychain(serviceForTesting: service)
+        let reader = Keychain(serviceForTesting: service)
+        defer {
+            writer.deleteAuthStateForTesting()
+            writer.deleteProxyPasswordForTesting()
+            writer.deleteJiraAPITokenForTesting()
+            reader.deleteAuthStateForTesting()
+            reader.deleteProxyPasswordForTesting()
+            reader.deleteJiraAPITokenForTesting()
+        }
+
+        let initialAuthState = AuthState(
+            accessToken: "github-test-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        try writer.saveAuthStateForTesting(initialAuthState)
+        writer.saveProxyPasswordForTesting("proxy-test-password")
+        writer.saveJiraAPITokenForTesting("jira-test-token")
+
+        XCTAssertEqual(reader.keychainReadCountForTesting, 0)
+        XCTAssertEqual(reader.loadAuthStateForTesting(), initialAuthState)
+        XCTAssertEqual(reader.loadProxyPasswordForTesting(), "proxy-test-password")
+        XCTAssertEqual(reader.loadJiraAPITokenForTesting(), "jira-test-token")
+        let readsAfterFirstLoad = reader.keychainReadCountForTesting
+        XCTAssertEqual(readsAfterFirstLoad, 3)
+
+        XCTAssertEqual(reader.loadAuthStateForTesting(), initialAuthState)
+        XCTAssertEqual(reader.loadProxyPasswordForTesting(), "proxy-test-password")
+        XCTAssertEqual(reader.loadJiraAPITokenForTesting(), "jira-test-token")
+        XCTAssertEqual(reader.keychainReadCountForTesting, readsAfterFirstLoad)
+
+        let externallyUpdatedAuthState = AuthState(
+            accessToken: "github-external-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        try writer.saveAuthStateForTesting(externallyUpdatedAuthState)
+        XCTAssertEqual(reader.loadAuthStateForTesting(), initialAuthState)
+        XCTAssertEqual(reader.keychainReadCountForTesting, readsAfterFirstLoad)
+
+        reader.invalidateAuthStateCacheForTesting()
+        XCTAssertEqual(reader.loadAuthStateForTesting(), externallyUpdatedAuthState)
+        let readsAfterInvalidation = reader.keychainReadCountForTesting
+        XCTAssertEqual(readsAfterInvalidation, readsAfterFirstLoad + 1)
+
+        writer.saveJiraAPITokenForTesting("jira-external-token")
+        XCTAssertEqual(reader.loadJiraAPITokenForTesting(), "jira-test-token")
+        XCTAssertEqual(reader.keychainReadCountForTesting, readsAfterInvalidation)
+
+        reader.invalidateJiraAPITokenCacheForTesting(rejectedToken: "jira-test-token")
+        XCTAssertEqual(reader.loadJiraAPITokenForTesting(), "jira-external-token")
+        let readsAfterTokenInvalidations = reader.keychainReadCountForTesting
+        XCTAssertEqual(readsAfterTokenInvalidations, readsAfterFirstLoad + 2)
+
+        let updatedAuthState = AuthState(
+            accessToken: "github-updated-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        try reader.saveAuthStateForTesting(updatedAuthState)
+        reader.saveProxyPasswordForTesting("proxy-updated-password")
+        reader.saveJiraAPITokenForTesting("jira-updated-token")
+        XCTAssertEqual(reader.loadAuthStateForTesting(), updatedAuthState)
+        XCTAssertEqual(reader.loadProxyPasswordForTesting(), "proxy-updated-password")
+        XCTAssertEqual(reader.loadJiraAPITokenForTesting(), "jira-updated-token")
+        XCTAssertEqual(reader.keychainReadCountForTesting, readsAfterTokenInvalidations)
+
+        reader.deleteAuthStateForTesting()
+        reader.deleteProxyPasswordForTesting()
+        reader.deleteJiraAPITokenForTesting()
+        XCTAssertEqual(reader.loadAuthStateForTesting(), .empty)
+        XCTAssertEqual(reader.loadProxyPasswordForTesting(), "")
+        XCTAssertEqual(reader.loadJiraAPITokenForTesting(), "")
+        let readsAfterDelete = reader.keychainReadCountForTesting
+
+        XCTAssertEqual(reader.loadAuthStateForTesting(), .empty)
+        XCTAssertEqual(reader.loadProxyPasswordForTesting(), "")
+        XCTAssertEqual(reader.loadJiraAPITokenForTesting(), "")
+        XCTAssertEqual(reader.keychainReadCountForTesting, readsAfterDelete)
+    }
+
+    @MainActor
+    func testOAuthManagerReloadsExternallyUpdatedTokenAfterRejection() {
+        let rejectedState = AuthState(
+            accessToken: "rejected-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        let replacementState = AuthState(
+            accessToken: "replacement-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        var persistedState = rejectedState
+        var invalidationCount = 0
+        let manager = GitHubOAuthManager(
+            loadPersistedAuthState: { persistedState },
+            invalidatePersistedAuthCache: { invalidationCount += 1 }
+        )
+        XCTAssertEqual(manager.authState, rejectedState)
+
+        persistedState = replacementState
+        manager.handleRejectedToken("rejected-token")
+
+        XCTAssertEqual(manager.authState, replacementState)
+        XCTAssertEqual(invalidationCount, 1)
+
+        manager.handleRejectedToken("rejected-token")
+        XCTAssertEqual(manager.authState, replacementState)
+        XCTAssertEqual(invalidationCount, 1)
+    }
+
+    @MainActor
+    func testOAuthManagerClearsRejectedTokenWhenPersistentValueIsUnchanged() {
+        let rejectedState = AuthState(
+            accessToken: "rejected-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        var invalidationCount = 0
+        let manager = GitHubOAuthManager(
+            loadPersistedAuthState: { rejectedState },
+            invalidatePersistedAuthCache: { invalidationCount += 1 }
+        )
+
+        manager.handleRejectedToken("rejected-token")
+
+        XCTAssertEqual(manager.authState, .empty)
+        XCTAssertEqual(invalidationCount, 2)
+    }
+
+    @MainActor
+    func testPRManagerWiresGitHubUnauthorizedToOAuthCacheReload() async throws {
+        let rejectedState = AuthState(
+            accessToken: "rejected-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        let replacementState = AuthState(
+            accessToken: "replacement-token",
+            username: "test-user",
+            authMethod: .pat
+        )
+        var persistedState = rejectedState
+        var invalidationCount = 0
+        let oauthManager = GitHubOAuthManager(
+            loadPersistedAuthState: { persistedState },
+            invalidatePersistedAuthCache: { invalidationCount += 1 }
+        )
+        let replacementResponse = """
+        {
+          "data": {
+            "search": {
+              "nodes": [],
+              "pageInfo": { "hasNextPage": false, "endCursor": null }
+            },
+            "rateLimit": {
+              "cost": 1,
+              "remaining": 4999,
+              "resetAt": "2026-01-02T01:00:00Z"
+            }
+          }
+        }
+        """.data(using: .utf8)!
+        let session = makeMockGitHubGraphQLSession()
+        MockGitHubGraphQLURLProtocol.reset { request in
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer replacement-token" {
+                return (Self.httpResponse(for: request, statusCode: 200), replacementResponse)
+            }
+            let body = #"{"message":"Bad credentials"}"#.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 401), body)
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let apiClient = GitHubAPIClient(
+            token: "rejected-token",
+            graphQLEndpoint: "https://example.test/graphql",
+            session: session
+        )
+        let manager = PRManager(
+            apiClient: apiClient,
+            notificationManager: NotificationManager(),
+            oauthManager: oauthManager
+        )
+        persistedState = replacementState
+
+        do {
+            _ = try await apiClient.fetchPullRequests(
+                username: "test-user",
+                searchQuery: "author:test-user is:pr",
+                category: .authored
+            )
+            XCTFail("Expected unauthorized request to throw")
+        } catch APIError.unauthorized {
+            // Expected.
+        } catch {
+            XCTFail("Expected APIError.unauthorized, got \(error)")
+        }
+
+        await waitForCondition {
+            oauthManager.authState == replacementState
+        }
+        XCTAssertEqual(invalidationCount, 1)
+
+        let pullRequests = try await apiClient.fetchPullRequests(
+            username: "test-user",
+            searchQuery: "author:test-user is:pr",
+            category: .authored
+        )
+        XCTAssertTrue(pullRequests.isEmpty)
+        withExtendedLifetime(manager) {}
+    }
+
+    func testGitHubGraphQLUnauthorizedHandlerIsOneShotAndReplacementTokenIsUsed() async throws {
+        let session = makeMockGitHubGraphQLSession()
+        let responseData = """
+        {
+          "data": {
+            "search": {
+              "nodes": [],
+              "pageInfo": { "hasNextPage": false, "endCursor": null }
+            },
+            "rateLimit": {
+              "cost": 1,
+              "remaining": 4999,
+              "resetAt": "2026-01-02T01:00:00Z"
+            }
+          }
+        }
+        """.data(using: .utf8)!
+        MockGitHubGraphQLURLProtocol.reset { request in
+            if request.value(forHTTPHeaderField: "Authorization") == "Bearer replacement-token" {
+                return (Self.httpResponse(for: request, statusCode: 200), responseData)
+            }
+            let errorData = #"{"message":"Bad credentials"}"#.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 401), errorData)
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let client = GitHubAPIClient(
+            token: "rejected-token",
+            graphQLEndpoint: "https://example.test/graphql",
+            session: session
+        )
+        let rejectedTokens = LockedStrings()
+        client.setUnauthorizedHandler { token in
+            rejectedTokens.append(token)
+        }
+
+        for _ in 0..<2 {
+            do {
+                _ = try await client.fetchPullRequests(
+                    username: "test-user",
+                    searchQuery: "author:test-user is:pr",
+                    category: .authored
+                )
+                XCTFail("Expected unauthorized request to throw")
+            } catch APIError.unauthorized {
+                // Expected.
+            }
+        }
+
+        XCTAssertEqual(rejectedTokens.values, ["rejected-token"])
+
+        client.updateToken("replacement-token")
+        let pullRequests = try await client.fetchPullRequests(
+            username: "test-user",
+            searchQuery: "author:test-user is:pr",
+            category: .authored
+        )
+        XCTAssertTrue(pullRequests.isEmpty)
+    }
+
+    func testGitHubRESTUnauthorizedInvalidatesRejectedToken() async {
+        let session = makeMockGitHubGraphQLSession()
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let body = #"{"message":"Bad credentials"}"#.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 401), body)
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let client = GitHubAPIClient(token: "rejected-token", session: session)
+        let rejectedTokens = LockedStrings()
+        client.setUnauthorizedHandler { token in
+            rejectedTokens.append(token)
+        }
+
+        do {
+            _ = try await client.fetchBaseNeedsUpdateByCompare(
+                owner: "owner",
+                repo: "repo",
+                base: "main",
+                head: "feature"
+            )
+            XCTFail("Expected unauthorized request to throw")
+        } catch APIError.unauthorized {
+            XCTAssertEqual(rejectedTokens.values, ["rejected-token"])
+        } catch {
+            XCTFail("Expected APIError.unauthorized, got \(error)")
+        }
+    }
+
+    func testGitHubRESTForbiddenRateLimitDoesNotInvalidateToken() async {
+        let session = makeMockGitHubGraphQLSession()
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let body = #"{"message":"API rate limit exceeded"}"#.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 403), body)
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let client = GitHubAPIClient(token: "valid-token", session: session)
+        let rejectedTokens = LockedStrings()
+        client.setUnauthorizedHandler { token in
+            rejectedTokens.append(token)
+        }
+
+        do {
+            _ = try await client.fetchBaseNeedsUpdateByCompare(
+                owner: "owner",
+                repo: "repo",
+                base: "main",
+                head: "feature"
+            )
+            XCTFail("Expected forbidden request to throw")
+        } catch APIError.http(let statusCode) {
+            XCTAssertEqual(statusCode, 403)
+        } catch {
+            XCTFail("Expected HTTP 403, got \(error)")
+        }
+
+        XCTAssertTrue(rejectedTokens.values.isEmpty)
+    }
+
     func testConfigurationDecodesOpenAtCmuxFirst() throws {
         let json = """
         {
@@ -1759,13 +2095,13 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(decoded.directMentionPullRequests.isEmpty)
     }
 
-    func testPRListMenuNotificationCountDeduplicatesRequestsAndDirectMentions() {
+    func testPRListMenuNotificationCountCombinesUnreadCommentsRequestsAndDirectMentions() {
         var authoredA = makePullRequest(id: 712, number: 12, category: .authored)
         authoredA.changesRequestedCount = 1
         authoredA.mentionCount = 3
         var authoredB = makePullRequest(id: 713, number: 13, category: .authored)
         authoredB.changesRequestedCount = 3
-        authoredB.reviewThreads = [makeReviewThread(id: "unread")]
+        authoredB.reviewThreads = (1...8).map { makeReviewThread(id: "unread-\($0)") }
         var duplicateMention = makePullRequest(
             id: authoredA.id,
             number: authoredA.number,
@@ -1792,8 +2128,8 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertEqual(list.changesRequestedPRCount, 2)
         XCTAssertEqual(list.unansweredDirectMentionCount, 3)
-        XCTAssertEqual(list.menuNotificationCount, 5)
-        XCTAssertEqual(list.authoredUnreadUnresolvedCount, 1)
+        XCTAssertEqual(list.menuNotificationCount, 13)
+        XCTAssertEqual(list.authoredUnreadUnresolvedCount, 8)
     }
 
     func testPATScopeMatcherAcceptsBroaderUserScopeForReadUserRequirement() {
@@ -2635,10 +2971,44 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(result.emailAddress, "jiahao@example.com")
     }
 
-    func testJiraAPIClientTestConnectionRejectsUnauthorized() async throws {
+    func testJiraAPIClientTestConnectionRejectsUnauthorizedOncePerToken() async throws {
         let client = JiraAPIClient(session: Self.makeMockJiraSession())
+        let rejectedTokens = LockedStrings()
+        client.setUnauthorizedHandler { token in
+            rejectedTokens.append(token)
+        }
         MockJiraURLProtocol.reset { request in
             (Self.httpResponse(for: request, statusCode: 401), Data())
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        for _ in 0..<2 {
+            do {
+                _ = try await client.testConnection(
+                    serverURL: "https://example.atlassian.net",
+                    email: "me@example.com",
+                    apiToken: "bad-token"
+                )
+                XCTFail("Expected unauthorized Jira test connection to throw")
+            } catch JiraAPIError.unauthorized {
+                // Expected.
+            } catch {
+                XCTFail("Expected JiraAPIError.unauthorized, got \(error)")
+            }
+        }
+
+        XCTAssertEqual(MockJiraURLProtocol.requestedURLs.count, 2)
+        XCTAssertEqual(rejectedTokens.values, ["bad-token"])
+    }
+
+    func testJiraAPIClientForbiddenDoesNotInvalidateToken() async throws {
+        let client = JiraAPIClient(session: Self.makeMockJiraSession())
+        let rejectedTokens = LockedStrings()
+        client.setUnauthorizedHandler { token in
+            rejectedTokens.append(token)
+        }
+        MockJiraURLProtocol.reset { request in
+            (Self.httpResponse(for: request, statusCode: 403), Data())
         }
         defer { MockJiraURLProtocol.reset() }
 
@@ -2646,14 +3016,62 @@ final class UpdateLogicTests: XCTestCase {
             _ = try await client.testConnection(
                 serverURL: "https://example.atlassian.net",
                 email: "me@example.com",
-                apiToken: "bad-token"
+                apiToken: "valid-but-forbidden-token"
             )
-            XCTFail("Expected unauthorized Jira test connection to throw")
+            XCTFail("Expected forbidden Jira test connection to throw")
         } catch JiraAPIError.unauthorized {
-            XCTAssertEqual(MockJiraURLProtocol.requestedURLs.count, 1)
+            XCTAssertTrue(rejectedTokens.values.isEmpty)
         } catch {
             XCTFail("Expected JiraAPIError.unauthorized, got \(error)")
         }
+    }
+
+    func testJiraMetadataPartialSuccessInvalidatesRejectedTokenOnce() async throws {
+        let suiteName = "PRDashboardTests.Jira.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let client = JiraAPIClient(
+            session: Self.makeMockJiraSession(),
+            cache: JiraMetadataCache(defaults: defaults)
+        )
+        let rejectedTokens = LockedStrings()
+        client.setUnauthorizedHandler { token in
+            rejectedTokens.append(token)
+        }
+        MockJiraURLProtocol.reset { request in
+            if MockJiraURLProtocol.requestedURLs.count == 1 {
+                let data = """
+                {
+                  "issues": [{
+                    "key": "EG-001",
+                    "fields": {
+                      "summary": "Loaded before token rejection",
+                      "labels": [],
+                      "status": null,
+                      "updated": null
+                    }
+                  }]
+                }
+                """.data(using: .utf8)!
+                return (Self.httpResponse(for: request, statusCode: 200), data)
+            }
+            return (Self.httpResponse(for: request, statusCode: 401), Data())
+        }
+        defer { MockJiraURLProtocol.reset() }
+
+        let issueKeys = Set((1...51).map { String(format: "EG-%03d", $0) })
+        let metadata = try await client.fetchMetadata(
+            for: issueKeys,
+            serverURL: "https://example.atlassian.net",
+            email: "me@example.com",
+            apiToken: "rejected-jira-token",
+            refreshInterval: 0
+        )
+
+        XCTAssertEqual(metadata["EG-001"]?.title, "Loaded before token rejection")
+        XCTAssertEqual(MockJiraURLProtocol.requestedURLs.count, 2)
+        XCTAssertEqual(rejectedTokens.values, ["rejected-jira-token"])
     }
 
     func testJiraAPIClientUsesFreshCacheWithoutNetworkRequest() async throws {
@@ -3597,6 +4015,23 @@ final class ProcessCmuxCommandRunnerTests: XCTestCase {
             _ = kill(pid, SIGKILL)
             return
         }
+    }
+}
+
+private final class LockedStrings: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedValues: [String] = []
+
+    var values: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedValues
+    }
+
+    func append(_ value: String) {
+        lock.lock()
+        storedValues.append(value)
+        lock.unlock()
     }
 }
 

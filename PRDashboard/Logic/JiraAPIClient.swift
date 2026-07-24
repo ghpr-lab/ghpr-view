@@ -158,10 +158,40 @@ final class JiraAPIClient {
 
     private let session: URLSession
     private let cache: JiraMetadataCache
+    private let authLock = NSLock()
+    private var reportedUnauthorizedToken: String?
+    private var unauthorizedHandler: (@Sendable (String) -> Void)?
+
 
     init(session: URLSession = .shared, cache: JiraMetadataCache = .shared) {
         self.session = session
         self.cache = cache
+    }
+
+    func setUnauthorizedHandler(_ handler: (@Sendable (String) -> Void)?) {
+        authLock.lock()
+        unauthorizedHandler = handler
+        authLock.unlock()
+    }
+
+    private func reportUnauthorized(token: String) {
+        authLock.lock()
+        guard reportedUnauthorizedToken != token else {
+            authLock.unlock()
+            return
+        }
+        reportedUnauthorizedToken = token
+        let handler = unauthorizedHandler
+        authLock.unlock()
+        handler?(token)
+    }
+
+    private func markAuthorized(token: String) {
+        authLock.lock()
+        if reportedUnauthorizedToken == token {
+            reportedUnauthorizedToken = nil
+        }
+        authLock.unlock()
     }
 
     func fetchMetadata(
@@ -210,6 +240,9 @@ final class JiraAPIClient {
                 )
                 result.merge(fetched) { _, new in new }
                 fetchedAll.merge(fetched) { _, new in new }
+            } catch JiraAPIError.unauthorized {
+                firstError = JiraAPIError.unauthorized
+                break
             } catch {
                 jiraLogger.error("Failed to fetch Jira batch: \(error.localizedDescription, privacy: .public)")
                 firstError = firstError ?? error
@@ -288,12 +321,17 @@ final class JiraAPIClient {
         guard let http = response as? HTTPURLResponse else {
             throw JiraAPIError.invalidResponse
         }
-        guard http.statusCode != 401 && http.statusCode != 403 else {
+        if http.statusCode == 401 {
+            reportUnauthorized(token: trimmedToken)
+            throw JiraAPIError.unauthorized
+        }
+        guard http.statusCode != 403 else {
             throw JiraAPIError.unauthorized
         }
         guard (200..<300).contains(http.statusCode) else {
             throw JiraAPIError.http(statusCode: http.statusCode)
         }
+        markAuthorized(token: trimmedToken)
 
         do {
             let decoded = try JSONDecoder().decode(JiraMyselfResponse.self, from: data)
@@ -342,12 +380,17 @@ final class JiraAPIClient {
         guard let http = response as? HTTPURLResponse else {
             throw JiraAPIError.invalidResponse
         }
-        guard http.statusCode != 401 && http.statusCode != 403 else {
+        if http.statusCode == 401 {
+            reportUnauthorized(token: apiToken)
+            throw JiraAPIError.unauthorized
+        }
+        guard http.statusCode != 403 else {
             throw JiraAPIError.unauthorized
         }
         guard (200..<300).contains(http.statusCode) else {
             throw JiraAPIError.http(statusCode: http.statusCode)
         }
+        markAuthorized(token: apiToken)
 
         let decoded: JiraSearchResponse
         do {

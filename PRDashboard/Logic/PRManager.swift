@@ -333,6 +333,14 @@ final class PRManager: PRManagerType, ObservableObject {
         self.notificationManager = notificationManager
         self.oauthManager = oauthManager
         self.cmuxStatusProvider = cmuxStatusProvider
+        apiClient.setUnauthorizedHandler { [weak oauthManager] rejectedToken in
+            Task { @MainActor in
+                oauthManager?.handleRejectedToken(rejectedToken)
+            }
+        }
+        jiraClient.setUnauthorizedHandler { rejectedToken in
+            Keychain.invalidateJiraAPITokenCache(rejectedToken: rejectedToken)
+        }
         self.configuration = Self.loadConfiguration()
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
         self.readReviewThreadIDs = Self.loadReadReviewThreadIDs()

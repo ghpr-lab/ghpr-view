@@ -26,8 +26,17 @@ class GitHubOAuthManager: NSObject, ObservableObject {
     @Published private(set) var patError: Error?
 
     private var pollingTask: Task<Void, Never>?
+    private let loadPersistedAuthState: () -> AuthState
+    private let invalidatePersistedAuthCache: () -> Void
 
-    init(loadSavedAuth: Bool = true) {
+
+    init(
+        loadSavedAuth: Bool = true,
+        loadPersistedAuthState: @escaping () -> AuthState = { KeychainHelper.loadAuthState() },
+        invalidatePersistedAuthCache: @escaping () -> Void = { KeychainHelper.invalidateAuthStateCache() }
+    ) {
+        self.loadPersistedAuthState = loadPersistedAuthState
+        self.invalidatePersistedAuthCache = invalidatePersistedAuthCache
         super.init()
         if loadSavedAuth {
             self.loadSavedAuth()
@@ -157,7 +166,7 @@ class GitHubOAuthManager: NSObject, ObservableObject {
     }
 
     func loadSavedAuth() {
-        authState = KeychainHelper.loadAuthState()
+        authState = loadPersistedAuthState()
 
         // If we have a token but no username, fetch it
         if authState.accessToken != nil && authState.username == nil {
@@ -165,6 +174,28 @@ class GitHubOAuthManager: NSObject, ObservableObject {
                 await fetchAndUpdateUsername()
             }
         }
+    }
+
+    func handleRejectedToken(_ rejectedToken: String) {
+        // A late 401 from an older request must not replace a token that the
+        // user has already updated.
+        guard authState.accessToken == rejectedToken else { return }
+
+        invalidatePersistedAuthCache()
+        let refreshedState = loadPersistedAuthState()
+        if let refreshedToken = refreshedState.accessToken,
+           refreshedToken != rejectedToken {
+            authError = nil
+            authState = refreshedState
+            return
+        }
+
+        // Do not retain the rejected value loaded from persistent Keychain.
+        if refreshedState.accessToken == rejectedToken {
+            invalidatePersistedAuthCache()
+        }
+        authState = .empty
+        authError = APIError.unauthorized
     }
 
     func openVerificationURL() {
