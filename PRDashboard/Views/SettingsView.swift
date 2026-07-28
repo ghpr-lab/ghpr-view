@@ -77,9 +77,14 @@ struct SettingsView: View {
                 Section("Account") {
                     if viewModel.authState.isAuthenticated {
                         HStack {
-                            Image(systemName: "person.circle.fill")
-                                .font(.system(size: 32))
-                                .foregroundColor(.accentColor)
+                            CachedAvatarView(
+                                url: viewModel.authState.username.flatMap {
+                                    URL(string: "https://github.com/\($0).png?size=64")
+                                },
+                                authorInitial: viewModel.authState.username ?? "Signed in"
+                            )
+                            .frame(width: 32, height: 32)
+                            .clipShape(Circle())
 
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(viewModel.authState.username ?? "Signed in")
