@@ -174,6 +174,12 @@ struct PullRequest: Identifiable, Codable, Equatable {
         ciStatus == .pending || checkPendingCount > 0 || ciIsRunning
     }
 
+    func meetsReadyToMergeCriteria(minimumApprovals: Int) -> Bool {
+        approvalCount >= max(minimumApprovals, 1) &&
+            ciStatus == .success &&
+            (changesRequestedCount ?? 0) == 0
+    }
+
     var checkTotalCount: Int {
         checkSuccessCount + checkFailureCount + checkPendingCount
     }

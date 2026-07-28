@@ -355,7 +355,11 @@ final class PRListViewModel: ObservableObject {
     }
 
     var summaryReadyToMerge: Int {
-        authoredPRs.filter { $0.approvalCount > 0 && $0.ciStatus == .success && ($0.changesRequestedCount ?? 0) == 0 }.count
+        authoredPRs.filter {
+            $0.meetsReadyToMergeCriteria(
+                minimumApprovals: configuration.minimumApprovalsForReadyToMerge
+            )
+        }.count
     }
 
     var summaryChangesRequested: Int {

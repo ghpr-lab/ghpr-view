@@ -103,6 +103,45 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(snapshot.pullRequests.mergedLast24h.map(\.number), [404])
     }
 
+    func testSnapshotFactoryUsesMinimumApprovalsForReadyToMerge() {
+        let now = Date(timeIntervalSince1970: 1_775_000_000)
+        let oneApproval = makePullRequest(
+            id: 601,
+            number: 601,
+            title: "One approval",
+            category: .authored,
+            updatedAt: now,
+            approvalCount: 1
+        )
+        let twoApprovals = makePullRequest(
+            id: 602,
+            number: 602,
+            title: "Two approvals",
+            category: .authored,
+            updatedAt: now,
+            approvalCount: 2
+        )
+
+        let snapshot = LocalSnapshotFactory.makeSnapshot(
+            input: makeInput(
+                prList: PRList(
+                    lastUpdated: now,
+                    pullRequests: [oneApproval, twoApprovals],
+                    isLoading: false,
+                    error: nil
+                ),
+                minimumApprovalsForReadyToMerge: 2
+            ),
+            now: now
+        )
+
+        XCTAssertEqual(
+            snapshot.summary.readyToMerge,
+            1,
+            "Only the PR with two approvals should be ready to merge"
+        )
+    }
+
     func testSnapshotFactoryReportsUnauthenticatedEmptyState() {
         let snapshot = LocalSnapshotFactory.makeSnapshot(
             input: makeInput(authState: .empty, prList: .empty),
@@ -380,7 +419,8 @@ final class LocalAPITests: XCTestCase {
         authState: AuthState = .empty,
         prList: PRList = .empty,
         pinnedPRIdentifiers: Set<String> = [],
-        rateLimitInfo: RateLimitInfo = .empty
+        rateLimitInfo: RateLimitInfo = .empty,
+        minimumApprovalsForReadyToMerge: Int = 1
     ) -> LocalSnapshotInput {
         LocalSnapshotInput(
             appVersion: "1.2.3",
@@ -390,6 +430,7 @@ final class LocalAPITests: XCTestCase {
             prList: prList,
             rateLimitInfo: rateLimitInfo,
             pinnedPRIdentifiers: pinnedPRIdentifiers,
+            minimumApprovalsForReadyToMerge: minimumApprovalsForReadyToMerge,
             refreshStatus: "idle",
             refreshError: nil
         )

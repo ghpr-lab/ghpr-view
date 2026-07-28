@@ -4,6 +4,7 @@ struct Configuration: Codable, Equatable {
     var refreshInterval: TimeInterval  // seconds, minimum 15
     var repositories: [String]         // ["owner/repo", ...] - empty means all
     var showDrafts: Bool
+    var minimumApprovalsForReadyToMerge: Int
     var notificationsEnabled: Bool
     var refreshOnOpen: Bool            // refresh immediately when popover opens
     var ciStatusExcludeFilter: String  // keywords to exclude from CI status (e.g., "review")
@@ -24,6 +25,7 @@ struct Configuration: Codable, Equatable {
             refreshInterval: 300,  // 5 minutes
             repositories: [],
             showDrafts: true,
+            minimumApprovalsForReadyToMerge: 1,
             notificationsEnabled: true,
             refreshOnOpen: false,
             ciStatusExcludeFilter: "review",
@@ -45,6 +47,7 @@ struct Configuration: Codable, Equatable {
         refreshInterval: TimeInterval,
         repositories: [String],
         showDrafts: Bool,
+        minimumApprovalsForReadyToMerge: Int,
         notificationsEnabled: Bool,
         refreshOnOpen: Bool,
         ciStatusExcludeFilter: String,
@@ -63,6 +66,7 @@ struct Configuration: Codable, Equatable {
         self.refreshInterval = refreshInterval
         self.repositories = repositories
         self.showDrafts = showDrafts
+        self.minimumApprovalsForReadyToMerge = minimumApprovalsForReadyToMerge
         self.notificationsEnabled = notificationsEnabled
         self.refreshOnOpen = refreshOnOpen
         self.ciStatusExcludeFilter = ciStatusExcludeFilter
@@ -83,6 +87,7 @@ struct Configuration: Codable, Equatable {
         case refreshInterval
         case repositories
         case showDrafts
+        case minimumApprovalsForReadyToMerge
         case notificationsEnabled
         case refreshOnOpen
         case ciStatusExcludeFilter
@@ -112,6 +117,14 @@ struct Configuration: Codable, Equatable {
         pausePollingInLowPowerMode = try container.decodeIfPresent(Bool.self, forKey: .pausePollingInLowPowerMode) ?? defaults.pausePollingInLowPowerMode
         pausePollingOnExpensiveNetwork = try container.decodeIfPresent(Bool.self, forKey: .pausePollingOnExpensiveNetwork) ?? defaults.pausePollingOnExpensiveNetwork
         showMyReviewStatus = try container.decodeIfPresent(Bool.self, forKey: .showMyReviewStatus) ?? defaults.showMyReviewStatus
+        minimumApprovalsForReadyToMerge = min(
+            max(
+                try container.decodeIfPresent(Int.self, forKey: .minimumApprovalsForReadyToMerge)
+                    ?? defaults.minimumApprovalsForReadyToMerge,
+                1
+            ),
+            10
+        )
         automaticallyCheckForUpdates = try container.decodeIfPresent(Bool.self, forKey: .automaticallyCheckForUpdates) ?? defaults.automaticallyCheckForUpdates
         openAtCmuxFirst = try container.decodeIfPresent(Bool.self, forKey: .openAtCmuxFirst) ?? defaults.openAtCmuxFirst
         graphQLEndpoint = try container.decodeIfPresent(String.self, forKey: .graphQLEndpoint) ?? defaults.graphQLEndpoint

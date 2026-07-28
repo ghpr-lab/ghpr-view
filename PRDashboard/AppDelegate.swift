@@ -208,6 +208,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 prList: prManager?.prList ?? .empty,
                 rateLimitInfo: prManager?.rateLimitInfo ?? .empty,
                 pinnedPRIdentifiers: prManager?.pinnedPRIdentifiers ?? [],
+                minimumApprovalsForReadyToMerge: prManager?.configuration.minimumApprovalsForReadyToMerge ??
+                    Configuration.default.minimumApprovalsForReadyToMerge,
                 refreshStatus: refreshStatus,
                 refreshError: refreshError
             )

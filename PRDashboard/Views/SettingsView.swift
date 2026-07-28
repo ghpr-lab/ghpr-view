@@ -12,6 +12,7 @@ struct SettingsView: View {
     @State private var refreshOnOpen: Bool = true
     @State private var repositories: String = ""
     @State private var showDrafts: Bool = true
+    @State private var minimumApprovalsForReadyToMerge: Int = 1
     @State private var notificationsEnabled: Bool = true
     @State private var ciStatusExcludeFilter: String = "review"
     @State private var pausePollingInLowPowerMode: Bool = true
@@ -177,6 +178,15 @@ struct SettingsView: View {
                     Toggle("Show draft PRs", isOn: $showDrafts)
 
                     Toggle("Show my review status badges", isOn: $showMyReviewStatus)
+
+                    HStack {
+                        Stepper(
+                            "Minimum approvals for “Ready to merge”: \(minimumApprovalsForReadyToMerge)",
+                            value: $minimumApprovalsForReadyToMerge,
+                            in: 1...10
+                        )
+                        HelpHint("Only PRs with at least this many approvals, successful CI, and no change requests are counted as ready to merge.")
+                    }
 
                     HStack {
                         TextField("CI status exclude filter", text: $ciStatusExcludeFilter)
@@ -536,6 +546,7 @@ struct SettingsView: View {
         refreshOnOpen = config.refreshOnOpen
         repositories = config.repositories.joined(separator: ", ")
         showDrafts = config.showDrafts
+        minimumApprovalsForReadyToMerge = config.minimumApprovalsForReadyToMerge
         notificationsEnabled = config.notificationsEnabled
         ciStatusExcludeFilter = config.ciStatusExcludeFilter
         pausePollingInLowPowerMode = config.pausePollingInLowPowerMode
@@ -692,6 +703,7 @@ struct SettingsView: View {
             refreshInterval: refreshInterval,
             repositories: repos,
             showDrafts: showDrafts,
+            minimumApprovalsForReadyToMerge: minimumApprovalsForReadyToMerge,
             notificationsEnabled: notificationsEnabled,
             refreshOnOpen: refreshOnOpen,
             ciStatusExcludeFilter: ciStatusExcludeFilter,

@@ -8,6 +8,7 @@ struct LocalSnapshotInput {
     let prList: PRList
     let rateLimitInfo: RateLimitInfo
     let pinnedPRIdentifiers: Set<String>
+    let minimumApprovalsForReadyToMerge: Int
     let refreshStatus: String
     let refreshError: String?
 }
@@ -112,9 +113,9 @@ enum LocalSnapshotFactory {
                 totalUnresolved: input.prList.totalUnresolvedCount,
                 authoredUnresolved: input.prList.authoredUnresolvedCount,
                 readyToMerge: authoredPRs.filter {
-                    $0.approvalCount > 0 &&
-                    $0.ciStatus == .success &&
-                    ($0.changesRequestedCount ?? 0) == 0
+                    $0.meetsReadyToMergeCriteria(
+                        minimumApprovals: input.minimumApprovalsForReadyToMerge
+                    )
                 }.count,
                 changesRequested: authoredPRs.filter {
                     ($0.changesRequestedCount ?? 0) > 0
