@@ -26,17 +26,20 @@ brew install xiaocang/tap/prdashboard
 ## Features
 
 - **Menu Bar App** - Lives in your menu bar, no dock icon clutter
-- **PR Overview** - View your authored PRs and review requests in one place
+- **PR Overview** - View authored PRs, review requests, mentioned PRs, and direct mentions in one place
 - **Merged Today** - Dedicated section showing PRs merged in the last 24 hours
+- **Search & Summary** - Filter with free text or `jira:`, `ci:`, `pr:conflict`, and `approval:` queries
+- **PR Actions** - Pin PRs, manage comment read state, rerun failed CI, and update out-of-date branches
 - **CI Status** - See CI check status (success/failure/pending) for each PR
 - **CI Workflow Grouping** - CI checks grouped by workflow with running status indicators
 - **Rerun Failed CI** - Rerun failed CI checks directly from the dashboard
 - **Unresolved Comments** - Badge shows unresolved comment count for your authored PRs
 - **Approval Count** - Badge shows approval count on PR rows
 - **Review Status** - Shows your review status (approved, changes requested, etc.) on review-requested PRs
-- **Notifications** - Desktop alerts for new unresolved comments and CI status changes
+- **Jira Integration** - Enrich detected Jira tickets with titles, statuses, and labels
+- **Notifications** - Desktop alerts for new unresolved comments, CI status changes, and important changes on pinned PRs
 - **Rate Limit Display** - Shows GitHub API rate limit in footer
-- **Local CLI** - Query the running app over a local Unix socket with `ghpr`
+- **Local Integrations** - Query the running app over a read-only Unix socket with `ghpr` or the bundled MCP server
 
 ## Usage
 
@@ -59,7 +62,7 @@ brew install xiaocang/tap/prdashboard
 - **Left-click** menu bar icon - Open PR dashboard
 - **Right-click** menu bar icon - Show context menu (version info, quit)
 - **Cmd+R** - Refresh PR list
-- **Settings** (gear icon) - Configure refresh interval, filters, notifications
+- **Settings** (gear icon) - Configure the account, refresh behavior, filters, integrations, notifications, and updates
 
 ### Local CLI
 
@@ -73,12 +76,17 @@ make build-cli
 
 ```bash
 ghpr status
+ghpr ping
 ghpr prs --section authored
+ghpr prs --section direct-mentions
+ghpr pr --repo owner/repo --number 123
 ghpr prs --json
 ghpr snapshot --json
 ```
 
 The CLI connects to a read-only Unix socket at `/tmp/com.xiaocang.PRDashboard.<uid>.sock`. Use `GHPR_SOCKET_PATH` or `--socket PATH` to override the path.
+
+Available `prs` sections are `authored`, `review`, `mentioned`, `direct-mentions`, `merged`, and `all`. For MCP integration, run `make install-mcp` and see [`mcp-ghpr/README.md`](mcp-ghpr/README.md).
 
 ### Settings
 
@@ -87,11 +95,15 @@ The CLI connects to a read-only Unix socket at `/tmp/com.xiaocang.PRDashboard.<u
 - **Repositories** - Filter to specific repos, case-insensitive (e.g., `owner/repo` or `owner/` for all repos)
 - **Show Drafts** - Include/exclude draft PRs
 - **CI Status Exclude Filter** - Exclude status checks by keyword (e.g., "review")
-- **Notifications** - Enable/disable desktop notifications for new unresolved comments
+- **Notifications** - Enable/disable desktop notifications for unresolved comments and CI status changes
 - **Pause in Low Power Mode** - Pause background refresh when macOS Low Power Mode is active
 - **Pause on Cellular/Hotspot** - Pause background refresh on expensive networks (iPhone hotspot, etc.)
 - **Launch at Login** - Start PRDashboard automatically when you log in
 - **Show Review Status** - Show/hide review status badges on review-requested PRs
+- **Open PRs in cmux First** - Reuse a matching cmux PR tab before falling back to the default browser
+- **Jira** - Configure Jira Cloud credentials, metadata refresh interval, and connection testing
+- **Updates** - Enable automatic update checks or check manually
+- **Developer Options** - Replay onboarding, clear caches, override the GraphQL endpoint, or configure an HTTP proxy
 
 ## Requirements
 
@@ -105,6 +117,7 @@ git clone https://github.com/xiaocang/ghpr-view.git
 cd ghpr-view
 ./run.sh
 make build-cli
+make install-mcp  # optional; requires Node.js and npm
 ```
 
 ## License
