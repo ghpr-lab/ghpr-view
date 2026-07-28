@@ -31,6 +31,7 @@ struct SettingsView: View {
     @State private var showPATSwitchSheet = false
     @State private var newPATToken = ""
     @State private var showClearCacheConfirmation = false
+    @State private var isDeveloperOptionsExpanded = false
 
     private let refreshIntervalOptions: [(LocalizedStringKey, Double)] = [
         ("1 minute", 60),
@@ -290,98 +291,116 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Developer Options") {
-                    Button("Show onboarding again") {
-                        onboardingManager.reset()
-                        dismiss()
-                    }
-
-                    Button("Clear cached PR data") {
-                        showClearCacheConfirmation = true
-                    }
-                    .foregroundColor(.red)
-                    .confirmationDialog(
-                        "Clear cached PR data?",
-                        isPresented: $showClearCacheConfirmation,
-                        titleVisibility: .visible
-                    ) {
-                        Button("Clear", role: .destructive) {
-                            viewModel.clearCaches()
+                Section {
+                    if isDeveloperOptionsExpanded {
+                        Button("Show onboarding again") {
+                            onboardingManager.reset()
                             dismiss()
                         }
-                        Button("Cancel", role: .cancel) {}
-                    } message: {
-                        Text("This removes all cached PRs, details, mentions, and avatars. The next refresh will refetch everything from GitHub.")
-                    }
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text("GraphQL endpoint override")
-                            HelpHint("Route GitHub GraphQL requests through a proxy URL. Leave empty to use https://api.github.com/graphql. OAuth endpoints are not affected.")
-                            Spacer()
+                        Button("Clear cached PR data") {
+                            showClearCacheConfirmation = true
                         }
-                        TextField(
-                            "",
-                            text: $graphQLEndpoint,
-                            prompt: Text("https://example.com/graphql")
-                        )
-                        .labelsHidden()
-                        .accessibilityLabel("GraphQL endpoint override")
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled(true)
-                        .multilineTextAlignment(.leading)
+                        .foregroundColor(.red)
+                        .confirmationDialog(
+                            "Clear cached PR data?",
+                            isPresented: $showClearCacheConfirmation,
+                            titleVisibility: .visible
+                        ) {
+                            Button("Clear", role: .destructive) {
+                                viewModel.clearCaches()
+                                dismiss()
+                            }
+                            Button("Cancel", role: .cancel) {}
+                        } message: {
+                            Text("This removes all cached PRs, details, mentions, and avatars. The next refresh will refetch everything from GitHub.")
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text("GraphQL endpoint override")
+                                HelpHint("Route GitHub GraphQL requests through a proxy URL. Leave empty to use https://api.github.com/graphql. OAuth endpoints are not affected.")
+                                Spacer()
+                            }
+                            TextField(
+                                "",
+                                text: $graphQLEndpoint,
+                                prompt: Text("https://example.com/graphql")
+                            )
+                            .labelsHidden()
+                            .accessibilityLabel("GraphQL endpoint override")
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled(true)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .onChange(of: graphQLEndpoint) { newValue in
+                                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if trimmed != newValue {
+                                    graphQLEndpoint = trimmed
+                                }
+                            }
+                        }
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .onChange(of: graphQLEndpoint) { newValue in
-                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if trimmed != newValue {
-                                graphQLEndpoint = trimmed
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                    VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("HTTP proxy")
+                                HelpHint("Route GitHub API requests through an HTTP proxy. Format: http://host:port. Leave empty to connect directly. Username and password are optional.")
+                                Spacer()
+                            }
+                            TextField(
+                                "",
+                                text: $httpProxyURL,
+                                prompt: Text("http://proxy.example.com:8080")
+                            )
+                            .labelsHidden()
+                            .accessibilityLabel("HTTP proxy URL")
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled(true)
+                            .onChange(of: httpProxyURL) { newValue in
+                                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                                if trimmed != newValue {
+                                    httpProxyURL = trimmed
+                                }
+                            }
+
+                            TextField(
+                                "",
+                                text: $httpProxyUsername,
+                                prompt: Text("Proxy username (optional)")
+                            )
+                            .labelsHidden()
+                            .accessibilityLabel("HTTP proxy username")
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled(true)
+
+                            SecureField(
+                                "",
+                                text: $httpProxyPassword,
+                                prompt: Text("Proxy password (optional)")
+                            )
+                            .labelsHidden()
+                            .accessibilityLabel("HTTP proxy password")
+                            .textFieldStyle(.roundedBorder)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                } header: {
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.16)) {
+                            isDeveloperOptionsExpanded.toggle()
+                        }
+                    } label: {
                         HStack {
-                            Text("HTTP proxy")
-                            HelpHint("Route GitHub API requests through an HTTP proxy. Format: http://host:port. Leave empty to connect directly. Username and password are optional.")
+                            Text("Developer Options")
+                            Image(systemName: isDeveloperOptionsExpanded ? "chevron.down" : "chevron.right")
                             Spacer()
                         }
-                        TextField(
-                            "",
-                            text: $httpProxyURL,
-                            prompt: Text("http://proxy.example.com:8080")
-                        )
-                        .labelsHidden()
-                        .accessibilityLabel("HTTP proxy URL")
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled(true)
-                        .onChange(of: httpProxyURL) { newValue in
-                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                            if trimmed != newValue {
-                                httpProxyURL = trimmed
-                            }
-                        }
-
-                        TextField(
-                            "",
-                            text: $httpProxyUsername,
-                            prompt: Text("Proxy username (optional)")
-                        )
-                        .labelsHidden()
-                        .accessibilityLabel("HTTP proxy username")
-                        .textFieldStyle(.roundedBorder)
-                        .autocorrectionDisabled(true)
-
-                        SecureField(
-                            "",
-                            text: $httpProxyPassword,
-                            prompt: Text("Proxy password (optional)")
-                        )
-                        .labelsHidden()
-                        .accessibilityLabel("HTTP proxy password")
-                        .textFieldStyle(.roundedBorder)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .buttonStyle(.plain)
+                    .help(isDeveloperOptionsExpanded ? "Collapse section" : "Expand section")
+                    .accessibilityLabel(Text("Developer Options"))
+                    .accessibilityValue(isDeveloperOptionsExpanded ? Text("Expanded") : Text("Collapsed"))
                 }
             }
             .formStyle(.grouped)
