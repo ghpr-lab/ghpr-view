@@ -169,11 +169,20 @@ struct SettingsView: View {
                 }
 
                 Section("Filters") {
-                    HStack {
-                        TextField("Repositories (comma-separated, leave empty for all)", text: $repositories)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Repositories (comma-separated, leave empty for all)")
+                            HelpHint("Filter PRs to specific repos. Format: owner/repo, comma-separated (e.g., owner/repo1, owner/repo2). Leave empty to show PRs from all repos.")
+                            Spacer()
+                        }
+                        TextField("", text: $repositories)
+                            .labelsHidden()
+                            .accessibilityLabel("Repositories (comma-separated, leave empty for all)")
                             .textFieldStyle(.roundedBorder)
-                        HelpHint("Filter PRs to specific repos. Format: owner/repo, comma-separated (e.g., owner/repo1, owner/repo2). Leave empty to show PRs from all repos.")
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     Toggle("Show draft PRs", isOn: $showDrafts)
 
@@ -188,11 +197,20 @@ struct SettingsView: View {
                         HelpHint("Only PRs with at least this many approvals, successful CI, and no change requests are counted as ready to merge.")
                     }
 
-                    HStack {
-                        TextField("CI status exclude filter", text: $ciStatusExcludeFilter)
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("CI status exclude filter")
+                            HelpHint("Exclude CI status checks whose name contains this keyword (e.g., \"review\" hides checks like \"code-review\"). Leave empty to include all checks.")
+                            Spacer()
+                        }
+                        TextField("", text: $ciStatusExcludeFilter)
+                            .labelsHidden()
+                            .accessibilityLabel("CI status exclude filter")
                             .textFieldStyle(.roundedBorder)
-                        HelpHint("Exclude CI status checks whose name contains this keyword (e.g., \"review\" hides checks like \"code-review\"). Leave empty to include all checks.")
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 Section("Notifications") {
@@ -224,15 +242,23 @@ struct SettingsView: View {
                         }
                     }
 
-                    TextField(
-                        "Atlassian email",
-                        text: $jiraEmail
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .autocorrectionDisabled(true)
-                    .onChange(of: jiraEmail) { _ in
-                        resetJiraConnectionTest()
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Atlassian email")
+                            Spacer()
+                        }
+                        TextField("", text: $jiraEmail)
+                            .labelsHidden()
+                            .accessibilityLabel("Atlassian email")
+                            .textFieldStyle(.roundedBorder)
+                            .autocorrectionDisabled(true)
+                            .multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .onChange(of: jiraEmail) { _ in
+                                resetJiraConnectionTest()
+                            }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
                     SecureField(
                         "Jira API token",
