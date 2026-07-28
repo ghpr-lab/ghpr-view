@@ -754,7 +754,8 @@ final class GitHubAPIClient: ObservableObject {
             let fieldSelection = buildPRFieldSelection(
                 username: username,
                 includeReviewMetadata: true,
-                includeMentionBodies: true
+                includeMentionBodies: true,
+                includeReviewAuthors: true
             )
             let excludeFilter = Self.loadCIStatusExcludeFilter()
 
@@ -776,7 +777,8 @@ final class GitHubAPIClient: ObservableObject {
                             categoryByID: categoryByID,
                             username: username,
                             fieldSelection: fieldSelection,
-                            excludeFilter: excludeFilter
+                            excludeFilter: excludeFilter,
+                            includeReviewAuthors: true
                         )
                     }
                     inflight += 1
@@ -811,7 +813,8 @@ final class GitHubAPIClient: ObservableObject {
                                 categoryByID: categoryByID,
                                 username: username,
                                 fieldSelection: fieldSelection,
-                                excludeFilter: excludeFilter
+                                excludeFilter: excludeFilter,
+                                includeReviewAuthors: true
                             )
                         }
                         inflight += 1
@@ -4210,7 +4213,8 @@ final class GitHubAPIClient: ObservableObject {
         categoryByID: [Int: PRCategory],
         username: String,
         fieldSelection: String,
-        excludeFilter: String
+        excludeFilter: String,
+        includeReviewAuthors: Bool
     ) async throws -> [Int: PullRequest] {
         var queryParts: [String] = []
         for (index, ip) in batch.enumerated() {
@@ -4257,7 +4261,8 @@ final class GitHubAPIClient: ObservableObject {
                 username: username,
                 excludeFilter: excludeFilter,
                 enrichmentInfos: &ciEnrichment,
-                reviewThreadEnrichmentInfos: &reviewThreadEnrichment
+                reviewThreadEnrichmentInfos: &reviewThreadEnrichment,
+                includeReviewAuthors: includeReviewAuthors
             ) {
                 parsed[dbId] = pr
             }

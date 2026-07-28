@@ -2551,7 +2551,7 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertFalse(cached.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
     }
 
-    func testCachedPRDetailReusesTerminalCIWhenSnapshotMatches() {
+    func testCachedPRDetailReusesTerminalCIWhenSnapshotMatches() throws {
         let now = Date(timeIntervalSince1970: 1_713_666_108)
         let snapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "SUCCESS")
         var pr = makePullRequest(id: 7, number: 7, category: .authored)
@@ -2563,6 +2563,7 @@ final class UpdateLogicTests: XCTestCase {
         pr.graphqlNodeId = "PR_node_7"
         pr.baseRefName = "main"
         pr.headRefName = "feature"
+        pr.approvalAuthors = ["alice", "bob"]
 
         let cached = CachedPRDetail(
             prId: pr.id,
@@ -2571,7 +2572,39 @@ final class UpdateLogicTests: XCTestCase {
             detailFetchedAt: now
         )
 
-        XCTAssertTrue(cached.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
+        let roundTripped = try JSONDecoder().decode(
+            CachedPRDetail.self,
+            from: JSONEncoder().encode(cached)
+        )
+
+        XCTAssertTrue(roundTripped.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
+        XCTAssertEqual(roundTripped.detail.approvalAuthors, ["alice", "bob"])
+    }
+
+    func testCachedPRDetailWithoutReviewAuthorPayloadVersionForcesCacheMiss() throws {
+        let now = Date(timeIntervalSince1970: 1_713_666_108)
+        let snapshot = makeIndexSnapshot(updatedAt: now, ciRollupState: "SUCCESS")
+        var pr = makePullRequest(id: 9, number: 9, category: .authored)
+        pr.ciStatus = .success
+        pr.checkSuccessCount = 3
+        pr.githubCIState = "SUCCESS"
+        pr.graphqlNodeId = "PR_node_9"
+        pr.baseRefName = "main"
+        pr.headRefName = "feature"
+
+        let cached = CachedPRDetail(
+            prId: pr.id,
+            indexSnapshot: snapshot,
+            detail: pr,
+            detailFetchedAt: now
+        )
+        let encoded = try JSONEncoder().encode(cached)
+        var object = try JSONSerialization.jsonObject(with: encoded) as! [String: Any]
+        object.removeValue(forKey: "reviewAuthorPayloadVersion")
+        let stripped = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(CachedPRDetail.self, from: stripped)
+
+        XCTAssertFalse(decoded.isUsable(against: snapshot, now: now, ttl: PRDetailCache.ttl))
     }
 
     func testCachedPRDetailWithoutCIContextParserVersionForcesCacheMiss() throws {

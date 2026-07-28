@@ -352,12 +352,14 @@ extension IndexSnapshot {
 
 struct CachedPRDetail: Codable {
     private static let currentCIContextParserVersion = 4
+    private static let currentReviewAuthorPayloadVersion = 1
 
     let prId: Int
     let indexSnapshot: IndexSnapshot
     let detail: PullRequest
     let detailFetchedAt: Date
     let ciContextParserVersion: Int?
+    let reviewAuthorPayloadVersion: Int?
 
     private enum CodingKeys: String, CodingKey {
         case prId
@@ -365,6 +367,7 @@ struct CachedPRDetail: Codable {
         case detail
         case detailFetchedAt
         case ciContextParserVersion
+        case reviewAuthorPayloadVersion
     }
 
     init(
@@ -372,7 +375,8 @@ struct CachedPRDetail: Codable {
         indexSnapshot: IndexSnapshot,
         detail: PullRequest,
         detailFetchedAt: Date,
-        ciContextParserVersion: Int? = Self.currentCIContextParserVersion
+        ciContextParserVersion: Int? = Self.currentCIContextParserVersion,
+        reviewAuthorPayloadVersion: Int? = Self.currentReviewAuthorPayloadVersion
     ) {
         self.prId = prId
         self.indexSnapshot = indexSnapshot
@@ -381,6 +385,7 @@ struct CachedPRDetail: Codable {
         self.detail = sanitizedDetail
         self.detailFetchedAt = detailFetchedAt
         self.ciContextParserVersion = ciContextParserVersion
+        self.reviewAuthorPayloadVersion = reviewAuthorPayloadVersion
     }
 
     init(from decoder: Decoder) throws {
@@ -392,6 +397,7 @@ struct CachedPRDetail: Codable {
         detail = sanitizedDetail
         detailFetchedAt = try container.decode(Date.self, forKey: .detailFetchedAt)
         ciContextParserVersion = try container.decodeIfPresent(Int.self, forKey: .ciContextParserVersion)
+        reviewAuthorPayloadVersion = try container.decodeIfPresent(Int.self, forKey: .reviewAuthorPayloadVersion)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -403,6 +409,7 @@ struct CachedPRDetail: Codable {
         try container.encode(sanitizedDetail, forKey: .detail)
         try container.encode(detailFetchedAt, forKey: .detailFetchedAt)
         try container.encodeIfPresent(ciContextParserVersion, forKey: .ciContextParserVersion)
+        try container.encodeIfPresent(reviewAuthorPayloadVersion, forKey: .reviewAuthorPayloadVersion)
     }
 
     /// Cache hit when index scalars match, the entry is still within TTL, and
@@ -411,6 +418,7 @@ struct CachedPRDetail: Codable {
     /// on the next normal poll instead of being reused for the full TTL.
     func isUsable(against snapshot: IndexSnapshot, now: Date, ttl: TimeInterval) -> Bool {
         guard ciContextParserVersion == Self.currentCIContextParserVersion else { return false }
+        guard reviewAuthorPayloadVersion == Self.currentReviewAuthorPayloadVersion else { return false }
         guard indexSnapshot == snapshot else { return false }
         guard now.timeIntervalSince(detailFetchedAt) < ttl else { return false }
         guard detail.hasHoverDetailMetadata else { return false }
