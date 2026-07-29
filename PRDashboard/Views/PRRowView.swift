@@ -1063,16 +1063,19 @@ private final class PRHoverDetailHostingView: NSHostingView<AnyView> {
     }
 
     override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
         guard let ownerID else { return }
         PRHoverDetailPanelController.shared.panelMouseEntered(ownerID: ownerID)
     }
 
     override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
         guard let ownerID else { return }
         PRHoverDetailPanelController.shared.panelMouseExited(ownerID: ownerID)
     }
 
     override func mouseMoved(with event: NSEvent) {
+        super.mouseMoved(with: event)
         guard let ownerID else { return }
         PRHoverDetailPanelController.shared.panelMouseMoved(ownerID: ownerID)
     }
@@ -1254,9 +1257,9 @@ private struct PRHoverDetailInfoTable: View {
                         color: approvalColor,
                         usernames: pr.approvalAuthors ?? [],
                         fallbackText: approvalText,
+                        fallbackTooltipText: approvalTooltipText,
                         maxWidth: 206
                     )
-                    .delayedHoverTooltip(approvalTooltipText)
 
                     Text("·")
                         .font(valueFont)
@@ -1267,9 +1270,9 @@ private struct PRHoverDetailInfoTable: View {
                         color: changesColor,
                         usernames: pr.changesRequestedAuthors ?? [],
                         fallbackText: changesRequestedText,
+                        fallbackTooltipText: changesRequestedTooltipText,
                         maxWidth: 108
                     )
-                    .delayedHoverTooltip(changesRequestedTooltipText)
                 }
             }
         }
@@ -1281,9 +1284,9 @@ private struct PRHoverDetailInfoTable: View {
                 icon: "bubble.left.and.bubble.right.fill",
                 color: .orange,
                 usernames: unresolvedThreadDetails.map(\.sourceAuthor),
-                fallbackText: unresolvedSummaryText
+                fallbackText: unresolvedSummaryText,
+                fallbackTooltipText: unresolvedTooltipText
             )
-            .delayedHoverTooltip(unresolvedTooltipText)
         }
     }
 
@@ -1654,6 +1657,7 @@ private struct PRHoverDetailAvatars: View {
     let color: Color
     let usernames: [String]
     let fallbackText: String
+    let fallbackTooltipText: String
     var maxWidth: CGFloat?
 
     var body: some View {
@@ -1669,6 +1673,7 @@ private struct PRHoverDetailAvatars: View {
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .delayedHoverTooltip(fallbackTooltipText)
             } else {
                 StackedAvatarsView(usernames: usernames)
             }
