@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var viewModel: PRListViewModel
     @ObservedObject var onboardingManager: OnboardingManager
     @ObservedObject var updateManager: UpdateManager
+    var presentationCoordinator: AppPresentationCoordinator? = nil
     @Environment(\.dismiss) private var dismiss
 
     @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
@@ -25,10 +26,8 @@ struct SettingsView: View {
     @State private var httpProxyUsername: String = ""
     @State private var httpProxyPassword: String = ""
     @State private var jiraServerURL: String = ""
-    @State private var jiraEmail: String = ""
-    @State private var jiraAPIToken: String = ""
-    @State private var jiraRefreshInterval: Double = 1800
     @State private var jiraConnectionTestState: JiraConnectionTestState = .idle
+    @State private var jiraConnectionTestTask: Task<Void, Never>?
     @State private var showPATSwitchSheet = false
     @State private var newPATToken = ""
     @State private var showClearCacheConfirmation = false
@@ -42,21 +41,13 @@ struct SettingsView: View {
         ("15 minutes", 900),
         ("30 minutes", 1800)
     ]
-
-    private let jiraRefreshIntervalOptions: [(LocalizedStringKey, Double)] = [
-        ("15 minutes", 900),
-        ("30 minutes", 1800),
-        ("1 hour", 3600),
-        ("2 hours", 7200),
-        ("4 hours", 14400)
-    ]
-
     private enum JiraConnectionTestState: Equatable {
         case idle
         case testing
         case success(String?)
         case failure(String)
     }
+
 
     var body: some View {
         VStack(spacing: 0) {
@@ -217,11 +208,12 @@ struct SettingsView: View {
                     Toggle("Enable notifications for unresolved comments and CI status changes", isOn: $notificationsEnabled)
                 }
 
+
                 Section("Jira") {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("Jira server")
-                            HelpHint("Jira Cloud server URL, for example https://company.atlassian.net. Leave empty to disable Jira label and status enrichment.")
+                            HelpHint("Jira Cloud server URL, for example https://company.atlassian.net. Email, API token, and connection testing are completed in the setup guide.")
                             Spacer()
                         }
                         TextField(
@@ -240,50 +232,30 @@ struct SettingsView: View {
                             }
                             resetJiraConnectionTest()
                         }
-                    }
 
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text("Atlassian email")
-                            Spacer()
-                        }
-                        TextField("", text: $jiraEmail)
-                            .labelsHidden()
-                            .accessibilityLabel("Atlassian email")
-                            .textFieldStyle(.roundedBorder)
-                            .autocorrectionDisabled(true)
-                            .multilineTextAlignment(.leading)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .onChange(of: jiraEmail) { _ in
-                                resetJiraConnectionTest()
-                            }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    SecureField(
-                        "Jira API token",
-                        text: $jiraAPIToken
-                    )
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: jiraAPIToken) { _ in
-                        resetJiraConnectionTest()
-                    }
-
-                    Picker("Jira Refresh Interval", selection: $jiraRefreshInterval) {
-                        ForEach(jiraRefreshIntervalOptions, id: \.1) { option in
-                            Text(option.0).tag(option.1)
+                        if let jiraServerValidationMessage {
+                            Label(jiraServerValidationMessage, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption)
+                                .foregroundColor(.orange)
                         }
                     }
 
+                    Button(jiraSetupButtonTitle) {
+                        openJiraSetupGuide()
+                    }
+                    .disabled(!canOpenJiraSetupGuide)
                     HStack(spacing: 8) {
                         Button {
-                            testJiraConnection()
+                            testStoredJiraConnection()
                         } label: {
-                            Label("Test Jira Connection", systemImage: "checkmark.seal")
+                            Label("Test Connection", systemImage: "checkmark.seal")
                         }
-                        .disabled(!canTestJiraConnection)
+                        .disabled(
+                            !hasStoredJiraCredentials ||
+                                jiraConnectionTestState == .testing
+                        )
 
-                        if case .testing = jiraConnectionTestState {
+                        if jiraConnectionTestState == .testing {
                             ProgressView()
                                 .controlSize(.small)
                         }
@@ -292,6 +264,10 @@ struct SettingsView: View {
                     }
 
                     jiraConnectionTestResultView
+
+                    Text("Enter the Jira site here, then use the guide to add your Atlassian email and API token and test the connection.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
 
                 Section("Power & Network") {
@@ -464,6 +440,9 @@ struct SettingsView: View {
         .onAppear {
             loadCurrentSettings()
         }
+        .onDisappear {
+            jiraConnectionTestTask?.cancel()
+        }
         .sheet(isPresented: $showPATSwitchSheet) {
             patSwitchSheet
         }
@@ -548,6 +527,123 @@ struct SettingsView: View {
             return "Check for Updates…"
         }
     }
+    private var jiraSetupButtonTitle: LocalizedStringKey {
+        switch viewModel.jiraConnectionState {
+        case .notConfigured: return "Connect Jira…"
+        case .unauthorized: return "Reconnect Jira…"
+        case .configured: return "Guided Jira Setup…"
+        }
+    }
+    private var normalizedJiraServerURL: String? {
+        JiraAPIClient.normalizedServerURL(jiraServerURL)
+    }
+
+    private var jiraServerValidationMessage: String? {
+        let trimmed = jiraServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let normalizedJiraServerURL else {
+            return "Enter a valid Jira site URL."
+        }
+        guard JiraAPIClient.isSupportedCloudServerURL(normalizedJiraServerURL) else {
+            return "Only Jira Cloud sites (*.atlassian.net) are supported."
+        }
+        return nil
+    }
+
+    private var canOpenJiraSetupGuide: Bool {
+        presentationCoordinator != nil &&
+            normalizedJiraServerURL != nil &&
+            jiraServerValidationMessage == nil
+    }
+    private var hasStoredJiraCredentials: Bool {
+        viewModel.jiraConnectionState != .notConfigured &&
+            jiraServerValidationMessage == nil &&
+            normalizedJiraServerURL != nil
+    }
+
+    @ViewBuilder
+    private var jiraConnectionTestResultView: some View {
+        switch jiraConnectionTestState {
+        case .idle, .testing:
+            EmptyView()
+        case .success(let account):
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+                Text("Jira connected")
+                if let account, !account.isEmpty {
+                    Text(account)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .font(.caption)
+        case .failure(let message):
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundColor(.red)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Jira connection failed")
+                    Text(message)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            .font(.caption)
+        }
+    }
+
+    private func testStoredJiraConnection() {
+        guard let normalizedJiraServerURL else { return }
+        let email = viewModel.configuration.jiraEmail
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiToken = Keychain.loadJiraAPIToken()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty, !apiToken.isEmpty else { return }
+
+        jiraConnectionTestTask?.cancel()
+        jiraConnectionTestState = .testing
+        jiraConnectionTestTask = Task {
+            do {
+                let result = try await JiraAPIClient().testConnection(
+                    serverURL: normalizedJiraServerURL,
+                    email: email,
+                    apiToken: apiToken
+                )
+                guard !Task.isCancelled else { return }
+                jiraConnectionTestState = .success(
+                    result.displayName ?? result.emailAddress
+                )
+            } catch {
+                guard !Task.isCancelled else { return }
+                jiraConnectionTestState = .failure(error.localizedDescription)
+            }
+            jiraConnectionTestTask = nil
+        }
+    }
+
+    private func resetJiraConnectionTest() {
+        jiraConnectionTestTask?.cancel()
+        jiraConnectionTestTask = nil
+        jiraConnectionTestState = .idle
+    }
+
+    private func openJiraSetupGuide() {
+        guard let normalizedJiraServerURL,
+              JiraAPIClient.isSupportedCloudServerURL(normalizedJiraServerURL)
+        else { return }
+        jiraServerURL = normalizedJiraServerURL
+        presentationCoordinator?.present(
+            .jiraSetup(
+                JiraSetupContext(
+                    source: .settings,
+                    initialServerURL: normalizedJiraServerURL
+                )
+            )
+        )
+    }
+
 
     private var isUpdateCheckInProgress: Bool {
         if case .checking = updateManager.state {
@@ -585,90 +681,8 @@ struct SettingsView: View {
         httpProxyUsername = config.httpProxyUsername
         httpProxyPassword = Keychain.loadProxyPassword()
         jiraServerURL = config.jiraServerURL
-        jiraEmail = config.jiraEmail
-        jiraAPIToken = Keychain.loadJiraAPIToken()
-        jiraRefreshInterval = config.jiraRefreshInterval
-        jiraConnectionTestState = .idle
     }
 
-    @ViewBuilder
-    private var jiraConnectionTestResultView: some View {
-        switch jiraConnectionTestState {
-        case .idle:
-            EmptyView()
-        case .testing:
-            HStack(spacing: 6) {
-                Image(systemName: "clock")
-                    .foregroundColor(.secondary)
-                Text("Testing Jira connection...")
-                    .foregroundColor(.secondary)
-            }
-            .font(.caption)
-        case .success(let account):
-            HStack(spacing: 6) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-                Text("Jira connected")
-                if let account, !account.isEmpty {
-                    Text(account)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-            }
-            .font(.caption)
-        case .failure(let message):
-            HStack(alignment: .top, spacing: 6) {
-                Image(systemName: "xmark.circle.fill")
-                    .foregroundColor(.red)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Jira connection failed")
-                    Text(message)
-                        .foregroundColor(.secondary)
-                        .lineLimit(2)
-                }
-            }
-            .font(.caption)
-        }
-    }
-
-    private var canTestJiraConnection: Bool {
-        guard jiraConnectionTestState != .testing else { return false }
-        return !jiraServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            !jiraEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            !jiraAPIToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    private func testJiraConnection() {
-        jiraConnectionTestState = .testing
-        let serverURL = jiraServerURL
-        let email = jiraEmail
-        let token = jiraAPIToken
-
-        Task {
-            do {
-                let result = try await JiraAPIClient().testConnection(
-                    serverURL: serverURL,
-                    email: email,
-                    apiToken: token
-                )
-                await MainActor.run {
-                    let account = result.displayName ?? result.emailAddress
-                    jiraConnectionTestState = .success(account)
-                }
-            } catch {
-                await MainActor.run {
-                    jiraConnectionTestState = .failure(error.localizedDescription)
-                }
-            }
-        }
-    }
-
-    private func resetJiraConnectionTest() {
-        if jiraConnectionTestState != .testing {
-            jiraConnectionTestState = .idle
-        }
-    }
 
     private struct HelpHint: View {
         let text: String
@@ -720,7 +734,6 @@ struct SettingsView: View {
         let trimmedProxyURL = httpProxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedProxyUsername = httpProxyUsername.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedJiraServerURL = jiraServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedJiraEmail = jiraEmail.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // Build config carrying current (pre-save) Jira fields; updateJiraCredentials
         // overwrites them atomically below so cache invalidation + refresh fire once.
@@ -751,13 +764,12 @@ struct SettingsView: View {
         } else {
             Keychain.saveProxyPassword(httpProxyPassword)
         }
-
         viewModel.configuration = config
         viewModel.updateJiraCredentials(
             serverURL: trimmedJiraServerURL,
-            email: trimmedJiraEmail,
-            apiToken: jiraAPIToken,
-            refreshInterval: jiraRefreshInterval
+            email: existingJira.jiraEmail,
+            apiToken: Keychain.loadJiraAPIToken(),
+            refreshInterval: existingJira.jiraRefreshInterval
         )
         dismiss()
     }

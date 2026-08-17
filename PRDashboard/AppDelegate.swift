@@ -14,7 +14,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var localSocketServer: LocalSocketServer?
     var settingsWindow: NSWindow?
     var updateWindow: NSWindow?
-
+    var jiraSetupWindow: NSWindow?
+    var jiraSetupCoordinator: JiraSetupCoordinator?
+    var presentationCoordinator: AppPresentationCoordinator?
+    private var jiraClient: JiraAPIClient?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -23,10 +26,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // 2. Create notification manager and request permission
         notificationManager = NotificationManager()
-
+        let jiraClient = JiraAPIClient()
+        self.jiraClient = jiraClient
         // 3. Create API client
         let apiClient = GitHubAPIClient(token: oauthManager?.authState.accessToken ?? "")
-        let jiraClient = JiraAPIClient()
 
         // 4. Create PR manager
         prManager = PRManager(
@@ -50,8 +53,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // 4.1 Load cached PR data for immediate display
-        prManager?.loadCachedData()
-
         // 5. Create view model
         let viewModel = PRListViewModel(
             prManager: prManager!,
@@ -60,15 +61,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         onboardingManager = OnboardingManager()
 
-        // Wire up settings window callback
+        presentationCoordinator = AppPresentationCoordinator { [weak self, weak viewModel] presentation in
+            guard let self, let viewModel else { return }
+            switch presentation {
+            case .settings:
+                self.openSettingsWindow(viewModel: viewModel)
+            case .jiraSetup(let context):
+                self.openJiraSetupWindow(context: context, viewModel: viewModel)
+            }
+        }
+
         viewModel.openSettings = { [weak self] in
-            self?.openSettingsWindow(viewModel: viewModel)
+            self?.presentationCoordinator?.present(.settings)
         }
 
         // 6. Create main view
         let mainView = MainView(
             viewModel: viewModel,
-            onboardingManager: onboardingManager!
+            onboardingManager: onboardingManager!,
+            presentationCoordinator: presentationCoordinator
         )
 
         // 7. Create popover
@@ -121,6 +132,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in
                 self?.notificationManager?.requestPermission()
             }
+
             .store(in: &cancellables)
 
         updateManager?.start()
@@ -130,6 +142,55 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         localSocketServer?.stop()
         localSocketServer = nil
     }
+    private func openJiraSetupWindow(context: JiraSetupContext, viewModel: PRListViewModel) {
+        if let jiraSetupWindow {
+            jiraSetupWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        guard let jiraClient else { return }
+        let config = viewModel.configuration
+        let initialServerURL = context.initialServerURL ?? config.jiraServerURL
+        let coordinator = JiraSetupCoordinator(
+            context: context,
+            connectionState: viewModel.jiraConnectionState,
+            savedServerURL: initialServerURL,
+            savedEmail: config.jiraEmail,
+            savedTokenAvailable: !Keychain.loadJiraAPIToken().isEmpty,
+            testConnection: { serverURL, email, token in
+                try await jiraClient.testConnection(serverURL: serverURL, email: email, apiToken: token)
+            },
+            commit: { [weak viewModel] serverURL, email, token in
+                viewModel?.updateJiraCredentials(
+                    serverURL: serverURL,
+                    email: email,
+                    apiToken: token,
+                    refreshInterval: viewModel?.configuration.jiraRefreshInterval ?? 1800
+                )
+            },
+            openExternalURL: { url in
+                NSWorkspace.shared.open(url)
+            },
+            dismiss: { [weak self] in
+                self?.jiraSetupWindow?.close()
+                self?.jiraSetupWindow = nil
+                self?.jiraSetupCoordinator = nil
+            }
+        )
+        jiraSetupCoordinator = coordinator
+        let window = NSWindow(
+            contentViewController: NSHostingController(rootView: JiraSetupView(coordinator: coordinator))
+        )
+        window.title = String(localized: "Connect Jira")
+        window.styleMask = [.titled, .closable]
+        window.setContentSize(NSSize(width: 480, height: 360))
+        window.center()
+        window.isReleasedWhenClosed = false
+        jiraSetupWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     private func openSettingsWindow(viewModel: PRListViewModel) {
         guard let onboardingManager, let updateManager else { return }
@@ -138,7 +199,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let settingsView = SettingsView(
                 viewModel: viewModel,
                 onboardingManager: onboardingManager,
-                updateManager: updateManager
+                updateManager: updateManager,
+                presentationCoordinator: presentationCoordinator
             )
             let hostingController = NSHostingController(rootView: settingsView)
 

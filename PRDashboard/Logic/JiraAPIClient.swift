@@ -279,6 +279,18 @@ final class JiraAPIClient {
         guard let normalized = components.url?.absoluteString else { return nil }
         return normalized.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
     }
+    
+    static func isSupportedCloudServerURL(_ raw: String) -> Bool {
+        guard let normalized = normalizedServerURL(raw),
+              let host = URL(string: normalized)?.host?.lowercased() else {
+            return false
+        }
+        let suffix = ".atlassian.net"
+        guard host.hasSuffix(suffix) else { return false }
+        let subdomain = String(host.dropLast(suffix.count))
+        return !subdomain.isEmpty
+    }
+
 
     static func issueURL(serverURL: String, issueKey: String?) -> URL? {
         guard let issueKey = issueKey?.trimmingCharacters(in: .whitespacesAndNewlines),

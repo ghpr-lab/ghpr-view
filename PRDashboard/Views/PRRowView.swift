@@ -22,6 +22,7 @@ private class MenuTracker: ObservableObject {
 struct PRRowView: View {
     let pr: PullRequest
     let onOpen: () -> Void
+    let onOpenJira: (String) -> Void
     let onCopyURL: () -> Void
     var onMarkReviewCommentsRead: (() -> Void)?
     var onMarkReviewCommentsUnread: (() -> Void)?
@@ -37,7 +38,6 @@ struct PRRowView: View {
     var showConflictStatus: Bool = true
     var showMyReviewStatus: Bool = false
     var showCmuxStatus: Bool = false
-    var jiraServerURL: String = ""
     var jiraMetadataEnabled: Bool = false
     var searchText: String = ""
     var onboardingManager: OnboardingManager? = nil
@@ -124,16 +124,21 @@ struct PRRowView: View {
                         .foregroundColor(.secondary)
 
                     if let ticket = pr.jiraTicket {
-                        SearchHighlightedText(text: ticket, query: searchHighlightQuery)
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(.blue)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(Color.blue.opacity(0.15))
-                            .cornerRadius(4)
-                            .delayedHoverTooltip(
-                                String(localized: "This is the Jira ticket linked to this PR.")
-                            )
+                        Button {
+                            onOpenJira(ticket)
+                        } label: {
+                            SearchHighlightedText(text: ticket, query: searchHighlightQuery)
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(.blue)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1)
+                                .background(Color.blue.opacity(0.15))
+                                .cornerRadius(4)
+                        }
+                        .buttonStyle(.plain)
+                        .delayedHoverTooltip(
+                            String(localized: "This is the Jira ticket linked to this PR.")
+                        )
                     }
 
                     if showCmuxStatus, pr.isOpenInCmux == true {
@@ -157,11 +162,11 @@ struct PRRowView: View {
                     .foregroundColor(.primary)
                     .prHoverDetail(
                         pr,
+                        onOpenJira: onOpenJira,
                         onUpdateBranchWithRebase: updateBranchWithRebaseAction,
                         onLoadHoverDetail: onLoadHoverDetail,
                         isUpdatingBranch: isUpdatingBranch,
                         isLoadingHoverDetail: isLoadingHoverDetail,
-                        jiraServerURL: jiraServerURL,
                         jiraMetadataEnabled: jiraMetadataEnabled
                     )
 
@@ -446,6 +451,7 @@ struct PRRowView_Previews: PreviewProvider {
                     jiraTicket: "EG-1234"
                 ),
                 onOpen: {},
+                onOpenJira: { _ in },
                 onCopyURL: {}
             )
             PRRowView(
@@ -482,6 +488,7 @@ struct PRRowView_Previews: PreviewProvider {
                     changesRequestedCount: 0
                 ),
                 onOpen: {},
+                onOpenJira: { _ in },
                 onCopyURL: {},
                 showMyReviewStatus: true
             )
@@ -569,26 +576,25 @@ private enum PRHoverDetailPalette {
         dark: NSColor(calibratedWhite: 1.0, alpha: 0.08),
         light: NSColor(calibratedWhite: 0.0, alpha: 0.055)
     )
-    static let shadow = NSColor.black.withAlphaComponent(0.10)
+    static let shadow = NSColor(calibratedWhite: 0.0, alpha: 0.25)
 }
-
 private extension View {
     func prHoverDetail(
         _ pr: PullRequest,
+        onOpenJira: @escaping (String) -> Void,
         onUpdateBranchWithRebase: (() -> Void)?,
         onLoadHoverDetail: (() -> Void)?,
         isUpdatingBranch: Bool,
         isLoadingHoverDetail: Bool,
-        jiraServerURL: String,
         jiraMetadataEnabled: Bool
     ) -> some View {
         background(PRHoverDetailTrackingArea(
             pr: pr,
+            onOpenJira: onOpenJira,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             onLoadHoverDetail: onLoadHoverDetail,
             isUpdatingBranch: isUpdatingBranch,
             isLoadingHoverDetail: isLoadingHoverDetail,
-            jiraServerURL: jiraServerURL,
             jiraMetadataEnabled: jiraMetadataEnabled
         ))
     }
@@ -596,22 +602,22 @@ private extension View {
 
 private struct PRHoverDetailTrackingArea: NSViewRepresentable {
     let pr: PullRequest
+    let onOpenJira: (String) -> Void
     let onUpdateBranchWithRebase: (() -> Void)?
     let onLoadHoverDetail: (() -> Void)?
     let isUpdatingBranch: Bool
     let isLoadingHoverDetail: Bool
-    let jiraServerURL: String
     let jiraMetadataEnabled: Bool
 
     func makeNSView(context: Context) -> PRHoverDetailTrackingView {
         let view = PRHoverDetailTrackingView()
         view.updatePayload(
             pr: pr,
+            onOpenJira: onOpenJira,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             onLoadHoverDetail: onLoadHoverDetail,
             isUpdatingBranch: isUpdatingBranch,
             isLoadingHoverDetail: isLoadingHoverDetail,
-            jiraServerURL: jiraServerURL,
             jiraMetadataEnabled: jiraMetadataEnabled
         )
         return view
@@ -620,11 +626,11 @@ private struct PRHoverDetailTrackingArea: NSViewRepresentable {
     func updateNSView(_ nsView: PRHoverDetailTrackingView, context: Context) {
         nsView.updatePayload(
             pr: pr,
+            onOpenJira: onOpenJira,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             onLoadHoverDetail: onLoadHoverDetail,
             isUpdatingBranch: isUpdatingBranch,
             isLoadingHoverDetail: isLoadingHoverDetail,
-            jiraServerURL: jiraServerURL,
             jiraMetadataEnabled: jiraMetadataEnabled
         )
     }
@@ -632,11 +638,11 @@ private struct PRHoverDetailTrackingArea: NSViewRepresentable {
 
 private final class PRHoverDetailTrackingView: NSView {
     private var pr: PullRequest?
+    private var onOpenJira: ((String) -> Void)?
     private var onUpdateBranchWithRebase: (() -> Void)?
     private var onLoadHoverDetail: (() -> Void)?
     private var isUpdatingBranch = false
     private var isLoadingHoverDetail = false
-    private var jiraServerURL = ""
     private var jiraMetadataEnabled = false
 
     private var trackingArea: NSTrackingArea?
@@ -646,20 +652,20 @@ private final class PRHoverDetailTrackingView: NSView {
 
     func updatePayload(
         pr: PullRequest,
+        onOpenJira: @escaping (String) -> Void,
         onUpdateBranchWithRebase: (() -> Void)?,
         onLoadHoverDetail: (() -> Void)?,
         isUpdatingBranch: Bool,
         isLoadingHoverDetail: Bool,
-        jiraServerURL: String,
         jiraMetadataEnabled: Bool
     ) {
         let prChanged = self.pr?.id != pr.id
         self.pr = pr
+        self.onOpenJira = onOpenJira
         self.onUpdateBranchWithRebase = onUpdateBranchWithRebase
         self.onLoadHoverDetail = onLoadHoverDetail
         self.isUpdatingBranch = isUpdatingBranch
         self.isLoadingHoverDetail = isLoadingHoverDetail
-        self.jiraServerURL = jiraServerURL
         self.jiraMetadataEnabled = jiraMetadataEnabled
 
         if prChanged, isHovered {
@@ -734,10 +740,14 @@ private final class PRHoverDetailTrackingView: NSView {
             pr: pr,
             anchorView: self,
             ownerID: ownerID,
+            onOpenJira: { [weak self] issueKey in
+                guard let self else { return }
+                PRHoverDetailPanelController.shared.hide(ownerID: self.ownerID)
+                self.onOpenJira?(issueKey)
+            },
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             isUpdatingBranch: isUpdatingBranch,
             isLoadingHoverDetail: isLoadingHoverDetail,
-            jiraServerURL: jiraServerURL,
             jiraMetadataEnabled: jiraMetadataEnabled
         )
     }
@@ -773,7 +783,6 @@ private final class PRHoverDetailPanelController {
     private var hideTask: Task<Void, Never>?
     private var localMouseMonitor: Any?
     private var globalMouseMonitor: Any?
-
     func isVisible(for ownerID: ObjectIdentifier) -> Bool {
         visibleOwnerID == ownerID && panel?.isVisible == true
     }
@@ -782,10 +791,10 @@ private final class PRHoverDetailPanelController {
         pr: PullRequest,
         anchorView: NSView,
         ownerID: ObjectIdentifier,
+        onOpenJira: @escaping (String) -> Void,
         onUpdateBranchWithRebase: (() -> Void)?,
         isUpdatingBranch: Bool,
         isLoadingHoverDetail: Bool,
-        jiraServerURL: String,
         jiraMetadataEnabled: Bool
     ) {
         guard let placement = placement(for: anchorView, pr: pr) else { return }
@@ -802,10 +811,10 @@ private final class PRHoverDetailPanelController {
             side: placement.side,
             arrowY: placement.arrowY,
             size: placement.frame.size,
+            onOpenJira: onOpenJira,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             isUpdatingBranch: isUpdatingBranch,
             isLoadingHoverDetail: isLoadingHoverDetail,
-            jiraServerURL: jiraServerURL,
             jiraMetadataEnabled: jiraMetadataEnabled
         )
 
@@ -1086,10 +1095,10 @@ private struct PRHoverDetailPanelView: View {
     let side: PRHoverDetailSide
     let arrowY: CGFloat
     let size: CGSize
+    let onOpenJira: (String) -> Void
     let onUpdateBranchWithRebase: (() -> Void)?
     let isUpdatingBranch: Bool
     let isLoadingHoverDetail: Bool
-    let jiraServerURL: String
     let jiraMetadataEnabled: Bool
 
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
@@ -1127,10 +1136,10 @@ private struct PRHoverDetailPanelView: View {
     private var content: some View {
         PRHoverDetailInfoTable(
             pr: pr,
+            onOpenJira: onOpenJira,
             onUpdateBranchWithRebase: onUpdateBranchWithRebase,
             isUpdatingBranch: isUpdatingBranch,
             isLoadingHoverDetail: isLoadingHoverDetail,
-            jiraServerURL: jiraServerURL,
             jiraMetadataEnabled: jiraMetadataEnabled
         )
             .padding(.horizontal, 12)
@@ -1140,10 +1149,10 @@ private struct PRHoverDetailPanelView: View {
 
 private struct PRHoverDetailInfoTable: View {
     let pr: PullRequest
+    let onOpenJira: (String) -> Void
     let onUpdateBranchWithRebase: (() -> Void)?
     let isUpdatingBranch: Bool
     let isLoadingHoverDetail: Bool
-    let jiraServerURL: String
     let jiraMetadataEnabled: Bool
 
     var body: some View {
@@ -1330,10 +1339,6 @@ private struct PRHoverDetailInfoTable: View {
         pr.baseRefName?.isEmpty == false ? pr.baseRefName! : "unknown"
     }
 
-    private var jiraIssueURL: URL? {
-        JiraAPIClient.issueURL(serverURL: jiraServerURL, issueKey: pr.jiraTicket)
-    }
-
     private var jiraMetadataIsLoading: Bool {
         jiraMetadataEnabled && pr.jiraTicket != nil && pr.jiraMetadataFetchedAt == nil
     }
@@ -1346,42 +1351,34 @@ private struct PRHoverDetailInfoTable: View {
         max((pr.jiraLabels ?? []).count - visibleJiraLabels.count, 0)
     }
 
-    @ViewBuilder
     private var jiraTicketView: some View {
-        if let url = jiraIssueURL {
-            Button {
-                NSWorkspace.shared.open(url)
-            } label: {
-                PRHoverDetailChip(text: pr.jiraTicket ?? "", color: .blue)
+        Button {
+            if let ticket = pr.jiraTicket {
+                onOpenJira(ticket)
             }
-            .buttonStyle(.plain)
-            .help("Open Jira issue")
-        } else {
+        } label: {
             PRHoverDetailChip(text: pr.jiraTicket ?? "", color: .blue)
         }
+        .buttonStyle(.plain)
+        .help("Open Jira issue")
     }
 
-    @ViewBuilder
     private func jiraStatusView(_ statusName: String) -> some View {
         let presentation = jiraStatusPresentation
-        let content = PRHoverDetailChip(
-            text: statusName,
-            color: presentation.color,
-            icon: presentation.icon,
-            maxWidth: 112
-        )
-
-        if let url = jiraIssueURL {
-            Button {
-                NSWorkspace.shared.open(url)
-            } label: {
-                content
+        return Button {
+            if let ticket = pr.jiraTicket {
+                onOpenJira(ticket)
             }
-            .buttonStyle(.plain)
-            .help("Open Jira issue")
-        } else {
-            content
+        } label: {
+            PRHoverDetailChip(
+                text: statusName,
+                color: presentation.color,
+                icon: presentation.icon,
+                maxWidth: 112
+            )
         }
+        .buttonStyle(.plain)
+        .help("Open Jira issue")
     }
 
     private var jiraStatusPresentation: (icon: String, color: Color) {

@@ -152,6 +152,44 @@ enum PRSearchScope {
     }
 }
 
+enum JiraIssueOpenDecision: Equatable {
+    case open(URL)
+    case confirmSetup(issueKey: String)
+    case confirmReconnect(issueKey: String)
+
+    static func resolve(
+        state: JiraConnectionState,
+        serverURL: String,
+        issueKey: String
+    ) -> JiraIssueOpenDecision {
+        let key = issueKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch state {
+        case .unauthorized:
+            return .confirmReconnect(issueKey: key)
+        case .notConfigured:
+            return .confirmSetup(issueKey: key)
+        case .configured:
+            guard let url = JiraAPIClient.issueURL(serverURL: serverURL, issueKey: key),
+                  JiraAPIClient.isSupportedCloudServerURL(serverURL) else {
+                return .confirmSetup(issueKey: key)
+            }
+            return .open(url)
+        }
+    }
+}
+
+enum JiraPrompt: Identifiable, Equatable {
+    case setup(issueKey: String)
+    case reconnect(issueKey: String)
+
+    var id: String {
+        switch self {
+        case .setup(let key): return "setup-\(key)"
+        case .reconnect(let key): return "reconnect-\(key)"
+        }
+    }
+}
+
 @MainActor
 final class PRListViewModel: ObservableObject {
     @Published var prList: PRList = .empty
@@ -168,19 +206,28 @@ final class PRListViewModel: ObservableObject {
     @Published private(set) var openingPRIDs: Set<Int> = []
     @Published private(set) var updatingBranchPRIDs: Set<Int> = []
     @Published private(set) var loadingHoverDetailPRIDs: Set<Int> = []
-    @Published private(set) var isJiraConfigured: Bool = false
+    @Published private(set) var jiraConnectionState: JiraConnectionState = .notConfigured
+    @Published var jiraPrompt: JiraPrompt?
+    @Published private(set) var jiraCredentialRevision: Int = 0
 
     private let prManager: PRManager
     private let oauthManager: GitHubOAuthManager
     private let linkOpener: PRLinkOpening
+    private let jiraURLOpener: (URL) -> Void
     private var cancellables = Set<AnyCancellable>()
 
+    var isJiraConfigured: Bool { jiraConnectionState == .configured }
     var openSettings: (() -> Void)?
-
-    init(prManager: PRManager, oauthManager: GitHubOAuthManager, linkOpener: PRLinkOpening) {
+    init(
+        prManager: PRManager,
+        oauthManager: GitHubOAuthManager,
+        linkOpener: PRLinkOpening,
+        jiraURLOpener: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }
+    ) {
         self.prManager = prManager
         self.oauthManager = oauthManager
         self.linkOpener = linkOpener
+        self.jiraURLOpener = jiraURLOpener
 
         setupBindings()
     }
@@ -272,10 +319,10 @@ final class PRListViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
-        prManager.$isJiraConfigured
+        prManager.$jiraConnectionState
             .removeDuplicates()
-            .sink { [weak self] configured in
-                self?.isJiraConfigured = configured
+            .sink { [weak self] state in
+                self?.jiraConnectionState = state
             }
             .store(in: &cancellables)
     }
@@ -429,6 +476,24 @@ final class PRListViewModel: ObservableObject {
             apiToken: apiToken,
             refreshInterval: refreshInterval
         )
+        jiraCredentialRevision += 1
+    }
+
+
+    func openJiraIssue(_ issueKey: String) {
+        let decision = JiraIssueOpenDecision.resolve(
+            state: jiraConnectionState,
+            serverURL: prManager.configuration.jiraServerURL,
+            issueKey: issueKey
+        )
+        switch decision {
+        case .open(let url):
+            jiraURLOpener(url)
+        case .confirmSetup(let key):
+            jiraPrompt = .setup(issueKey: key)
+        case .confirmReconnect(let key):
+            jiraPrompt = .reconnect(issueKey: key)
+        }
     }
 
     // MARK: - Actions

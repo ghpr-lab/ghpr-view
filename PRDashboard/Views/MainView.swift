@@ -3,12 +3,12 @@ import SwiftUI
 struct MainView: View {
     @ObservedObject var viewModel: PRListViewModel
     @ObservedObject var onboardingManager: OnboardingManager
+    var presentationCoordinator: AppPresentationCoordinator? = nil
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
     @State private var footerTimelineAnchor = Date()
     @State private var firstVisibleReviewStatusPRID: Int?
     @State private var expandedSections: Set<PRSectionID> = Set(PRSectionID.allCases)
-    @AppStorage("PRDashboard.JiraSetupTipDismissed") private var jiraSetupTipDismissed: Bool = false
 
     private enum PRSectionID: Hashable, CaseIterable {
         case authored
@@ -79,6 +79,38 @@ struct MainView: View {
             syncOnboardingState()
         }
         .onPreferenceChange(FirstApprovalBadgeIDPreferenceKey.self) { firstVisibleApprovalPRID = $0 }
+        .alert(item: $viewModel.jiraPrompt) { prompt in
+            switch prompt {
+            case .setup(let key):
+                return Alert(
+                    title: Text("Jira is not connected"),
+                    message: Text("This PR references \(key), but Jira has not been configured."),
+                    primaryButton: .default(Text("Connect Jira")) {
+                        viewModel.jiraPrompt = nil
+                        presentationCoordinator?.present(
+                            .jiraSetup(JiraSetupContext(source: .jiraIssue(key: key)))
+                        )
+                    },
+                    secondaryButton: .cancel(Text("Not Now")) {
+                        viewModel.jiraPrompt = nil
+                    }
+                )
+            case .reconnect(let key):
+                return Alert(
+                    title: Text("Jira credentials are no longer valid."),
+                    message: Text("Please reconnect to continue accessing Jira."),
+                    primaryButton: .default(Text("Reconnect")) {
+                        viewModel.jiraPrompt = nil
+                        presentationCoordinator?.present(
+                            .jiraSetup(JiraSetupContext(source: .jiraIssue(key: key)))
+                        )
+                    },
+                    secondaryButton: .cancel(Text("Cancel")) {
+                        viewModel.jiraPrompt = nil
+                    }
+                )
+            }
+        }
         .onPreferenceChange(FirstReviewStatusBadgeIDPreferenceKey.self) { firstVisibleReviewStatusPRID = $0 }
     }
 
@@ -142,44 +174,6 @@ struct MainView: View {
         .padding(10)
     }
 
-    // MARK: - Tips
-
-    private var shouldShowJiraSetupTip: Bool {
-        !viewModel.isJiraConfigured && !jiraSetupTipDismissed && viewModel.hasAnyJiraTicket
-    }
-
-    private var jiraSetupTip: some View {
-        HStack(spacing: 4) {
-            Image(systemName: "lightbulb")
-                .font(.system(size: 10))
-                .foregroundColor(.yellow)
-            Button {
-                viewModel.showSettings()
-            } label: {
-                Text("Jira tickets detected — connect Jira in Settings for titles, status, and labels")
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            .buttonStyle(.plain)
-            .help("Open Settings to configure Jira")
-
-            Spacer(minLength: 0)
-
-            Button {
-                jiraSetupTipDismissed = true
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Dismiss tip")
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 6)
-    }
 
     // MARK: - PR List
 
@@ -198,9 +192,6 @@ struct MainView: View {
                     toReview: viewModel.summaryWaitingForMyReview
                 )
 
-                if shouldShowJiraSetupTip {
-                    jiraSetupTip
-                }
 
                 collapsibleSection(.authored, count: viewModel.authoredPRs.count, onboardingStep: .myPRs) {
                     // Pinned PRs at top
@@ -209,6 +200,7 @@ struct MainView: View {
                             PRRowView(
                                 pr: pr,
                                 onOpen: { viewModel.openPR(pr) },
+                                onOpenJira: { viewModel.openJiraIssue($0) },
                                 onCopyURL: { viewModel.copyURL(pr) },
                                 onMarkReviewCommentsRead: { viewModel.markReviewCommentsRead(pr) },
                                 onMarkReviewCommentsUnread: { viewModel.markReviewCommentsUnread(pr) },
@@ -221,8 +213,7 @@ struct MainView: View {
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                                 showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
-                                jiraServerURL: viewModel.configuration.jiraServerURL,
-                                jiraMetadataEnabled: viewModel.isJiraConfigured,
+                                jiraMetadataEnabled: viewModel.jiraConnectionState == .configured,
                                 searchText: viewModel.searchText,
                                 onboardingManager: onboardingManager,
                                 approvalOnboardingPRID: firstVisibleApprovalPRID,
@@ -244,6 +235,7 @@ struct MainView: View {
                             PRRowView(
                                 pr: pr,
                                 onOpen: { viewModel.openPR(pr) },
+                                onOpenJira: { viewModel.openJiraIssue($0) },
                                 onCopyURL: { viewModel.copyURL(pr) },
                                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
@@ -256,8 +248,7 @@ struct MainView: View {
                                 showCIStatus: true,
                                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                                 showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
-                                jiraServerURL: viewModel.configuration.jiraServerURL,
-                                jiraMetadataEnabled: viewModel.isJiraConfigured,
+                                jiraMetadataEnabled: viewModel.jiraConnectionState == .configured,
                                 searchText: viewModel.searchText,
                                 onboardingManager: onboardingManager,
                                 approvalOnboardingPRID: firstVisibleApprovalPRID,
@@ -387,6 +378,7 @@ struct MainView: View {
             PRRowView(
                 pr: pr,
                 onOpen: { viewModel.openPR(pr) },
+                onOpenJira: { viewModel.openJiraIssue($0) },
                 onCopyURL: { viewModel.copyURL(pr) },
                 onMarkReviewCommentsRead: showReviewCommentActions ? { viewModel.markReviewCommentsRead(pr) } : nil,
                 onMarkReviewCommentsUnread: showReviewCommentActions ? { viewModel.markReviewCommentsUnread(pr) } : nil,
@@ -402,8 +394,7 @@ struct MainView: View {
                 showConflictStatus: showConflictStatus,
                 showMyReviewStatus: viewModel.configuration.showMyReviewStatus,
                 showCmuxStatus: viewModel.configuration.openAtCmuxFirst,
-                jiraServerURL: viewModel.configuration.jiraServerURL,
-                jiraMetadataEnabled: viewModel.isJiraConfigured,
+                jiraMetadataEnabled: viewModel.jiraConnectionState == .configured,
                 searchText: viewModel.searchText,
                 onboardingManager: onboardingManager,
                 approvalOnboardingPRID: firstVisibleApprovalPRID,

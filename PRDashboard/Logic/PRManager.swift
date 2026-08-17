@@ -4,6 +4,12 @@ import Network
 import os
 
 private let logger = Logger(subsystem: "com.prdashboard", category: "PRManager")
+enum JiraConnectionState: Equatable {
+    case notConfigured
+    case configured
+    case unauthorized
+}
+
 
 enum PinnedMajorPREvent: Hashable {
     case ciFailure
@@ -241,12 +247,13 @@ final class PRManager: PRManagerType, ObservableObject {
     @Published private(set) var prList: PRList = .empty
     @Published private(set) var refreshState: RefreshState = .idle
     @Published private(set) var rateLimitInfo: RateLimitInfo = .empty
+    @Published private(set) var jiraConnectionState: JiraConnectionState = .notConfigured
     @Published var configuration: Configuration
-    @Published private(set) var pinnedPRIdentifiers: Set<String>
-    @Published private(set) var readReviewThreadIDs: Set<String>
+    @Published private(set) var pinnedPRIdentifiers: Set<String> = []
+    @Published private(set) var readReviewThreadIDs: Set<String> = []
     @Published private(set) var updatingBranchPRIDs: Set<Int> = []
     @Published private(set) var loadingHoverDetailPRIDs: Set<Int> = []
-    @Published private(set) var isJiraConfigured: Bool = false
+    // Jira health is represented by jiraConnectionState.
 
     enum RefreshState {
         case idle
@@ -333,15 +340,20 @@ final class PRManager: PRManagerType, ObservableObject {
         self.notificationManager = notificationManager
         self.oauthManager = oauthManager
         self.cmuxStatusProvider = cmuxStatusProvider
+        self.configuration = Self.loadConfiguration()
         apiClient.setUnauthorizedHandler { [weak oauthManager] rejectedToken in
             Task { @MainActor in
                 oauthManager?.handleRejectedToken(rejectedToken)
             }
         }
-        jiraClient.setUnauthorizedHandler { rejectedToken in
-            Keychain.invalidateJiraAPITokenCache(rejectedToken: rejectedToken)
+        jiraClient.setUnauthorizedHandler { [weak self] rejectedToken in
+            Task { @MainActor in
+                Keychain.invalidateJiraAPITokenCache(rejectedToken: rejectedToken)
+                guard let self,
+                      Keychain.loadJiraAPIToken() == rejectedToken else { return }
+                self.jiraConnectionState = .unauthorized
+            }
         }
-        self.configuration = Self.loadConfiguration()
         self.pinnedPRIdentifiers = Self.loadPinnedPRs()
         self.readReviewThreadIDs = Self.loadReadReviewThreadIDs()
         self.lastDirectMentionDiscoveryAt = Self.loadDate(
@@ -364,19 +376,25 @@ final class PRManager: PRManagerType, ObservableObject {
             password: Keychain.loadProxyPassword()
         )
 
-        self.isJiraConfigured = Self.computeJiraConfigured(
+        self.jiraConnectionState = Self.computeJiraConnectionState(
             config: self.configuration,
             tokenPresent: !Keychain.loadJiraAPIToken().isEmpty
         )
 
         setupBindings()
     }
-
-    private static func computeJiraConfigured(config: Configuration, tokenPresent: Bool) -> Bool {
-        !config.jiraServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            !config.jiraEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-            tokenPresent
+    private static func computeJiraConnectionState(
+        config: Configuration,
+        tokenPresent: Bool
+    ) -> JiraConnectionState {
+        guard tokenPresent,
+              !config.jiraEmail.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              JiraAPIClient.isSupportedCloudServerURL(config.jiraServerURL) else {
+            return .notConfigured
+        }
+        return .configured
     }
+
 
     deinit {
         activeRefreshTask?.cancel()
@@ -1399,17 +1417,16 @@ final class PRManager: PRManagerType, ObservableObject {
         )
         PRCache.shared.save(prList)
     }
-
     private func filterByConfiguration(_ prs: [PullRequest]) -> [PullRequest] {
         PullRequestFilter.apply(prs, configuration: configuration)
     }
-
     private func enrichJiraMetadata(
         openPRs: inout [PullRequest],
         mentionedPRs: inout [PullRequest],
         directMentionPRs: inout [PullRequest],
         mergedPRs: inout [PullRequest]
     ) async {
+        guard jiraConnectionState != .unauthorized else { return }
         var issueKeys: Set<String> = []
         for list in [openPRs, mentionedPRs, directMentionPRs, mergedPRs] {
             for pr in list {
@@ -1420,10 +1437,11 @@ final class PRManager: PRManagerType, ObservableObject {
         }
         guard !issueKeys.isEmpty else { return }
 
-        let serverURL = configuration.jiraServerURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let serverURL = JiraAPIClient.normalizedServerURL(configuration.jiraServerURL),
+              JiraAPIClient.isSupportedCloudServerURL(serverURL) else { return }
         let email = configuration.jiraEmail.trimmingCharacters(in: .whitespacesAndNewlines)
         let token = Keychain.loadJiraAPIToken()
-        guard !serverURL.isEmpty, !email.isEmpty, !token.isEmpty else { return }
+        guard !email.isEmpty, !token.isEmpty else { return }
 
         var metadata: [String: JiraIssueMetadata] = [:]
         do {
@@ -2080,15 +2098,22 @@ final class PRManager: PRManagerType, ObservableObject {
         apiToken: String,
         refreshInterval: TimeInterval
     ) {
+        let normalizedServerURL = JiraAPIClient.normalizedServerURL(serverURL) ?? serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedToken = apiToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tokenChanged = Keychain.loadJiraAPIToken() != trimmedToken
-        Keychain.saveJiraAPIToken(apiToken)
+        let previousToken = Keychain.loadJiraAPIToken()
+        let tokenChanged = previousToken != trimmedToken
+        let wasUnauthorized = jiraConnectionState == .unauthorized
+        Keychain.saveJiraAPIToken(trimmedToken)
 
         var newConfig = configuration
-        newConfig.jiraServerURL = serverURL
-        newConfig.jiraEmail = email
+        newConfig.jiraServerURL = normalizedServerURL
+        newConfig.jiraEmail = trimmedEmail
         newConfig.jiraRefreshInterval = refreshInterval
-        updateConfiguration(newConfig, jiraTokenChanged: tokenChanged)
+        updateConfiguration(
+            newConfig,
+            jiraTokenChanged: tokenChanged || wasUnauthorized
+        )
     }
 
     private func updateConfiguration(_ config: Configuration, jiraTokenChanged: Bool) {
@@ -2132,7 +2157,7 @@ final class PRManager: PRManagerType, ObservableObject {
             requestRefresh(trigger: .manual)
         }
 
-        isJiraConfigured = Self.computeJiraConfigured(
+        jiraConnectionState = Self.computeJiraConnectionState(
             config: config,
             tokenPresent: !Keychain.loadJiraAPIToken().isEmpty
         )
