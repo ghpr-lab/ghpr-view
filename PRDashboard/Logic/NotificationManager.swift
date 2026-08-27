@@ -1,31 +1,42 @@
 import Foundation
 import UserNotifications
 import AppKit
+import os
+
+private let notificationLogger = Logger(
+    subsystem: "com.prdashboard",
+    category: "NotificationManager"
+)
 
 final class NotificationManager: NSObject, ObservableObject {
     @Published private(set) var isAuthorized = false
     var openURL: (@MainActor (URL) -> Void)?
 
-    private let notificationCenter = UNUserNotificationCenter.current()
+    private let notificationCenter: UNUserNotificationCenter?
     private var mutedPRIds: Set<Int> = []
 
     private let mutedPRsKey = "muted_pr_ids"
     private var lastNotificationTime: [Int: Date] = [:]
     private let notificationThrottleInterval: TimeInterval = 600  // 10 minutes
 
-    override init() {
+    init(useSystemNotificationCenter: Bool = true) {
+        notificationCenter = useSystemNotificationCenter
+            ? UNUserNotificationCenter.current()
+            : nil
         super.init()
-        notificationCenter.delegate = self
+        notificationCenter?.delegate = self
         loadMutedPRs()
     }
 
     func requestPermission() {
-        notificationCenter.requestAuthorization(options: [.alert, .sound, .badge]) { [weak self] granted, error in
+        notificationCenter?.requestAuthorization(options: [.alert, .sound, .badge]) { [weak self] granted, error in
             DispatchQueue.main.async {
                 self?.isAuthorized = granted
             }
-            if let error = error {
-                print("Notification permission error: \(error.localizedDescription)")
+            if let error {
+                notificationLogger.error(
+                    "Notification permission failed: \(error.localizedDescription)"
+                )
             }
         }
     }
@@ -59,9 +70,11 @@ final class NotificationManager: NSObject, ObservableObject {
             trigger: nil
         )
 
-        notificationCenter.add(request) { error in
-            if let error = error {
-                print("Failed to schedule notification: \(error.localizedDescription)")
+        notificationCenter?.add(request) { error in
+            if let error {
+                notificationLogger.error(
+                    "Scheduling PR notification failed: \(error.localizedDescription)"
+                )
             }
         }
     }
@@ -100,9 +113,11 @@ final class NotificationManager: NSObject, ObservableObject {
             trigger: nil
         )
 
-        notificationCenter.add(request) { error in
-            if let error = error {
-                print("Failed to schedule CI notification: \(error.localizedDescription)")
+        notificationCenter?.add(request) { error in
+            if let error {
+                notificationLogger.error(
+                    "Scheduling CI notification failed: \(error.localizedDescription)"
+                )
             }
         }
     }
@@ -126,9 +141,11 @@ final class NotificationManager: NSObject, ObservableObject {
             trigger: nil
         )
 
-        notificationCenter.add(request) { error in
-            if let error = error {
-                print("Failed to schedule pinned PR notification: \(error.localizedDescription)")
+        notificationCenter?.add(request) { error in
+            if let error {
+                notificationLogger.error(
+                    "Scheduling pinned PR notification failed: \(error.localizedDescription)"
+                )
             }
         }
     }
@@ -179,7 +196,7 @@ final class NotificationManager: NSObject, ObservableObject {
             options: []
         )
 
-        notificationCenter.setNotificationCategories([category])
+        notificationCenter?.setNotificationCategories([category])
     }
 }
 

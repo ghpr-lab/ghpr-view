@@ -684,7 +684,7 @@ server.tool(
     repository: z
       .string()
       .optional()
-      .describe("Case-insensitive substring of OWNER/NAME, e.g. 'kong/kong' or just 'kong'."),
+      .describe("Case-insensitive substring of OWNER/NAME, e.g. 'example-org/example-repo' or just 'example-org'."),
     section: z
       .enum(["authored", "review", "mentioned", "merged", "all"])
       .optional()
@@ -719,7 +719,7 @@ server.tool(
   "get_pr",
   "Fetch details for a single PR by repository and number. Falls back to `gh pr view` if the PR is not available from PRDashboard's local snapshot.",
   {
-    repository: z.string().describe("OWNER/NAME, e.g. 'kong/kong'."),
+    repository: z.string().describe("OWNER/NAME, e.g. 'example-org/example-repo'."),
     number: z.number().int().positive().describe("PR number."),
   },
   async ({ repository, number }) => {

@@ -25,7 +25,7 @@ All read-only.
 | `snapshot`        | Raw snapshot JSON (escape hatch).                                           |
 
 `repository` is matched as a case-insensitive substring of `OWNER/NAME`, so
-`"kong"` and `"Kong/kong"` both work.
+`"example-org"` and `"example-org/example-repo"` both work.
 
 ## Prerequisites
 

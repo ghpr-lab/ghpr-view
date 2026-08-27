@@ -267,6 +267,15 @@ struct LocalPRSnapshot: Codable, Equatable {
     let changesRequestedCount: Int?
     let myReviewStatus: String?
     let jiraTicket: String?
+    let ciWorkflows: [LocalCIWorkflowSnapshot]?
     let updatedAt: Date
     let mergedAt: Date?
+}
+
+struct LocalCIWorkflowSnapshot: Codable, Equatable {
+    let name: String
+    let isWorkflow: Bool
+    let successCount: Int
+    let failureCount: Int
+    let pendingCount: Int
 }

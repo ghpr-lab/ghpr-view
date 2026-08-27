@@ -44,3 +44,4 @@ fastlane/test_output
 
 # Generated files
 GitVersion.generated.swift
+browser/node_modules/
