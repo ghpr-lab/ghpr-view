@@ -72,6 +72,7 @@
 		E1000006 /* BrowserBridgeServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000006 /* BrowserBridgeServer.swift */; };
 		E1000007 /* ExtensionPlatformController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000007 /* ExtensionPlatformController.swift */; };
 		E1000008 /* BrowserIntegrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000008 /* BrowserIntegrationView.swift */; };
+		E1000009 /* CILogFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000009 /* CILogFetcher.swift */; };
 		E1100001 /* BrowserBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2100001 /* BrowserBridgeTests.swift */; };
 		F1000001 /* BrowserIntegrationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000001 /* BrowserIntegrationUITests.swift */; };
 		F1000002 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000006 /* XCTest.framework */; };
@@ -163,6 +164,7 @@
 		E2000006 /* BrowserBridgeServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBridgeServer.swift; sourceTree = "<group>"; };
 		E2000007 /* ExtensionPlatformController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionPlatformController.swift; sourceTree = "<group>"; };
 		E2000008 /* BrowserIntegrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserIntegrationView.swift; sourceTree = "<group>"; };
+		E2000009 /* CILogFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CILogFetcher.swift; sourceTree = "<group>"; };
 		E2100001 /* BrowserBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBridgeTests.swift; sourceTree = "<group>"; };
 		F2000001 /* BrowserIntegrationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserIntegrationUITests.swift; sourceTree = "<group>"; };
 		F3000001 /* PRDashboardUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PRDashboardUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -399,6 +401,7 @@
 				E2000005 /* BrowserBridgeRouter.swift */,
 				E2000006 /* BrowserBridgeServer.swift */,
 				E2000007 /* ExtensionPlatformController.swift */,
+				E2000009 /* CILogFetcher.swift */,
 			);
 			path = ExtensionPlatform;
 			sourceTree = "<group>";
@@ -652,6 +655,7 @@
 				E1000006 /* BrowserBridgeServer.swift in Sources */,
 				E1000007 /* ExtensionPlatformController.swift in Sources */,
 				E1000008 /* BrowserIntegrationView.swift in Sources */,
+				E1000009 /* CILogFetcher.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
