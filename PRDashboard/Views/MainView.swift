@@ -1,14 +1,17 @@
+import AppKit
 import SwiftUI
 
 struct MainView: View {
     @ObservedObject var viewModel: PRListViewModel
     @ObservedObject var onboardingManager: OnboardingManager
     var presentationCoordinator: AppPresentationCoordinator? = nil
+    @ObservedObject var extensionPlatformController: ExtensionPlatformController
     @StateObject private var tooltipPresenter = HoverTooltipPresenter()
     @State private var firstVisibleApprovalPRID: Int?
     @State private var footerTimelineAnchor = Date()
     @State private var firstVisibleReviewStatusPRID: Int?
     @State private var expandedSections: Set<PRSectionID> = Set(PRSectionID.allCases)
+    @State private var extensionActionError: String?
 
     private enum PRSectionID: Hashable, CaseIterable {
         case authored
@@ -57,6 +60,27 @@ struct MainView: View {
                 } else {
                     // PR list
                     prListView
+                }
+
+                if let extensionActionError {
+                    HStack(spacing: 7) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text(extensionActionError)
+                            .font(.caption)
+                            .lineLimit(2)
+                        Spacer(minLength: 4)
+                        Button {
+                            self.extensionActionError = nil
+                        } label: {
+                            Image(systemName: "xmark")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Dismiss Skill error")
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.1))
                 }
 
                 Divider()
@@ -207,6 +231,15 @@ struct MainView: View {
                                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
+                                onAnalyzeCIFailure: { runExtensionSkill("ci.failure.classify_flaky", for: pr) },
+                                onViewCIAnalysis: { openLatestAnalysis(for: pr) },
+                                onRunSkill: { runExtensionSkill($0, for: pr) },
+                                onInstallBrowserUserscript: browserUserscriptInstallAction,
+                                onOpenBrowserIntegrationSettings: browserIntegrationSettingsAction,
+                                runnableSkills: extensionPlatformController.runnableSkills(forFailedCI: pr.checkFailureCount > 0),
+                                extensionRun: extensionPlatformController.activeRun(repository: pr.repoFullName, number: pr.number),
+                                extensionAnalysis: extensionPlatformController.latestAnalysis(repository: pr.repoFullName, number: pr.number),
+                                extensionTags: extensionPlatformController.tags(repository: pr.repoFullName, number: pr.number),
                                 isPinned: true,
                                 isOpening: viewModel.isOpeningPR(pr),
                                 isUpdatingBranch: viewModel.isUpdatingBranch(pr),
@@ -241,6 +274,15 @@ struct MainView: View {
                                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                                 onLoadHoverDetail: { viewModel.loadHoverDetailIfNeeded(pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
+                                onAnalyzeCIFailure: { runExtensionSkill("ci.failure.classify_flaky", for: pr) },
+                                onViewCIAnalysis: { openLatestAnalysis(for: pr) },
+                                onRunSkill: { runExtensionSkill($0, for: pr) },
+                                onInstallBrowserUserscript: browserUserscriptInstallAction,
+                                onOpenBrowserIntegrationSettings: browserIntegrationSettingsAction,
+                                runnableSkills: extensionPlatformController.runnableSkills(forFailedCI: pr.checkFailureCount > 0),
+                                extensionRun: extensionPlatformController.activeRun(repository: pr.repoFullName, number: pr.number),
+                                extensionAnalysis: extensionPlatformController.latestAnalysis(repository: pr.repoFullName, number: pr.number),
+                                extensionTags: extensionPlatformController.tags(repository: pr.repoFullName, number: pr.number),
                                 isPinned: true,
                                 isOpening: viewModel.isOpeningPR(pr),
                                 isUpdatingBranch: viewModel.isUpdatingBranch(pr),
@@ -386,6 +428,15 @@ struct MainView: View {
                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                 onLoadHoverDetail: { viewModel.loadHoverDetailIfNeeded(pr) },
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
+                onAnalyzeCIFailure: { runExtensionSkill("ci.failure.classify_flaky", for: pr) },
+                onViewCIAnalysis: { openLatestAnalysis(for: pr) },
+                onRunSkill: { runExtensionSkill($0, for: pr) },
+                onInstallBrowserUserscript: browserUserscriptInstallAction,
+                onOpenBrowserIntegrationSettings: browserIntegrationSettingsAction,
+                runnableSkills: extensionPlatformController.runnableSkills(forFailedCI: pr.checkFailureCount > 0),
+                extensionRun: extensionPlatformController.activeRun(repository: pr.repoFullName, number: pr.number),
+                extensionAnalysis: extensionPlatformController.latestAnalysis(repository: pr.repoFullName, number: pr.number),
+                extensionTags: extensionPlatformController.tags(repository: pr.repoFullName, number: pr.number),
                 isPinned: showPin && viewModel.isPinned(pr),
                 isOpening: viewModel.isOpeningPR(pr),
                 isUpdatingBranch: viewModel.isUpdatingBranch(pr),
@@ -401,6 +452,51 @@ struct MainView: View {
                 reviewStatusOnboardingPRID: firstVisibleReviewStatusPRID
             )
         }
+    }
+
+    private var browserUserscriptInstallAction: (() -> Void)? {
+        guard extensionPlatformController.officialUserscriptClient == nil,
+              let url = extensionPlatformController.installUserscriptURL() else {
+            return nil
+        }
+        return {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    private var browserIntegrationSettingsAction: (() -> Void)? {
+        guard extensionPlatformController.officialUserscriptClient == nil,
+              extensionPlatformController.installUserscriptURL() == nil,
+              let presentationCoordinator else {
+            return nil
+        }
+        return {
+            presentationCoordinator.present(.settings)
+        }
+    }
+
+    private func runExtensionSkill(_ id: String, for pr: PullRequest) {
+        do {
+            try extensionPlatformController.runSkill(
+                id: id,
+                repository: pr.repoFullName,
+                number: pr.number
+            )
+            extensionActionError = nil
+        } catch {
+            extensionActionError = error.localizedDescription
+        }
+    }
+
+    private func openLatestAnalysis(for pr: PullRequest) {
+        guard let url = extensionPlatformController.latestAnalysisURL(
+            repository: pr.repoFullName,
+            number: pr.number
+        ) else {
+            extensionActionError = "No CI analysis is available for this pull request."
+            return
+        }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - States

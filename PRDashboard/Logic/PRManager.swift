@@ -333,7 +333,8 @@ final class PRManager: PRManagerType, ObservableObject {
         jiraClient: JiraAPIClient = JiraAPIClient(),
         notificationManager: NotificationManager,
         oauthManager: GitHubOAuthManager,
-        cmuxStatusProvider: CmuxPRStatusProviding? = nil
+        cmuxStatusProvider: CmuxPRStatusProviding? = nil,
+        loadKeychainSecrets: Bool = true
     ) {
         self.apiClient = apiClient
         self.jiraClient = jiraClient
@@ -373,12 +374,12 @@ final class PRManager: PRManagerType, ObservableObject {
         apiClient.updateProxy(
             urlString: self.configuration.httpProxyURL,
             username: self.configuration.httpProxyUsername,
-            password: Keychain.loadProxyPassword()
+            password: loadKeychainSecrets ? Keychain.loadProxyPassword() : ""
         )
 
         self.jiraConnectionState = Self.computeJiraConnectionState(
             config: self.configuration,
-            tokenPresent: !Keychain.loadJiraAPIToken().isEmpty
+            tokenPresent: loadKeychainSecrets && !Keychain.loadJiraAPIToken().isEmpty
         )
 
         setupBindings()

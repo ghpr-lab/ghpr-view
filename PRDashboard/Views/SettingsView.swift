@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var viewModel: PRListViewModel
     @ObservedObject var onboardingManager: OnboardingManager
     @ObservedObject var updateManager: UpdateManager
+    @ObservedObject var extensionPlatformController: ExtensionPlatformController
     var presentationCoordinator: AppPresentationCoordinator? = nil
     @Environment(\.dismiss) private var dismiss
 
@@ -270,6 +271,18 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
+                Section("Browser Integration") {
+                    BrowserIntegrationView(controller: extensionPlatformController)
+                }
+
+                Section("Skill Builder") {
+                    SkillBuilderSettingsView(controller: extensionPlatformController)
+                }
+
+                Section("Coding Agent Runtime") {
+                    AgentRuntimeSettingsView(controller: extensionPlatformController)
+                }
+
                 Section("Power & Network") {
                     Toggle("Pause background refresh in Low Power Mode", isOn: $pausePollingInLowPowerMode)
                     Toggle("Pause background refresh on cellular/hotspot", isOn: $pausePollingOnExpensiveNetwork)
@@ -436,7 +449,7 @@ struct SettingsView: View {
             }
             .padding()
         }
-        .frame(width: 450, height: 620)
+        .frame(width: 520, height: 720)
         .onAppear {
             loadCurrentSettings()
         }

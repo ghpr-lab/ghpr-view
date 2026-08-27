@@ -30,6 +30,15 @@ struct PRRowView: View {
     var onUpdateBranchWithRebase: (() -> Void)?
     var onLoadHoverDetail: (() -> Void)?
     var onTogglePin: (() -> Void)?
+    var onAnalyzeCIFailure: (() -> Void)?
+    var onViewCIAnalysis: (() -> Void)?
+    var onRunSkill: ((String) -> Void)?
+    var onInstallBrowserUserscript: (() -> Void)?
+    var onOpenBrowserIntegrationSettings: (() -> Void)?
+    var runnableSkills: [SkillDefinition] = []
+    var extensionRun: SkillRun?
+    var extensionAnalysis: CIAnalysis?
+    var extensionTags: Set<PRTag> = []
     var isPinned: Bool = false
     var isOpening: Bool = false
     var isUpdatingBranch: Bool = false
@@ -205,6 +214,32 @@ struct PRRowView: View {
                     }
 
                     Spacer()
+                    if let extensionRun {
+                        Label(
+                            extensionRun.progressMessage ?? extensionRun.status.displayName,
+                            systemImage: "waveform.path.ecg"
+                        )
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(Color(red: 0.49, green: 0.23, blue: 0.88))
+                        .lineLimit(1)
+                        .help("\(extensionRun.skillID) · \(extensionRun.status.displayName)")
+                    } else if let extensionAnalysis {
+                        Label(
+                            extensionAnalysis.verdict.displayName,
+                            systemImage: "sparkles"
+                        )
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(extensionAnalysisColor)
+                        .lineLimit(1)
+                        .help(extensionAnalysis.summary)
+                    }
+
+                    if !extensionTags.isEmpty {
+                        Image(systemName: "tag.fill")
+                            .font(.system(size: 9))
+                            .foregroundColor(.orange)
+                            .help(extensionTags.map(\.displayName).sorted().joined(separator: ", "))
+                    }
 
                     if isOpening {
                         ProgressView()
@@ -257,6 +292,7 @@ struct PRRowView: View {
         .background(isHovered ? Color.primary.opacity(0.05) : Color.clear)
         .cornerRadius(6)
         .contentShape(Rectangle())
+        .accessibilityIdentifier("pr-row-\(pr.id)")
         .onHover { hovering in
             if !menuTracker.isTracking {
                 isHovered = hovering
@@ -278,6 +314,27 @@ struct PRRowView: View {
             .disabled(isOpening)
             Button("Copy URL") {
                 onCopyURL()
+            }
+            if let onInstallBrowserUserscript {
+                Divider()
+                Button {
+                    onInstallBrowserUserscript()
+                } label: {
+                    Label(
+                        "Install Tampermonkey Userscript in Browser…",
+                        systemImage: "arrow.up.right.square"
+                    )
+                }
+            } else if let onOpenBrowserIntegrationSettings {
+                Divider()
+                Button {
+                    onOpenBrowserIntegrationSettings()
+                } label: {
+                    Label(
+                        "Open Browser Integration Settings…",
+                        systemImage: "puzzlepiece.extension"
+                    )
+                }
             }
             let canMarkRead = pr.unreadUnresolvedCount > 0 && onMarkReviewCommentsRead != nil
             let canMarkUnread = pr.readUnresolvedCount > 0 && onMarkReviewCommentsUnread != nil
@@ -309,14 +366,58 @@ struct PRRowView: View {
                     )
                 }
             }
-            if pr.category == .authored && pr.checkFailureCount > 0 {
+            if pr.checkFailureCount > 0 ||
+                extensionAnalysis != nil ||
+                (onRunSkill != nil && !runnableSkills.isEmpty) {
                 Divider()
-                Button {
-                    DispatchQueue.main.async { onRerunFailedCI?() }
-                } label: {
-                    Label("Rerun Failed CI", systemImage: "arrow.clockwise")
+            }
+            if pr.checkFailureCount > 0 || extensionAnalysis != nil {
+                if pr.checkFailureCount > 0, let onAnalyzeCIFailure {
+                    Button {
+                        onAnalyzeCIFailure()
+                    } label: {
+                        Label("Analyze CI Failure", systemImage: "sparkles")
+                    }
+                }
+                if extensionAnalysis != nil, let onViewCIAnalysis {
+                    Button {
+                        onViewCIAnalysis()
+                    } label: {
+                        Label("View CI Analysis", systemImage: "waveform.path.ecg")
+                    }
+                }
+                if pr.category == .authored, let onRerunFailedCI {
+                    Button {
+                        onRerunFailedCI()
+                    } label: {
+                        Label("Rerun Failed CI", systemImage: "arrow.clockwise")
+                    }
                 }
             }
+            if let onRunSkill, !runnableSkills.isEmpty {
+                Menu {
+                    ForEach(runnableSkills) { skill in
+                        Button(skill.displayName) {
+                            onRunSkill(skill.id)
+                        }
+                    }
+                } label: {
+                    Label("Run Skill", systemImage: "play.circle")
+                }
+            }
+        }
+    }
+
+    private var extensionAnalysisColor: Color {
+        switch extensionAnalysis?.verdict {
+        case .likelyFlaky:
+            return .orange
+        case .likelyRelated:
+            return .red
+        case .needsInvestigation:
+            return Color(red: 0.49, green: 0.23, blue: 0.88)
+        case nil:
+            return .secondary
         }
     }
 

@@ -151,7 +151,7 @@ schemaVersion = 1
 请求：
 
 ```json
-{ "command": "pr", "repository": "kong/kong", "number": 1234 }
+{ "command": "pr", "repository": "example-org/example-repo", "number": 1234 }
 ```
 
 成功响应：
@@ -174,7 +174,7 @@ schemaVersion = 1
   "ok": false,
   "snapshot": null,
   "pullRequest": null,
-  "error": { "code": "not_found", "message": "No PR found for kong/kong#1234." }
+  "error": { "code": "not_found", "message": "No PR found for example-org/example-repo#1234." }
 }
 ```
 
@@ -296,7 +296,7 @@ SOCKET="/tmp/com.xiaocang.PRDashboard.$(id -u).sock"
 
 printf '{"command":"ping"}\n' | socat - UNIX-CONNECT:$SOCKET
 printf '{"command":"snapshot"}\n' | socat - UNIX-CONNECT:$SOCKET | jq .
-printf '{"command":"pr","repository":"kong/kong","number":1234}\n' \
+printf '{"command":"pr","repository":"example-org/example-repo","number":1234}\n' \
   | socat - UNIX-CONNECT:$SOCKET | jq .
 ```
 
@@ -326,7 +326,7 @@ def call(req):
 
 print(call({"command": "ping"}))
 print(call({"command": "snapshot"})["snapshot"]["summary"])
-print(call({"command": "pr", "repository": "kong/kong", "number": 1234}))
+print(call({"command": "pr", "repository": "example-org/example-repo", "number": 1234}))
 ```
 
 ### 7.3 Node.js

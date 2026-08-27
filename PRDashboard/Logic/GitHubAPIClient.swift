@@ -4522,7 +4522,7 @@ final class GitHubAPIClient: ObservableObject {
 
     /// Mentioned PRs are parsed from a single 20-context search page and — unlike
     /// the authored/review detail batch — never paginate, so a PR with many checks
-    /// (e.g. a kong-ee backport with 90+ contexts) can miss failures that sit past
+    /// (e.g. a large backport with 90+ contexts) can miss failures that sit past
     /// the first page and get stuck showing success/pending. When the rollup reports
     /// more pages, fetch the remainder and re-derive CI from the full set, mirroring
     /// the detail/hover path. Pagination only fires for FAILURE/PENDING/SUCCESS
