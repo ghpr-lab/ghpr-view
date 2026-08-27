@@ -48,6 +48,7 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
     let target: Target
     let pullRequest: PullRequest?
     let ciStatus: CIStatus?
+    let failedJobLogs: FailedJobLogs?
     let generatedAt: Date
 
     static func make(
@@ -55,6 +56,7 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
         requestedSections requested: [String],
         page: GitHubPageContext,
         pullRequest snapshot: LocalPRSnapshot?,
+        failedJobLogs: FailedJobLogs? = nil,
         now: Date = Date()
     ) -> AgentSkillInvocationContext {
         let requestedSet = Set(requested)
@@ -62,6 +64,8 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
             switch section {
             case "pr_metadata", "ci_status":
                 return snapshot == nil
+            case "failed_job_logs":
+                return failedJobLogs == nil
             default:
                 return true
             }
@@ -115,6 +119,7 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
             ),
             pullRequest: pullRequest,
             ciStatus: ciStatus,
+            failedJobLogs: requestedSet.contains("failed_job_logs") ? failedJobLogs : nil,
             generatedAt: now
         )
     }
@@ -235,6 +240,10 @@ final class SkillRuntime: ObservableObject {
         ProgressReporter
     ) async throws -> SkillResult
 
+    /// Fetches the failed CI job log for (repository, prNumber) via the gh CLI,
+    /// mirroring the kong-ci-log skill's fetch-ci-log.sh resolution logic.
+    typealias CILogFetchHandler = @Sendable (String, Int) async throws -> FailedJobLogs
+
     static let classifyFlakySkillID = "ci.failure.classify_flaky"
     static let explainFailureSkillID = "ci.failure.explain"
 
@@ -244,6 +253,7 @@ final class SkillRuntime: ObservableObject {
     private let installedSkillsRootURL: URL
     private let bundledSkillsRootURL: URL?
     private let agentRunner: AgentRunner
+    private let ciLogFetch: CILogFetchHandler
     private var tasks: [String: Task<Void, Never>] = [:]
 
     init(
@@ -251,7 +261,8 @@ final class SkillRuntime: ObservableObject {
         installedSkillsRootURL: URL = SkillPackageManager.defaultInstalledSkillsURL(),
         bundledSkillsRootURL: URL? = nil,
         agentRunner: AgentRunner? = nil,
-        agentExecutableURLs: [SkillAgent: URL] = [:]
+        agentExecutableURLs: [SkillAgent: URL] = [:],
+        ciLogFetch: CILogFetchHandler? = nil
     ) {
         self.store = store
         self.installedSkillsRootURL = installedSkillsRootURL
@@ -266,6 +277,12 @@ final class SkillRuntime: ObservableObject {
                     progress: progress
                 )
             }
+        }
+        self.ciLogFetch = ciLogFetch ?? { repository, prNumber in
+            try await CILogFetcher.fetchFailedJobLogs(
+                repository: repository,
+                prNumber: prNumber
+            )
         }
     }
 
@@ -440,11 +457,12 @@ final class SkillRuntime: ObservableObject {
             try Task.checkCancellation()
             let result: SkillResult
             switch run.skillID {
-            case Self.classifyFlakySkillID:
-                let request = try Self.builtInRequest(
+            case Self.classifyFlakySkillID, Self.explainFailureSkillID:
+                let request = try await Self.builtInRequest(
                     skillID: run.skillID,
                     page: run.page,
-                    pullRequest: pullRequest
+                    pullRequest: pullRequest,
+                    ciLogFetch: ciLogFetch
                 )
                 let rawResult = try await runAgent(request, runID: runID)
                 result = try Self.analysisResult(
@@ -452,21 +470,8 @@ final class SkillRuntime: ObservableObject {
                     page: run.page,
                     pullRequest: pullRequest,
                     agent: request.agent,
-                    startedAt: startedAt
-                )
-            case Self.explainFailureSkillID:
-                let request = try Self.builtInRequest(
-                    skillID: run.skillID,
-                    page: run.page,
-                    pullRequest: pullRequest
-                )
-                let rawResult = try await runAgent(request, runID: runID)
-                result = try Self.analysisResult(
-                    from: rawResult,
-                    page: run.page,
-                    pullRequest: pullRequest,
-                    agent: request.agent,
-                    startedAt: startedAt
+                    startedAt: startedAt,
+                    preferredJobName: request.context.failedJobLogs?.workflowName
                 )
             default:
                 guard let package = installedPackage(id: run.skillID) else {
@@ -507,16 +512,23 @@ final class SkillRuntime: ObservableObject {
         } catch {
             if var failed = store.run(id: runID), !failed.status.isTerminal {
                 failed.status = .failed
-                failed.progressMessage = LogEvent.failed.message
                 failed.completedAt = Date()
-                failed.error = LogEvent.failed.message
-                Self.recordLogEvent(.failed, to: &failed)
+                let message = Self.boundedErrorMessage(error)
+                failed.progressMessage = message
+                failed.error = message
+                Self.recordLogEvent(.failed, message: message, to: &failed)
                 store.save(run: failed)
             }
-            skillRuntimeLogger.error("Skill run failed")
+            skillRuntimeLogger.error("Skill run \(runID) failed: \(error.localizedDescription)")
         }
         tasks.removeValue(forKey: runID)
         activeRunIDs.remove(runID)
+    }
+
+    private static func boundedErrorMessage(_ error: Error) -> String {
+        let message = error.localizedDescription
+        guard message.count > maximumLogMessageLength else { return message }
+        return String(message.prefix(maximumLogMessageLength - 1)) + "…"
     }
 
     private func runAgent(
@@ -550,23 +562,32 @@ final class SkillRuntime: ObservableObject {
         at timestamp: Date = Date(),
         to run: inout SkillRun
     ) {
-        let normalized = event.message
+        recordLogEvent(event, message: event.message, at: timestamp, to: &run)
+    }
+
+    static func recordLogEvent(
+        _ event: LogEvent,
+        message: String,
+        at timestamp: Date = Date(),
+        to run: inout SkillRun
+    ) {
+        let normalized = message
             .components(separatedBy: .newlines)
             .joined(separator: " ")
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
-        let message: String
+        let bounded: String
         if normalized.count > maximumLogMessageLength {
-            message = "\(normalized.prefix(maximumLogMessageLength - 1))…"
+            bounded = "\(normalized.prefix(maximumLogMessageLength - 1))…"
         } else {
-            message = normalized
+            bounded = normalized
         }
         if run.logEntries == nil {
             run.logEntries = []
         }
         if let last = run.logEntries?.last,
            last.kind == event.kind,
-           last.message == message {
+           last.message == bounded {
             return
         }
         let overflow = (run.logEntries?.count ?? 0) - maximumLogEntries + 1
@@ -574,7 +595,7 @@ final class SkillRuntime: ObservableObject {
             run.logEntries?.removeFirst(overflow)
         }
         run.logEntries?.append(
-            SkillRunLogEntry(timestamp: timestamp, kind: event.kind, message: message)
+            SkillRunLogEntry(timestamp: timestamp, kind: event.kind, message: bounded)
         )
     }
 
@@ -602,9 +623,10 @@ final class SkillRuntime: ObservableObject {
     private static func builtInRequest(
         skillID: String,
         page: GitHubPageContext,
-        pullRequest: LocalPRSnapshot?
-    ) throws -> AgentExecutionRequest {
-        guard let pullRequest, page.prNumber != nil else {
+        pullRequest: LocalPRSnapshot?,
+        ciLogFetch: CILogFetchHandler
+    ) async throws -> AgentExecutionRequest {
+        guard let pullRequest, let prNumber = page.prNumber else {
             throw RuntimeError.missingPullRequest
         }
         let failedWorkflows = pullRequest.ciWorkflows?.filter {
@@ -620,26 +642,42 @@ final class SkillRuntime: ObservableObject {
             displayName = "Classify Flaky"
             instructions = """
             Classify the failed CI evidence for this pull request.
-            Use only the supplied ghpr context. Do not claim that a job was rerun or that logs,
-            changed files, or history were inspected when those sections are unavailable.
-            Return a conservative status, concise summary, explicit evidence, and one next action.
+            ghpr_context.failed_job_logs contains the most recent failed job log, fetched \
+            with the gh CLI (ANSI codes removed). If truncated or captured_overflow is \
+            true, the log was too large and only a window around the first failure-like \
+            line is included (or the tail when none matched), marked with elision \
+            markers — say so and avoid conclusions that need the omitted part. Read the \
+            window top-to-bottom: the first error is the root cause; later errors are \
+            usually downstream cascades. Use only the supplied ghpr context. Do not \
+            claim that changed files or rerun history were inspected when those sections \
+            are unavailable. Return a conservative status, concise summary, explicit \
+            evidence, and one next action.
             """
         case explainFailureSkillID:
             displayName = "Explain CI Failure"
             instructions = """
             Explain the failed CI evidence for this pull request.
-            Use only the supplied ghpr context. Distinguish observed facts from missing evidence.
-            Do not claim that a job was rerun or that raw logs were inspected when unavailable.
-            Return status needs_investigation, a concise summary, evidence, and one next action.
+            ghpr_context.failed_job_logs contains the most recent failed job log, fetched \
+            with the gh CLI (ANSI codes removed). If truncated or captured_overflow is \
+            true, the log was too large and only a window around the first failure-like \
+            line is included (or the tail when none matched), marked with elision \
+            markers — say so. Identify the first failing step, the failing spec path or \
+            error line, and distinguish observed facts from inferred causes. Use only the \
+            supplied ghpr context. Do not claim that changed files or rerun history were \
+            inspected when those sections are unavailable. Return status \
+            needs_investigation unless the log clearly attributes the failure to a \
+            specific cause, a concise summary, evidence, and one next action.
             """
         default:
             throw RuntimeError.unknownSkill(skillID)
         }
+        let failedJobLogs = try await ciLogFetch(page.repository, prNumber)
         let context = AgentSkillInvocationContext.make(
             skillID: skillID,
             requestedSections: ["pr_metadata", "ci_status", "failed_job_logs"],
             page: page,
-            pullRequest: pullRequest
+            pullRequest: pullRequest,
+            failedJobLogs: failedJobLogs
         )
         return AgentExecutionRequest(
             skillID: skillID,
@@ -678,12 +716,15 @@ final class SkillRuntime: ObservableObject {
         page: GitHubPageContext,
         pullRequest: LocalPRSnapshot?,
         agent: SkillAgent,
-        startedAt: Date
+        startedAt: Date,
+        preferredJobName: String? = nil
     ) throws -> SkillResult {
         guard let pullRequest, let prNumber = page.prNumber else {
             throw RuntimeError.missingPullRequest
         }
-        let failed = pullRequest.ciWorkflows?
+        let failed = preferredJobName.flatMap { name in
+            name.isEmpty ? nil : [name]
+        } ?? pullRequest.ciWorkflows?
             .filter { $0.failureCount > 0 }
             .map(\.name) ?? []
         let status = result.payload?.objectString(for: "status")

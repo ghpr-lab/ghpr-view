@@ -215,8 +215,11 @@ final class BrowserBridgeTests: XCTestCase {
             failed.logEntries?.dropFirst().first?.message,
             "Preparing strict context"
         )
-        XCTAssertEqual(failed.logEntries?.last?.message, "Skill execution failed")
-        XCTAssertEqual(failed.error, "Skill execution failed")
+        XCTAssertEqual(
+            failed.logEntries?.last?.message,
+            "The PR is not available in the current ghpr snapshot."
+        )
+        XCTAssertEqual(failed.error, "The PR is not available in the current ghpr snapshot.")
     }
 
     func testSkillRunLogContractUsesFixedBoundedDeduplicatedEvents() throws {
@@ -1708,7 +1711,7 @@ final class BrowserBridgeTests: XCTestCase {
         let failed = try await terminalRun(store: store, id: queued.id)
         XCTAssertEqual(failed.status, .failed)
         XCTAssertNil(failed.result)
-        XCTAssertEqual(failed.error, "Skill execution failed")
+        XCTAssertEqual(failed.error, "The Agent result is not valid contract JSON.")
         XCTAssertFalse(
             failed.logEntries?.contains { $0.message.contains("private malformed output") } ?? true,
             "Raw Agent output must not enter Browser-visible lifecycle logs."
@@ -2251,6 +2254,212 @@ final class BrowserBridgeTests: XCTestCase {
             },
             "Strict data-only Skills must not claim that ghpr supplies a checkout."
         )
+    }
+
+
+    func testCILogFetcherCleansANSIEscapesAndNormalizesLineEndings() throws {
+        let raw = "\u{001B}[31mFAILED\u{001B}[0m spec\r\n\u{001B}]0;ghpr\u{0007}next\rprogress"
+        XCTAssertEqual(
+            CILogFetcher.cleanLog(raw),
+            "FAILED spec\nnext\nprogress"
+        )
+        XCTAssertEqual(
+            CILogFetcher.cleanLog("plain text, no escapes"),
+            "plain text, no escapes"
+        )
+    }
+
+    func testCILogFetcherSlicesAroundFirstFailureWithElisionMarkers() throws {
+        let prefix = String(repeating: "startup banner\n", count: 400)
+        let failure = "##[error]Unable to download artifact(s): not found\n"
+        let suffix = String(repeating: "cleanup noise\n", count: 400)
+        let text = prefix + failure + suffix
+        let slice = CILogFetcher.sliceAroundFailure(text, byteLimit: 1024)
+        XCTAssertTrue(slice.contains("Unable to download artifact"))
+        XCTAssertTrue(slice.contains("bytes elided before first failure"))
+        XCTAssertTrue(slice.contains("bytes elided after"))
+        XCTAssertLessThanOrEqual(slice.utf8.count, 1024 + 256)
+    }
+
+    func testCILogFetcherSkipsFalsePositiveWordsBeforeRealError() throws {
+        // "error" inside package names and "failed" inside env var names early
+        // in the log must not anchor the slice; the ##[error] annotation is the
+        // anchor, with neutral lines between the false positives and the failure.
+        let prefix = String(repeating: "Installing libgpg-error (1.47-r2)\n", count: 200)
+        let middle = String(repeating: "startup banner\n", count: 400)
+        let failure = "##[error]Unable to download artifact(s): Artifact not found\n"
+        let suffix = String(repeating: "cleanup\n", count: 300)
+        let slice = CILogFetcher.sliceAroundFailure(
+            prefix + middle + failure + suffix,
+            byteLimit: 1024
+        )
+        XCTAssertTrue(slice.contains("Unable to download artifact"))
+        XCTAssertFalse(slice.contains("libgpg-error"))
+        XCTAssertTrue(slice.hasPrefix("… ("))
+        XCTAssertTrue(slice.contains("bytes elided before first failure"))
+    }
+
+    func testCILogFetcherFallsBackToStrongFailureWordWhenNoAnnotation() throws {
+        let prefix = String(repeating: "Installing libgpg-error (1.47-r2)\n", count: 300)
+        let middle = String(repeating: "startup banner\n", count: 400)
+        let failure = "FATAL:  role \"root\" does not exist\n"
+        let suffix = String(repeating: "cleanup\n", count: 300)
+        let slice = CILogFetcher.sliceAroundFailure(
+            prefix + middle + failure + suffix,
+            byteLimit: 1024
+        )
+        XCTAssertTrue(slice.contains("FATAL:  role \"root\" does not exist"))
+        XCTAssertFalse(slice.contains("libgpg-error"))
+        XCTAssertTrue(slice.contains("bytes elided before first failure"))
+    }
+
+    func testCILogFetcherTailTruncatesWhenNoFailureLineMatches() throws {
+        let text = String(repeating: "no failures here\n", count: 500)
+        let slice = CILogFetcher.sliceAroundFailure(text, byteLimit: 1024)
+        XCTAssertTrue(slice.hasPrefix("… (truncated, showing last 1024 bytes)"))
+        XCTAssertTrue(slice.contains("no failures here"))
+        XCTAssertLessThanOrEqual(slice.utf8.count, 1024 + 256)
+    }
+
+    func testCILogFetcherLeavesSmallLogsUntouched() throws {
+        let text = "one line\n"
+        XCTAssertEqual(CILogFetcher.sliceAroundFailure(text, byteLimit: 1024), text)
+        XCTAssertEqual(CILogFetcher.tailTruncate(text, byteLimit: 1024), text)
+    }
+
+    func testCILogFetcherExtractsRunAndJobIDsFromCheckLinks() throws {
+        let jobLink = "https://github.com/Kong/kong-ee/actions/runs/123456789/job/987654321"
+        XCTAssertEqual(CILogFetcher.extractRunID(from: jobLink), Int64(123456789))
+        XCTAssertEqual(CILogFetcher.extractJobID(from: jobLink), Int64(987654321))
+
+        let runLink = "https://github.com/Kong/kong-ee/actions/runs/123456789"
+        XCTAssertEqual(CILogFetcher.extractRunID(from: runLink), Int64(123456789))
+        XCTAssertNil(CILogFetcher.extractJobID(from: runLink))
+
+        XCTAssertNil(CILogFetcher.extractRunID(from: "not-a-link"))
+    }
+
+    actor RequestRecorder {
+        private(set) var request: AgentExecutionRequest?
+        private(set) var fetchRepository: String?
+        private(set) var fetchPRNumber: Int?
+
+        func record(_ request: AgentExecutionRequest) {
+            self.request = request
+        }
+
+        func recordFetch(repository: String, prNumber: Int) {
+            fetchRepository = repository
+            fetchPRNumber = prNumber
+        }
+    }
+
+    func testBuiltInSkillsFetchAndEmbedCIJobLogsInStrictContext() async throws {
+        let root = temporaryDirectory()
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let snapshot = LocalPRSnapshot(
+            id: 42,
+            section: .authored,
+            repository: "owner/repo",
+            number: 42,
+            title: "Strip multipart metadata",
+            author: "xiaocang",
+            url: "https://github.com/owner/repo/pull/42",
+            state: "OPEN",
+            isDraft: false,
+            isPinned: false,
+            hasBaseConflicts: false,
+            unresolvedCount: 0,
+            ciStatus: "FAILURE",
+            checkSuccessCount: 44,
+            checkFailureCount: 6,
+            checkPendingCount: 0,
+            ciIsRunning: false,
+            approvalCount: 0,
+            changesRequestedCount: nil,
+            myReviewStatus: nil,
+            jiraTicket: nil,
+            ciWorkflows: [
+                LocalCIWorkflowSnapshot(
+                    name: "Build & Test",
+                    isWorkflow: true,
+                    successCount: 44,
+                    failureCount: 1,
+                    pendingCount: 0
+                )
+            ],
+            updatedAt: Date(),
+            mergedAt: nil
+        )
+        let recorder = RequestRecorder()
+        let runtime = SkillRuntime(
+            store: store,
+            installedSkillsRootURL: root.appendingPathComponent("installed"),
+            bundledSkillsRootURL: nil,
+            agentRunner: { request, _ in
+                await recorder.record(request)
+                return SkillResult(
+                    kind: .ciAnalysis,
+                    title: "Likely related",
+                    summary: "The log attributes the failure to a packaging step.",
+                    analysis: nil,
+                    codeReview: nil,
+                    markdown: nil,
+                    artifacts: [],
+                    payload: .object([
+                        "status": .string("likely_related"),
+                        "summary": .string("The log attributes the failure to a packaging step."),
+                        "evidence": .array([.string("Error: packaging failed")]),
+                        "suggested_action": .string("Rerun the failed job.")
+                    ])
+                )
+            },
+            ciLogFetch: { repository, prNumber in
+                await recorder.recordFetch(repository: repository, prNumber: prNumber)
+                return FailedJobLogs(
+                    repository: repository,
+                    prNumber: prNumber,
+                    workflowName: "Package & Release",
+                    runID: Int64(123456789),
+                    jobID: Int64(987654321),
+                    capturedBytes: 1024,
+                    truncated: false,
+                    capturedOverflow: false,
+                    fetchedAt: Date(),
+                    content: "Error: packaging failed\n  at make-bundle.sh:12"
+                )
+            }
+        )
+        let queued = try runtime.start(
+            skillID: SkillRuntime.classifyFlakySkillID,
+            page: .pullRequest(repository: "owner/repo", number: 42),
+            pullRequest: snapshot,
+            requestedByClientID: "dev.ghpr.official-test"
+        )
+        let completed = try await terminalRun(store: store, id: queued.id)
+        XCTAssertEqual(completed.status, .completed)
+        let analysis = try XCTUnwrap(completed.result?.analysis)
+        XCTAssertEqual(analysis.verdict, .likelyRelated)
+        XCTAssertEqual(analysis.jobName, "Package & Release")
+        XCTAssertEqual(analysis.summary, "The log attributes the failure to a packaging step.")
+
+        let recorded = await recorder.request
+        let request = try XCTUnwrap(recorded)
+        XCTAssertEqual(request.skillID, SkillRuntime.classifyFlakySkillID)
+        XCTAssertEqual(request.context.requestedSections, ["pr_metadata", "ci_status", "failed_job_logs"])
+        XCTAssertFalse(
+            request.context.unavailableSections.contains("failed_job_logs"),
+            "The fetched log must mark failed_job_logs as available."
+        )
+        XCTAssertEqual(request.context.ciStatus?.failureCount, 6)
+        let logs = try XCTUnwrap(request.context.failedJobLogs)
+        XCTAssertEqual(logs.workflowName, "Package & Release")
+        XCTAssertEqual(logs.jobID, Int64(987654321))
+        XCTAssertTrue(logs.content.contains("packaging failed"))
+        let fetchRepository = await recorder.fetchRepository
+        let fetchPRNumber = await recorder.fetchPRNumber
+        XCTAssertEqual(fetchRepository, "owner/repo")
+        XCTAssertEqual(fetchPRNumber, 42)
     }
 
 
