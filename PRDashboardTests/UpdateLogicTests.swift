@@ -4678,4 +4678,53 @@ final class ArchivedRepoFilterTests: XCTestCase {
         XCTAssertTrue(cached.directMentionPullRequests.isEmpty)
         XCTAssertTrue(cached.mergedPullRequests.isEmpty)
     }
+    func testFacetNormalizationCountsDeduplicatedValuesPerPR() throws {
+        var first = try makePullRequest(isArchived: false)
+        first.githubLabels = [GitHubLabel(name: "Backend", color: "red"), GitHubLabel(name: "backend", color: "blue")]
+        first.githubMilestone = GitHubMilestone(title: "3.14")
+        var second = try makePullRequest(isArchived: false)
+        second.githubLabels = [GitHubLabel(name: "backend", color: nil)]
+        second.githubMilestone = GitHubMilestone(title: "3.14")
+        let index = FacetIndexBuilder(sourcePRs: [first, second], searchText: "", selections: [:])
+        let labels = index.options(for: .githubLabel)
+        XCTAssertEqual(labels.count, 1, "Duplicate normalized labels should collapse to one option")
+        XCTAssertEqual(labels.first?.key, "backend", "Label keys should be normalized to lowercase")
+        XCTAssertEqual(labels.first?.count, 2, "Each matching PR should contribute once to the label count")
+        XCTAssertEqual(index.options(for: .githubMilestone).first?.count, 2, "Milestone counts should include both source PRs")
+    }
+
+    func testFacetPredicateSameFieldORAndCrossFieldAND() throws {
+        var first = try makePullRequest(isArchived: false)
+        first.githubLabels = [GitHubLabel(name: "Backend", color: nil)]
+        first.githubMilestone = GitHubMilestone(title: "3.14")
+        var second = try makePullRequest(isArchived: false)
+        second.githubLabels = [GitHubLabel(name: "Frontend", color: nil)]
+        second.githubMilestone = GitHubMilestone(title: "3.15")
+        let labels: [FacetFieldID: Set<String>] = [.githubLabel: ["backend", "frontend"]]
+        XCTAssertTrue(FacetPredicate.matches(first, searchText: "", selections: labels) { _ in true }, "A PR matching either selected label should pass")
+        XCTAssertTrue(FacetPredicate.matches(second, searchText: "", selections: labels) { _ in true }, "Same-field selections should use OR semantics")
+        let combined: [FacetFieldID: Set<String>] = [.githubLabel: ["backend", "frontend"], .githubMilestone: ["3.14"]]
+        XCTAssertTrue(FacetPredicate.matches(first, searchText: "", selections: combined) { _ in true }, "A PR matching both fields should pass")
+        XCTAssertFalse(FacetPredicate.matches(second, searchText: "", selections: combined) { _ in true }, "Different-field selections should use AND semantics")
+    }
+
+    func testFacetIndexExcludesCurrentFieldSelectionFromCountsAndPreservesUnavailable() throws {
+        var pr = try makePullRequest(isArchived: false)
+        pr.githubLabels = [GitHubLabel(name: "Backend", color: nil)]
+        let index = FacetIndexBuilder(sourcePRs: [pr], searchText: "", selections: [.githubLabel: ["missing"]])
+        XCTAssertEqual(index.options(for: .githubLabel).first(where: { $0.key == "missing" })?.count, 0, "Unavailable selected keys should be retained with zero count")
+        XCTAssertEqual(index.facetBasePRs(for: .githubLabel).count, 1, "Current-field selections must be excluded from base counts")
+    }
+
+    func testSavedViewStoreRoundTripMalformedAndEmptyName() throws {
+        let suite = "FacetTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite), "Test defaults suite should be available")
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = SavedViewStore(defaults: defaults)
+        XCTAssertNil(store.create(name: "  ", selections: [], searchText: ""), "Blank saved-view names must be rejected")
+        let saved = try XCTUnwrap(store.create(name: "Release", selections: [ActiveFacetSelection(field: .githubMilestone, selectedKeys: ["missing"])], searchText: "JIRA-1"), "A non-empty saved-view name should create a view")
+        XCTAssertEqual(store.views, [saved], "Saved views should round-trip through UserDefaults")
+        defaults.set(Data("bad".utf8), forKey: SavedViewStore.key)
+        XCTAssertTrue(store.views.isEmpty, "Malformed saved-view data should recover as an empty collection")
+    }
 }

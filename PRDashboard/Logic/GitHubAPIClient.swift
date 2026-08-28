@@ -140,7 +140,10 @@ struct IndexedPR {
             jiraUpdatedAt: existing?.jiraUpdatedAt ?? visible?.jiraUpdatedAt,
             jiraMetadataFetchedAt: existing?.jiraMetadataFetchedAt ?? visible?.jiraMetadataFetchedAt,
             isOpenInCmux: visible?.isOpenInCmux ?? existing?.isOpenInCmux,
-            mentionCount: visible?.mentionCount
+            mentionCount: visible?.mentionCount,
+            githubLabels: existing?.githubLabels ?? visible?.githubLabels,
+            githubMilestone: existing?.githubMilestone ?? visible?.githubMilestone,
+            jiraProjectKey: existing?.jiraProjectKey ?? visible?.jiraProjectKey
         )
     }
 
@@ -2890,6 +2893,8 @@ final class GitHubAPIClient: ObservableObject {
             mergedAt
             mergeable
             mergeStateStatus
+            labels(first: 50) { nodes { name color } }
+            milestone { title }
             author {
                 login
                 avatarUrl
@@ -3540,6 +3545,8 @@ final class GitHubAPIClient: ObservableObject {
         mergedAt
         mergeable
         mergeStateStatus
+        labels(first: 50) { nodes { name color } }
+        milestone { title }
         author {
             login
             avatarUrl
@@ -4183,7 +4190,9 @@ final class GitHubAPIClient: ObservableObject {
             myThreadsAllResolved: false,
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
-            ciExtendedInfo: derivedCI.extendedInfo
+            ciExtendedInfo: derivedCI.extendedInfo,
+            githubLabels: node.labels?.nodes.map { GitHubLabel(name: $0.name, color: $0.color) },
+            githubMilestone: node.milestone.map { GitHubMilestone(title: $0.title) }
         )
     }
 
@@ -5028,7 +5037,9 @@ final class GitHubAPIClient: ObservableObject {
             myThreadsAllResolved: myThreadsAllResolved,
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
-            ciExtendedInfo: ciExtendedInfo
+            ciExtendedInfo: ciExtendedInfo,
+            githubLabels: node.labels?.nodes.map { GitHubLabel(name: $0.name, color: $0.color) },
+            githubMilestone: node.milestone.map { GitHubMilestone(title: $0.title) }
         )
     }
 
@@ -6038,6 +6049,8 @@ private struct GraphQLResponse: Decodable {
         let mergedAt: Date?
         let mergeable: String?
         let mergeStateStatus: String?
+        let labels: LabelContainer?
+        let milestone: Milestone?
         let author: Author?
         let repository: Repository
         let comments: IssueCommentsContainer?
@@ -6045,6 +6058,10 @@ private struct GraphQLResponse: Decodable {
         let commits: CommitsContainer?
         let latestReviews: LatestReviewsContainer?
     }
+
+    struct LabelContainer: Decodable { let nodes: [Label] }
+    struct Label: Decodable { let name: String; let color: String? }
+    struct Milestone: Decodable { let title: String }
 
     struct Author: Decodable {
         let login: String
@@ -6218,6 +6235,8 @@ private struct CombinedGraphQLResponse: Decodable {
         let mergedAt: Date?
         let mergeable: String?
         let mergeStateStatus: String?
+        let labels: GraphQLResponse.LabelContainer?
+        let milestone: GraphQLResponse.Milestone?
         let author: Author?
         let repository: Repository
         let comments: IssueCommentsContainer?

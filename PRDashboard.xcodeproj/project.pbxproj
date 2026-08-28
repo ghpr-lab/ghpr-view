@@ -42,6 +42,8 @@
 		A1000072 /* AppPresentationCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000072 /* AppPresentationCoordinator.swift */; };
 		A1000073 /* JiraSetupCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000073 /* JiraSetupCoordinator.swift */; };
 		A1000074 /* JiraSetupForm.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000074 /* JiraSetupForm.swift */; };
+		A1000090 /* FacetFilterPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000090 /* FacetFilterPanel.swift */; };
+		A1000091 /* Facets.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000091 /* Facets.swift */; };
 		A1000075 /* JiraSetupView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000075 /* JiraSetupView.swift */; };
 		A1000080 /* CachedAvatarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2000080 /* CachedAvatarView.swift */; };
 		B1000008 /* JiraSetupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B2000008 /* JiraSetupTests.swift */; };
@@ -107,6 +109,8 @@
 		A2000072 /* AppPresentationCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppPresentationCoordinator.swift; sourceTree = "<group>"; };
 		A2000073 /* JiraSetupCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JiraSetupCoordinator.swift; sourceTree = "<group>"; };
 		A2000074 /* JiraSetupForm.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JiraSetupForm.swift; sourceTree = "<group>"; };
+		A2000090 /* FacetFilterPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FacetFilterPanel.swift; sourceTree = "<group>"; };
+		A2000091 /* Facets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Facets.swift; sourceTree = "<group>"; };
 		A2000075 /* JiraSetupView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JiraSetupView.swift; sourceTree = "<group>"; };
 		A2000080 /* CachedAvatarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Views/CachedAvatarView.swift"; sourceTree = "<group>"; };
 		B2000008 /* JiraSetupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JiraSetupTests.swift; sourceTree = "<group>"; };
@@ -210,6 +214,7 @@
 		A5000004 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				A2000091 /* Facets.swift */,
 				A200000C /* PullRequest.swift */,
 				A200000D /* ReviewThread.swift */,
 				A200000E /* Configuration.swift */,
@@ -255,6 +260,7 @@
 		A5000008 /* Components */ = {
 			isa = PBXGroup;
 			children = (
+				A2000090 /* FacetFilterPanel.swift */,
 				A2000006 /* Badge.swift */,
 				A2000030 /* PATInputView.swift */,
 				A2000031 /* CIStatusIcon.swift */,
@@ -482,6 +488,8 @@
 				A1000074 /* JiraSetupForm.swift in Sources */,
 				A1000075 /* JiraSetupView.swift in Sources */,
 				A1000080 /* CachedAvatarView.swift in Sources */,
+				A1000090 /* FacetFilterPanel.swift in Sources */,
+				A1000091 /* Facets.swift in Sources */,
 				A1000003 /* MainView.swift in Sources */,
 				A1000004 /* PRRowView.swift in Sources */,
 				A1000005 /* SettingsView.swift in Sources */,

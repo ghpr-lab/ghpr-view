@@ -1291,6 +1291,7 @@ final class PRManager: PRManagerType, ObservableObject {
         rebased.pullRequest.jiraTicket = current.pullRequest.jiraTicket
         rebased.pullRequest.jiraTitle = current.pullRequest.jiraTitle
         rebased.pullRequest.jiraLabels = current.pullRequest.jiraLabels
+        rebased.pullRequest.jiraProjectKey = current.pullRequest.jiraProjectKey
         rebased.pullRequest.jiraStatusName = current.pullRequest.jiraStatusName
         rebased.pullRequest.jiraStatusCategoryKey = current.pullRequest.jiraStatusCategoryKey
         rebased.pullRequest.jiraUpdatedAt = current.pullRequest.jiraUpdatedAt
@@ -1473,6 +1474,7 @@ final class PRManager: PRManagerType, ObservableObject {
             }
             if let issue = metadata[ticket] {
                 prs[index].jiraLabels = issue.labels
+                prs[index].jiraProjectKey = issue.projectKey
                 prs[index].jiraTitle = issue.title
                 prs[index].jiraStatusName = issue.statusName
                 prs[index].jiraStatusCategoryKey = issue.statusCategoryKey
@@ -2174,6 +2176,7 @@ final class PRManager: PRManagerType, ObservableObject {
     private func clearJiraMetadata(in prs: inout [PullRequest]) {
         for index in prs.indices {
             prs[index].jiraLabels = nil
+            prs[index].jiraProjectKey = nil
             prs[index].jiraTitle = nil
             prs[index].jiraStatusName = nil
             prs[index].jiraStatusCategoryKey = nil

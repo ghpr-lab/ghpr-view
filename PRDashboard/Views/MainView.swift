@@ -8,6 +8,8 @@ struct MainView: View {
     @State private var firstVisibleApprovalPRID: Int?
     @State private var footerTimelineAnchor = Date()
     @State private var firstVisibleReviewStatusPRID: Int?
+    @State private var showSaveViewSheet = false
+    @State private var savedViewName = ""
     @State private var expandedSections: Set<PRSectionID> = Set(PRSectionID.allCases)
 
     private enum PRSectionID: Hashable, CaseIterable {
@@ -42,7 +44,9 @@ struct MainView: View {
             if viewModel.authState.isAuthenticated {
                 // Header
                 headerView
-
+                if viewModel.isFacetPanelPresented {
+                    FacetFilterPanel(viewModel: viewModel) { showSaveViewSheet = true }
+                }
                 Divider()
 
                 if viewModel.prList.isLoading && !viewModel.prList.hasUsableData {
@@ -111,27 +115,48 @@ struct MainView: View {
                 )
             }
         }
+        .sheet(isPresented: $showSaveViewSheet) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Save Current Filters").font(.headline)
+                TextField("View name", text: $savedViewName)
+                HStack {
+                    Spacer()
+                    Button("Cancel") { showSaveViewSheet = false }
+                    Button("Save") {
+                        _ = viewModel.saveCurrentView(name: savedViewName)
+                        savedViewName = ""
+                        showSaveViewSheet = false
+                    }.keyboardShortcut(.defaultAction)
+                }
+            }.padding(20).frame(width: 280)
+        }
         .onPreferenceChange(FirstReviewStatusBadgeIDPreferenceKey.self) { firstVisibleReviewStatusPRID = $0 }
     }
 
     // MARK: - Header
 
     private var headerView: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .center, spacing: 6) {
             // Search field
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("Search PRs (jira:, ci:, pr:conflict, approval:>=2)", text: $viewModel.searchText)
+                    TextField("Search PRs, repos, authors, Jira keys...", text: $viewModel.searchText)
                         .textFieldStyle(.plain)
                     if !viewModel.searchText.isEmpty {
                         Button(action: { viewModel.searchText = "" }) {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
+                            Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderless)
                     }
+                    Button(action: { viewModel.isFacetPanelPresented.toggle() }) {
+                        Image(systemName: "funnel")
+                            .font(.system(size: 16, weight: .medium))
+                            .frame(width: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Filter")
                 }
                 .padding(6)
                 .background(Color.primary.opacity(0.05))
@@ -152,23 +177,41 @@ struct MainView: View {
                     }
                     .font(.caption)
                 }
+                if !viewModel.facetChips.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(viewModel.facetChips.prefix(3)) { chip in
+                                HStack(spacing: 3) {
+                                    Text(chip.displayName).lineLimit(1)
+                                    Button { viewModel.toggleFacet(field: chip.field, key: chip.key) } label: { Image(systemName: "xmark") }
+                                        .buttonStyle(.plain)
+                                }
+                                .font(.caption2).padding(.horizontal, 5).padding(.vertical, 3)
+                                .background(Color.accentColor.opacity(0.12)).cornerRadius(4)
+                            }
+                            if viewModel.facetChips.count > 3 { Text("+\(viewModel.facetChips.count - 3)").font(.caption2) }
+                        }
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .onboardingAnchor(onboardingManager, step: .filter)
 
-            // Refresh button
             Button(action: { viewModel.refresh() }) {
                 Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 28, height: 28)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .keyboardShortcut("r", modifiers: .command)
             .disabled(viewModel.prList.isLoading)
 
-            // Settings button
             Button(action: { viewModel.showSettings() }) {
                 Image(systemName: "gear")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 28, height: 28)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .onboardingAnchor(onboardingManager, step: .repoFilter)
         }
         .padding(10)
