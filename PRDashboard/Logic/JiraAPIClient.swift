@@ -2,7 +2,7 @@ import Foundation
 import os
 
 private let jiraLogger = Logger(subsystem: "com.prdashboard", category: "JiraAPIClient")
-private let jiraMetadataCacheSchemaVersion = 2
+private let jiraMetadataCacheSchemaVersion = 3
 
 struct JiraIssueMetadata: Codable, Equatable {
     let key: String

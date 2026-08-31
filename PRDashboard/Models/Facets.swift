@@ -93,10 +93,13 @@ struct FacetIndexBuilder {
     let selections: [FacetFieldID: Set<String>]
 
     func facetBasePRs(for field: FacetFieldID) -> [PullRequest] {
-        sourcePRs.filter { pr in
-            guard FacetPredicate.matchesText(pr, searchText: searchText) else { return false }
+        let parsedSearch = PRSearchScope.parse(searchText)
+        return sourcePRs.filter { pr in
+            guard FacetPredicate.matchesSearch(pr, parsedSearch: parsedSearch) else { return false }
             return selections.allSatisfy { selectedField, keys in
-                selectedField == field || keys.isEmpty || !FacetValues.values(for: selectedField, pr: pr).filter { keys.contains($0.key) }.isEmpty
+                selectedField == field ||
+                    keys.isEmpty ||
+                    FacetValues.values(for: selectedField, pr: pr).contains { keys.contains($0.key) }
             }
         }
     }
@@ -121,18 +124,107 @@ struct FacetIndexBuilder {
 }
 
 enum FacetPredicate {
-    static func matchesText(_ pr: PullRequest, searchText: String) -> Bool {
-        let parsed = PRSearchScope.parse(searchText)
-        if parsed.kind != .all { return true }
-        guard !parsed.term.isEmpty else { return true }
-        return [pr.title, pr.repoFullName, pr.author, pr.jiraTicket ?? "", pr.jiraTitle ?? "", pr.jiraStatusName ?? "", pr.jiraStatusCategoryKey ?? "", (pr.jiraLabels ?? []).joined(separator: " "), String(pr.number)]
-            .contains { PRSearchScope.contains(parsed.term, in: $0) }
+    static func matchesSearch(_ pr: PullRequest, parsedSearch: PRSearchScope.Parsed) -> Bool {
+        switch parsedSearch.kind {
+        case .all:
+            guard !parsedSearch.term.isEmpty else { return true }
+            return [
+                pr.title,
+                pr.repoFullName,
+                pr.author,
+                pr.jiraTicket ?? "",
+                pr.jiraTitle ?? "",
+                pr.jiraStatusName ?? "",
+                pr.jiraStatusCategoryKey ?? "",
+                (pr.jiraLabels ?? []).joined(separator: " "),
+                String(pr.number)
+            ].contains { PRSearchScope.contains(parsedSearch.term, in: $0) }
+        case .jira:
+            return parsedSearch.term.isEmpty
+                ? hasAnyJiraField(pr)
+                : matchesJiraFields(pr, term: parsedSearch.term)
+        case .ci:
+            return matchesCIState(pr, term: parsedSearch.term)
+        case .pr:
+            return matchesPRState(pr, term: parsedSearch.term)
+        case .approval:
+            return matchesApprovalCount(pr, term: parsedSearch.term)
+        }
     }
 
-    static func matches(_ pr: PullRequest, searchText: String, selections: [FacetFieldID: Set<String>], legacy: (PullRequest) -> Bool) -> Bool {
-        guard legacy(pr), matchesText(pr, searchText: searchText) else { return false }
+    static func matches(
+        _ pr: PullRequest,
+        parsedSearch: PRSearchScope.Parsed,
+        selections: [FacetFieldID: Set<String>]
+    ) -> Bool {
+        guard matchesSearch(pr, parsedSearch: parsedSearch) else { return false }
         return selections.allSatisfy { field, keys in
-            keys.isEmpty || !Set(FacetValues.values(for: field, pr: pr).map(\.key)).isDisjoint(with: keys)
+            keys.isEmpty || FacetValues.values(for: field, pr: pr).contains { keys.contains($0.key) }
+        }
+    }
+
+    private static func hasAnyJiraField(_ pr: PullRequest) -> Bool {
+        pr.jiraTicket?.isEmpty == false ||
+            pr.jiraTitle?.isEmpty == false ||
+            pr.jiraStatusName?.isEmpty == false ||
+            pr.jiraStatusCategoryKey?.isEmpty == false ||
+            pr.jiraLabels?.isEmpty == false
+    }
+
+    private static func matchesJiraFields(_ pr: PullRequest, term: String) -> Bool {
+        if let ticket = pr.jiraTicket, PRSearchScope.contains(term, in: ticket) { return true }
+        if let title = pr.jiraTitle, PRSearchScope.contains(term, in: title) { return true }
+        if let status = pr.jiraStatusName, PRSearchScope.contains(term, in: status) { return true }
+        if let category = pr.jiraStatusCategoryKey, PRSearchScope.contains(term, in: category) { return true }
+        if let labels = pr.jiraLabels,
+           labels.contains(where: { PRSearchScope.contains(term, in: $0) }) {
+            return true
+        }
+        return false
+    }
+
+    private static func matchesCIState(_ pr: PullRequest, term: String) -> Bool {
+        switch term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "", "any", "value":
+            return pr.ciStatus != nil || pr.checkTotalCount > 0 || pr.ciIsRunning
+        case "pass", "passed", "success", "green":
+            return pr.ciStatus == .success
+        case "failure", "fail", "failed", "failing", "red":
+            return pr.ciStatus == .failure || pr.ciStatus == .unknown || pr.checkFailureCount > 0
+        case "running", "pending", "inflight", "in-flight":
+            return pr.ciIsInFlight
+        default:
+            return false
+        }
+    }
+
+    private static func matchesPRState(_ pr: PullRequest, term: String) -> Bool {
+        switch term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "conflict", "conflicts":
+            return pr.hasBaseConflicts
+        default:
+            return false
+        }
+    }
+
+    private static func matchesApprovalCount(_ pr: PullRequest, term: String) -> Bool {
+        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return pr.approvalCount > 0 }
+
+        let operators = [">=", "<=", "==", ">", "<", "="]
+        let matchedOperator = operators.first { trimmed.hasPrefix($0) }
+        let operation = matchedOperator ?? "="
+        let numberText = String(trimmed.dropFirst(matchedOperator?.count ?? 0))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let expected = Int(numberText) else { return false }
+
+        switch operation {
+        case ">=": return pr.approvalCount >= expected
+        case ">": return pr.approvalCount > expected
+        case "<=": return pr.approvalCount <= expected
+        case "<": return pr.approvalCount < expected
+        case "=", "==": return pr.approvalCount == expected
+        default: return false
         }
     }
 }

@@ -308,6 +308,71 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertTrue(pullRequests.isEmpty)
     }
 
+    func testGitHubLabelPaginationFetchesAllPages() async throws {
+        let firstLabels = (1...100).map { ["name": "label-\($0)", "color": "abcdef"] }
+        let remainingLabels = (101...105).map { ["name": "label-\($0)", "color": "abcdef"] }
+        let firstPage = try JSONSerialization.data(withJSONObject: [
+            "data": [
+                "search": [
+                    "nodes": [[
+                        "id": "PR_node_900",
+                        "databaseId": 900,
+                        "number": 900,
+                        "title": "Many labels",
+                        "url": "https://github.com/owner/repo/pull/900",
+                        "state": "OPEN",
+                        "isDraft": false,
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-01T00:00:00Z",
+                        "labels": [
+                            "nodes": firstLabels,
+                            "pageInfo": ["hasNextPage": true, "endCursor": "cursor-100"]
+                        ],
+                        "author": ["login": "author"],
+                        "repository": [
+                            "owner": ["login": "owner"],
+                            "name": "repo",
+                            "isArchived": false
+                        ]
+                    ]],
+                    "pageInfo": ["hasNextPage": false, "endCursor": NSNull()]
+                ]
+            ]
+        ])
+        let secondPage = try JSONSerialization.data(withJSONObject: [
+            "data": [
+                "node": [
+                    "labels": [
+                        "nodes": remainingLabels,
+                        "pageInfo": ["hasNextPage": false, "endCursor": "cursor-105"]
+                    ]
+                ]
+            ]
+        ])
+        MockGitHubGraphQLURLProtocol.reset { request in
+            let query = try XCTUnwrap(Self.graphQLQuery(from: request))
+            if query.contains("search(") {
+                XCTAssertTrue(query.contains("labels(first: 100)"))
+                XCTAssertTrue(query.contains("pageInfo { hasNextPage endCursor }"))
+                return (Self.httpResponse(for: request, statusCode: 200), firstPage)
+            }
+            XCTAssertTrue(query.contains("node(id:"))
+            XCTAssertTrue(query.contains("after: \"cursor-100\""))
+            return (Self.httpResponse(for: request, statusCode: 200), secondPage)
+        }
+        defer { MockGitHubGraphQLURLProtocol.reset() }
+
+        let prs = try await makeGraphQLClient().fetchPullRequests(
+            username: "tester",
+            searchQuery: "author:tester is:pr",
+            category: .authored
+        )
+
+        XCTAssertEqual(prs.first?.githubLabels?.count, 105, "Every GraphQL label page should be merged")
+        XCTAssertEqual(prs.first?.githubLabels?.last?.name, "label-105", "Pagination should preserve later labels")
+        XCTAssertEqual(MockGitHubGraphQLURLProtocol.requestedQueries.count, 2, "One additional page should issue one request")
+    }
+
     func testGitHubRESTUnauthorizedInvalidatesRejectedToken() async {
         let session = makeMockGitHubGraphQLSession()
         MockGitHubGraphQLURLProtocol.reset { request in
@@ -1212,11 +1277,20 @@ final class UpdateLogicTests: XCTestCase {
             body: "cached",
             createdAt: mentionDate(1)
         )
+        var cachedPR = makeMentionPullRequest(
+            id: 502,
+            number: 502,
+            category: .mentioned,
+            conversationComments: [cachedComment]
+        )
+        cachedPR.githubLabels = [GitHubLabel(name: "backend", color: "abcdef")]
+        cachedPR.githubMilestone = GitHubMilestone(title: "3.14")
+        cachedPR.jiraProjectKey = "KONG"
         let entry = makeTrackingEntry(
             id: 502,
             source: oldSource,
             pendingCount: 4,
-            conversationComments: [cachedComment]
+            pullRequest: cachedPR
         )
         MockGitHubGraphQLURLProtocol.reset { [self] request in
             let query = try XCTUnwrap(Self.graphQLQuery(from: request))
@@ -1257,6 +1331,9 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(result.refreshed[entry.prID]?.state.pendingCount, 1)
         XCTAssertEqual(result.refreshed[entry.prID]?.pullRequest.conversationComments.map(\.id), ["cached"])
         XCTAssertEqual(result.refreshed[entry.prID]?.source, newSource)
+        XCTAssertEqual(result.refreshed[entry.prID]?.pullRequest.githubLabels, cachedPR.githubLabels, "Mention refresh must retain GitHub labels")
+        XCTAssertEqual(result.refreshed[entry.prID]?.pullRequest.githubMilestone, cachedPR.githubMilestone, "Mention refresh must retain milestones")
+        XCTAssertEqual(result.refreshed[entry.prID]?.pullRequest.jiraProjectKey, cachedPR.jiraProjectKey, "Mention refresh must retain Jira projects")
     }
 
     func testTrackedMentionPaginationDeduplicatesCommentIDs() async {
@@ -2771,6 +2848,25 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(placeholder.approvalAuthors, ["cached-reviewer"])
     }
 
+    func testPlaceholderUsesFreshIndexFacetMetadata() {
+        var cached = makePullRequest(id: 18009, number: 18009, category: .authored)
+        cached.githubLabels = [GitHubLabel(name: "stale", color: nil)]
+        cached.githubMilestone = GitHubMilestone(title: "old")
+        let indexed = makeIndexedPR(
+            id: cached.id,
+            number: cached.number,
+            baseNeedsUpdate: nil,
+            githubLabels: [GitHubLabel(name: "fresh", color: "abcdef")],
+            githubMilestone: GitHubMilestone(title: "3.15")
+        )
+
+        let placeholder = indexed.placeholderPullRequest(using: cached)
+
+        XCTAssertEqual(placeholder.githubLabels, indexed.githubLabels, "Fresh index labels should replace cached facet metadata")
+        XCTAssertEqual(placeholder.githubMilestone, indexed.githubMilestone, "Fresh index milestone should replace cached facet metadata")
+    }
+
+
     func testCompareURLEncodesBranchSlashAsSinglePathComponent() throws {
         let url = try XCTUnwrap(
             GitHubAPIClient.compareURL(
@@ -2852,6 +2948,8 @@ final class UpdateLogicTests: XCTestCase {
 
     @MainActor
     func testPRListViewModelSearchMatchesScopedStatusFilters() {
+
+
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
@@ -2909,6 +3007,118 @@ final class UpdateLogicTests: XCTestCase {
 
         viewModel.searchText = "approval:<2"
         XCTAssertEqual(viewModel.filteredPRs.map(\.id), [failing.id, running.id])
+    }
+    func testFacetIndexAppliesScopedSearchToCounts() {
+        var passing = makePullRequest(id: 18105, number: 205, category: .authored)
+        passing.ciStatus = .success
+        passing.githubLabels = [GitHubLabel(name: "passing", color: nil)]
+        var failing = makePullRequest(id: 18106, number: 206, category: .authored)
+        failing.ciStatus = .failure
+        failing.githubLabels = [GitHubLabel(name: "failing", color: nil)]
+        let index = FacetIndexBuilder(
+            sourcePRs: [passing, failing],
+            searchText: "ci:failure",
+            selections: [:]
+        )
+
+        XCTAssertEqual(index.options(for: .githubLabel).map(\.key), ["failing"], "Scoped search must constrain facet options and counts")
+    }
+
+    @MainActor
+    func testLiveLabelSuggestionSelectionEntersFacetFiltering() throws {
+        let suiteName = "PRDashboardTests.LabelSuggestions.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
+        let prManager = PRManager(
+            apiClient: GitHubAPIClient(token: ""),
+            notificationManager: NotificationManager(),
+            oauthManager: oauthManager
+        )
+        let viewModel = PRListViewModel(
+            prManager: prManager,
+            oauthManager: oauthManager,
+            linkOpener: FakePRLinkOpening(opensAtCmuxFirst: false),
+            savedViewStore: SavedViewStore(defaults: defaults)
+        )
+        var githubMatch = makePullRequest(id: 18107, number: 207, category: .authored)
+        githubMatch.githubLabels = [GitHubLabel(name: "Backend", color: "abcdef")]
+        var jiraMatch = makePullRequest(id: 18108, number: 208, category: .authored)
+        jiraMatch.jiraLabels = ["backend-support"]
+        var nonMatch = makePullRequest(id: 18109, number: 209, category: .authored)
+        nonMatch.githubLabels = [GitHubLabel(name: "Frontend", color: nil)]
+        viewModel.prList = PRList(
+            lastUpdated: Date(),
+            pullRequests: [githubMatch, jiraMatch, nonMatch],
+            mentionedPullRequests: [],
+            mergedPullRequests: [],
+            isLoading: false,
+            error: nil
+        )
+        viewModel.searchText = "back"
+
+        let suggestions = viewModel.searchLabelSuggestions
+
+        XCTAssertEqual(
+            suggestions.map { "\($0.field.rawValue):\($0.key)" },
+            ["githubLabel:backend", "jiraLabel:backend-support"],
+            "Typing should suggest matching labels from both providers"
+        )
+        let selected = try XCTUnwrap(
+            suggestions.first(where: { $0.field == .githubLabel }),
+            "GitHub label should be selectable"
+        )
+        viewModel.selectLabelSuggestion(selected)
+        XCTAssertTrue(viewModel.searchText.isEmpty, "Selecting a label should clear the free-text query")
+        XCTAssertEqual(viewModel.activeFacetSelections[.githubLabel], ["backend"], "Selected label should enter facet state")
+        XCTAssertEqual(viewModel.filteredPRs.map(\.id), [githubMatch.id], "Selected label should filter the PR list")
+
+        viewModel.searchText = "back"
+        XCTAssertFalse(
+            viewModel.searchLabelSuggestions.contains(where: { $0.id == selected.id }),
+            "Already-selected labels should not be suggested again"
+        )
+    }
+
+
+    @MainActor
+    func testSavedViewApplicationMergesDuplicateFieldSelections() throws {
+        let suiteName = "PRDashboardTests.SavedViews.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = SavedViewStore(defaults: defaults)
+        let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
+        let prManager = PRManager(
+            apiClient: GitHubAPIClient(token: ""),
+            notificationManager: NotificationManager(),
+            oauthManager: oauthManager
+        )
+        let viewModel = PRListViewModel(
+            prManager: prManager,
+            oauthManager: oauthManager,
+            linkOpener: FakePRLinkOpening(opensAtCmuxFirst: false),
+            savedViewStore: store
+        )
+        let duplicateSelections = SavedView(
+            id: UUID(),
+            name: "Combined",
+            selections: [
+                ActiveFacetSelection(field: .githubLabel, selectedKeys: ["backend"]),
+                ActiveFacetSelection(field: .githubLabel, selectedKeys: ["frontend"])
+            ],
+            searchText: "ci:failure"
+        )
+
+        viewModel.applySavedView(duplicateSelections)
+
+        XCTAssertEqual(viewModel.searchText, "ci:failure", "Applying a saved view should restore search text")
+        XCTAssertEqual(viewModel.activeFacetSelections[.githubLabel], ["backend", "frontend"], "Duplicate field entries should merge without trapping")
+        let created = try XCTUnwrap(viewModel.saveCurrentView(name: "Stored"), "Valid saved views should persist")
+        XCTAssertEqual(viewModel.savedViews, [created], "Published saved views should update after create")
+        viewModel.renameSavedView(created, name: "Renamed")
+        XCTAssertEqual(viewModel.savedViews.first?.name, "Renamed", "Published saved views should update after rename")
+        viewModel.deleteSavedView(viewModel.savedViews[0])
+        XCTAssertTrue(viewModel.savedViews.isEmpty, "Published saved views should update after delete")
     }
 
     func testPRSearchScopeSuggestsEnumValuesOnly() {
@@ -3158,6 +3368,54 @@ final class UpdateLogicTests: XCTestCase {
 
         XCTAssertEqual(metadata["EG-123"], cached)
         XCTAssertTrue(MockJiraURLProtocol.requestedURLs.isEmpty)
+    }
+
+    func testJiraAPIClientRefetchesLegacySchemaCacheForProjectKey() async throws {
+        let suiteName = "PRDashboardTests.Jira.Legacy.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let cache = JiraMetadataCache(defaults: defaults)
+        let now = Date()
+        let legacy = JiraIssueMetadata(
+            key: "EG-123",
+            labels: [],
+            statusName: nil,
+            statusCategoryKey: nil,
+            projectKey: nil,
+            updatedAt: nil,
+            fetchedAt: now,
+            metadataSchemaVersion: 2
+        )
+        cache.save(["EG-123": legacy], serverURL: "https://example.atlassian.net")
+        MockJiraURLProtocol.reset { request in
+            let data = """
+            {
+              "issues": [{
+                "key": "EG-123",
+                "fields": {
+                  "summary": "Fresh project",
+                  "labels": [],
+                  "project": { "key": "EG" }
+                }
+              }]
+            }
+            """.data(using: .utf8)!
+            return (Self.httpResponse(for: request, statusCode: 200), data)
+        }
+        defer { MockJiraURLProtocol.reset() }
+        let client = JiraAPIClient(session: Self.makeMockJiraSession(), cache: cache)
+
+        let metadata = try await client.fetchMetadata(
+            for: ["EG-123"],
+            serverURL: "https://example.atlassian.net",
+            email: "me@example.com",
+            apiToken: "token",
+            refreshInterval: 3600,
+            now: now.addingTimeInterval(60)
+        )
+
+        XCTAssertEqual(metadata["EG-123"]?.projectKey, "EG", "Legacy schema entries should be refetched for project metadata")
+        XCTAssertEqual(MockJiraURLProtocol.requestedURLs.count, 1, "Legacy cache should not suppress the Jira request")
     }
 
     func testJiraAPIClientReturnsEmptyMetadataForMissingIssue() async throws {
@@ -3784,7 +4042,10 @@ final class UpdateLogicTests: XCTestCase {
         id: Int,
         number: Int,
         baseNeedsUpdate: Bool?,
-        hasBaseConflicts: Bool = false
+        hasBaseConflicts: Bool = false,
+        githubLabels: [GitHubLabel]? = nil,
+        githubLabelsEndCursor: String? = nil,
+        githubMilestone: GitHubMilestone? = nil
     ) -> IndexedPR {
         IndexedPR(
             databaseId: id,
@@ -3808,6 +4069,9 @@ final class UpdateLogicTests: XCTestCase {
             hasBaseConflicts: hasBaseConflicts,
             category: .authored,
             isMerged: false,
+            githubLabels: githubLabels,
+            githubLabelsEndCursor: githubLabelsEndCursor,
+            githubMilestone: githubMilestone,
             snapshot: makeIndexSnapshot()
         )
     }
@@ -4701,11 +4965,11 @@ final class ArchivedRepoFilterTests: XCTestCase {
         second.githubLabels = [GitHubLabel(name: "Frontend", color: nil)]
         second.githubMilestone = GitHubMilestone(title: "3.15")
         let labels: [FacetFieldID: Set<String>] = [.githubLabel: ["backend", "frontend"]]
-        XCTAssertTrue(FacetPredicate.matches(first, searchText: "", selections: labels) { _ in true }, "A PR matching either selected label should pass")
-        XCTAssertTrue(FacetPredicate.matches(second, searchText: "", selections: labels) { _ in true }, "Same-field selections should use OR semantics")
+        XCTAssertTrue(FacetPredicate.matches(first, parsedSearch: PRSearchScope.parse(""), selections: labels), "A PR matching either selected label should pass")
+        XCTAssertTrue(FacetPredicate.matches(second, parsedSearch: PRSearchScope.parse(""), selections: labels), "Same-field selections should use OR semantics")
         let combined: [FacetFieldID: Set<String>] = [.githubLabel: ["backend", "frontend"], .githubMilestone: ["3.14"]]
-        XCTAssertTrue(FacetPredicate.matches(first, searchText: "", selections: combined) { _ in true }, "A PR matching both fields should pass")
-        XCTAssertFalse(FacetPredicate.matches(second, searchText: "", selections: combined) { _ in true }, "Different-field selections should use AND semantics")
+        XCTAssertTrue(FacetPredicate.matches(first, parsedSearch: PRSearchScope.parse(""), selections: combined), "A PR matching both fields should pass")
+        XCTAssertFalse(FacetPredicate.matches(second, parsedSearch: PRSearchScope.parse(""), selections: combined), "Different-field selections should use AND semantics")
     }
 
     func testFacetIndexExcludesCurrentFieldSelectionFromCountsAndPreservesUnavailable() throws {

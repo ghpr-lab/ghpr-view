@@ -121,12 +121,17 @@ struct MainView: View {
                 TextField("View name", text: $savedViewName)
                 HStack {
                     Spacer()
-                    Button("Cancel") { showSaveViewSheet = false }
-                    Button("Save") {
-                        _ = viewModel.saveCurrentView(name: savedViewName)
+                    Button("Cancel") {
                         savedViewName = ""
                         showSaveViewSheet = false
-                    }.keyboardShortcut(.defaultAction)
+                    }
+                    Button("Save") {
+                        guard viewModel.saveCurrentView(name: savedViewName) != nil else { return }
+                        savedViewName = ""
+                        showSaveViewSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(savedViewName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }.padding(20).frame(width: 280)
         }
@@ -136,7 +141,9 @@ struct MainView: View {
     // MARK: - Header
 
     private var headerView: some View {
-        HStack(alignment: .center, spacing: 6) {
+        let facetChips = viewModel.facetChips
+        let labelSuggestions = viewModel.searchLabelSuggestions
+        return HStack(alignment: .center, spacing: 6) {
             // Search field
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
@@ -177,10 +184,38 @@ struct MainView: View {
                     }
                     .font(.caption)
                 }
-                if !viewModel.facetChips.isEmpty {
+                if !labelSuggestions.isEmpty {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 4) {
-                            ForEach(viewModel.facetChips.prefix(3)) { chip in
+                            ForEach(labelSuggestions) { option in
+                                Button {
+                                    viewModel.selectLabelSuggestion(option)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: option.field.symbolName)
+                                        Text(option.displayName).lineLimit(1)
+                                        Text(option.field.providerTitle)
+                                            .foregroundColor(.secondary)
+                                        Text("\(option.count)")
+                                            .foregroundColor(.secondary)
+                                            .monospacedDigit()
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(Color.accentColor.opacity(0.08))
+                                    .cornerRadius(5)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Filter by \(option.field.providerTitle) label \(option.displayName)")
+                            }
+                        }
+                    }
+                    .font(.caption)
+                }
+                if !facetChips.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(facetChips.prefix(3)) { chip in
                                 HStack(spacing: 3) {
                                     Text(chip.displayName).lineLimit(1)
                                     Button { viewModel.toggleFacet(field: chip.field, key: chip.key) } label: { Image(systemName: "xmark") }
@@ -189,7 +224,7 @@ struct MainView: View {
                                 .font(.caption2).padding(.horizontal, 5).padding(.vertical, 3)
                                 .background(Color.accentColor.opacity(0.12)).cornerRadius(4)
                             }
-                            if viewModel.facetChips.count > 3 { Text("+\(viewModel.facetChips.count - 3)").font(.caption2) }
+                            if facetChips.count > 3 { Text("+\(facetChips.count - 3)").font(.caption2) }
                         }
                     }
                 }
