@@ -216,8 +216,9 @@ final class UpdateLogicTests: XCTestCase {
         )
         let manager = PRManager(
             apiClient: apiClient,
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         persistedState = replacementState
 
@@ -2126,8 +2127,9 @@ final class UpdateLogicTests: XCTestCase {
 
         let manager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: GitHubOAuthManager(loadSavedAuth: false)
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: GitHubOAuthManager(loadSavedAuth: false),
+            loadKeychainSecrets: false
         )
         manager.configuration = .default
         manager.loadCachedData()
@@ -2888,8 +2890,9 @@ final class UpdateLogicTests: XCTestCase {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         let viewModel = PRListViewModel(
             prManager: prManager,
@@ -2953,8 +2956,9 @@ final class UpdateLogicTests: XCTestCase {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         let viewModel = PRListViewModel(
             prManager: prManager,
@@ -3479,8 +3483,9 @@ final class UpdateLogicTests: XCTestCase {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         let linkOpener = FakePRLinkOpening(opensAtCmuxFirst: true)
         let viewModel = PRListViewModel(

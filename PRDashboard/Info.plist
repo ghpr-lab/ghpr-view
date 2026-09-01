@@ -34,7 +34,7 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
 	<key>LSUIElement</key>
-	<true/>
+	<GHPR_LSUI_ELEMENT/>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2024. All rights reserved.</string>
 	<key>NSPrincipalClass</key>
