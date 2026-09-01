@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct MainView: View {
     @ObservedObject var viewModel: PRListViewModel
@@ -146,24 +147,40 @@ struct MainView: View {
         return HStack(alignment: .center, spacing: 6) {
             // Search field
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
+                HStack(spacing: 4) {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
                     TextField("Search PRs, repos, authors, Jira keys...", text: $viewModel.searchText)
                         .textFieldStyle(.plain)
+                        .frame(maxWidth: .infinity)
                     if !viewModel.searchText.isEmpty {
                         Button(action: { viewModel.searchText = "" }) {
-                            Image(systemName: "xmark.circle.fill").foregroundColor(.secondary)
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
                         }
                         .buttonStyle(.borderless)
                     }
                     Button(action: { viewModel.isFacetPanelPresented.toggle() }) {
-                        Image(systemName: "funnel")
-                            .font(.system(size: 16, weight: .medium))
-                            .frame(width: 28)
+                        if NSImage(
+                            systemSymbolName: "line.3.horizontal.decrease",
+                            accessibilityDescription: nil
+                        ) != nil {
+                            Image(systemName: "line.3.horizontal.decrease")
+                        } else if NSImage(
+                            systemSymbolName: "slider.horizontal.3",
+                            accessibilityDescription: nil
+                        ) != nil {
+                            Image(systemName: "slider.horizontal.3")
+                        } else {
+                            Text("≡")
+                        }
                     }
                     .buttonStyle(.borderless)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28)
                     .help("Filter")
+                    .accessibilityLabel("Filter")
                 }
                 .padding(6)
                 .background(Color.primary.opacity(0.05))
@@ -217,14 +234,25 @@ struct MainView: View {
                         HStack(spacing: 4) {
                             ForEach(facetChips.prefix(3)) { chip in
                                 HStack(spacing: 3) {
+                                    Image(systemName: chip.field.symbolName)
                                     Text(chip.displayName).lineLimit(1)
-                                    Button { viewModel.toggleFacet(field: chip.field, key: chip.key) } label: { Image(systemName: "xmark") }
-                                        .buttonStyle(.plain)
+                                    Button {
+                                        viewModel.toggleFacet(field: chip.field, key: chip.key)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                    }
+                                    .buttonStyle(.plain)
                                 }
-                                .font(.caption2).padding(.horizontal, 5).padding(.vertical, 3)
-                                .background(Color.accentColor.opacity(0.12)).cornerRadius(4)
+                                .font(.caption2)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 3)
+                                .background(Color.accentColor.opacity(0.12))
+                                .cornerRadius(4)
                             }
-                            if facetChips.count > 3 { Text("+\(facetChips.count - 3)").font(.caption2) }
+                            if facetChips.count > 3 {
+                                Text("+\(facetChips.count - 3)")
+                                    .font(.caption2)
+                            }
                         }
                     }
                 }
