@@ -161,7 +161,16 @@ struct MainView: View {
                         .buttonStyle(.borderless)
                     }
                     Button(action: { viewModel.isFacetPanelPresented.toggle() }) {
-                        if NSImage(
+                        if viewModel.isFacetPanelPresented {
+                            if NSImage(
+                                systemSymbolName: "xmark",
+                                accessibilityDescription: nil
+                            ) != nil {
+                                Image(systemName: "xmark")
+                            } else {
+                                Text("×")
+                            }
+                        } else if NSImage(
                             systemSymbolName: "line.3.horizontal.decrease",
                             accessibilityDescription: nil
                         ) != nil {
@@ -179,8 +188,8 @@ struct MainView: View {
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(.secondary)
                     .frame(width: 28)
-                    .help("Filter")
-                    .accessibilityLabel("Filter")
+                    .help(viewModel.isFacetPanelPresented ? "Close Filters" : "Filter")
+                    .accessibilityLabel(viewModel.isFacetPanelPresented ? "Close Filters" : "Filter")
                 }
                 .padding(6)
                 .background(Color.primary.opacity(0.05))
