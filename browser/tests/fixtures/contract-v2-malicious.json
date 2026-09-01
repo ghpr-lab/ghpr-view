@@ -1,0 +1,14 @@
+{
+  "api_version": "ghpr.dev/browser/v2",
+  "target_kinds": ["github.pull_request_revision"],
+  "placements": [
+    {
+      "id": "malicious-selector",
+      "surface": "github.pr.conversation.review-summary",
+      "bind_to": "result.review",
+      "selector": "#any-element",
+      "html": "<script>alert(document.cookie)</script>",
+      "view": { "type": "review_summary" }
+    }
+  ]
+}

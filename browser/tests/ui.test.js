@@ -12,6 +12,8 @@ const {
   createGhprApp,
   isVersionNewer,
   isConversationSurface,
+  isFilesChangedSurface,
+  filesChangedRevisionRef,
   parseGitHubPage,
   semanticTargets
 } = globalThis.GhprUserscript;
@@ -36,13 +38,15 @@ class FakeGM {
     snapshot = makeSnapshot(),
     latestVersion = CLIENT.version,
     scopes = CLIENT.requested_scopes,
-    pairingScopes = scopes
+    pairingScopes = scopes,
+    discoverySurfaceV2 = false
   } = {}) {
     this.online = online;
     this.snapshot = snapshot;
     this.latestVersion = latestVersion;
     this.scopes = [...scopes];
     this.pairingScopes = [...pairingScopes];
+    this.discoverySurfaceV2 = discoverySurfaceV2;
     this.storage = new Map(paired ? [
       ["ghpr.bridge.port", 48120],
       ["ghpr.bridge.instance", "ghpr-test"],
@@ -80,7 +84,8 @@ class FakeGM {
         app_version: "1.0.0",
         official_userscript_version: this.latestVersion,
         api_versions: [1],
-        pairing_required: true
+        pairing_required: true,
+        github_surface_v2: this.discoverySurfaceV2,
       });
     }
     if (url.pathname === "/api/v1/pairings" && options.method === "POST") {
@@ -205,6 +210,18 @@ function makeSnapshot() {
         is_built_in: true,
         has_browser_companion: false,
         is_runnable: true
+      },
+      {
+        id: "team.ci.policy-check",
+        version: "1.0.0",
+        display_name: "Run Team Policy",
+        summary: "Run the team policy check.",
+        targets: ["pull_request"],
+        agents: ["codex"],
+        default_agent: "codex",
+        is_built_in: false,
+        has_browser_companion: false,
+        is_runnable: true
       }
     ],
     contributions: [{
@@ -289,14 +306,14 @@ test("parses supported GitHub PR and workflow URLs", () => {
 });
 
 test("compares server userscript versions without false update prompts", () => {
-  assert.equal(isVersionNewer("1.2.0", "1.1.9"), true);
+  assert.equal(isVersionNewer("1.2.1", "1.2.0"), true);
   assert.equal(isVersionNewer("1.1.1", "1.1.1"), false);
   assert.equal(isVersionNewer("1.1.0", "1.1.1"), false);
   assert.equal(isVersionNewer("not-a-version", "1.1.1"), false);
 });
-test("publishes the client and update metadata as userscript v1.2.0", () => {
+test("publishes the client and update metadata as userscript v2.0.10", () => {
   const metadataVersion = userscriptSource.match(/^\/\/ @version\s+(\S+)$/m)?.[1];
-  assert.equal(metadataVersion, "1.2.0");
+  assert.equal(metadataVersion, "2.0.10");
   assert.equal(CLIENT.version, metadataVersion);
   assert.equal(CLIENT.requested_scopes.includes("tag:read"), true);
   assert.equal(CLIENT.requested_scopes.includes("tag:write"), true);
@@ -385,7 +402,7 @@ test("a repeated run click submits the Skill once", async () => {
 
 test("prompts for a userscript update reported by the Browser Bridge", async () => {
   const window = createWindow();
-  const gm = new FakeGM({ latestVersion: "1.3.0" });
+  const gm = new FakeGM({ latestVersion: "2.1.0" });
   const app = createGhprApp({ window, document: window.document, gm });
   await app.start();
 
@@ -394,7 +411,7 @@ test("prompts for a userscript update reported by the Browser Bridge", async () 
   assert.equal(card.querySelector(".ghpr-badge")?.textContent, "Update");
   card.querySelector("[aria-label='Expand ghpr card']").click();
   const notice = card.querySelector(".ghpr-update-notice");
-  assert.match(notice?.textContent || "", /Userscript update available.*1\.2\.0 → 1\.3\.0/s);
+  assert.match(notice?.textContent || "", /Userscript update available.*2\.0\.10 → 2\.1\.0/s);
   notice.querySelector("button").click();
   assert.deepEqual(gm.opened, ["http://127.0.0.1:48120/install/ghpr.user.js"]);
 
@@ -425,6 +442,39 @@ test("classifies only PR conversation URLs as the expanded surface", () => {
   );
 });
 
+test("classifies both GitHub Files changed routes and their reviewed revisions", () => {
+  assert.equal(
+    isFilesChangedSurface(new URL("https://github.com/example/repo/pull/42/files")),
+    true
+  );
+  assert.equal(
+    isFilesChangedSurface(new URL("https://github.com/example/repo/pull/42/changes")),
+    true
+  );
+  assert.equal(
+    isFilesChangedSurface(new URL("https://github.com/example/repo/pull/42/checks")),
+    false
+  );
+  const base = "a".repeat(40);
+  const head = "b".repeat(40);
+  assert.equal(
+    isFilesChangedSurface(new URL(`https://github.com/example/repo/pull/42/files/${base}..${head}`)),
+    true
+  );
+  assert.equal(
+    filesChangedRevisionRef(new URL(`https://github.com/example/repo/pull/42/files/${base}..${head}`)),
+    head
+  );
+  assert.equal(
+    filesChangedRevisionRef(new URL(`https://github.com/example/repo/pull/42/files/${head}`)),
+    head
+  );
+  assert.equal(
+    filesChangedRevisionRef(new URL("https://github.com/example/repo/pull/42/files")),
+    null
+  );
+});
+
 test("finds semantic anchors without depending on one GitHub selector", () => {
   const window = createWindow();
   assert.equal(semanticTargets(window.document, "pr.header.actions").length, 1);
@@ -432,6 +482,83 @@ test("finds semantic anchors without depending on one GitHub selector", () => {
   assert.equal(semanticTargets(window.document, "files.toolbar.actions").length, 0);
   window.close();
 });
+test("renders an independent ghpr header menu while unpaired", async () => {
+  const window = createWindow();
+  const app = createGhprApp({
+    window,
+    document: window.document,
+    gm: new FakeGM({ paired: false })
+  });
+  await app.start();
+
+  const entry = window.document.querySelector("[data-testid='issue-header'] #ghpr-header-entry");
+  assert.ok(entry, "ghpr should add a compact entry to the GitHub PR header");
+  assert.equal(entry.querySelector("button")?.textContent, "ghpr ▾");
+  const menu = entry.querySelector(".ghpr-header-menu");
+  assert.equal(menu.hidden, true);
+  assert.match(menu.textContent, /Connect this userscript/);
+  entry.querySelector(".ghpr-header-button").click();
+  assert.equal(menu.hidden, false);
+
+  app.stop();
+  window.close();
+});
+test("offers Bridge pairing through a Tampermonkey command when v2 leaves GitHub DOM untouched", async () => {
+  const window = createWindow();
+  const gm = new FakeGM({
+    paired: false,
+    discoverySurfaceV2: true,
+    snapshot: { ...makeSnapshot(), github_surface_v2: true }
+  });
+  const app = createGhprApp({ window, document: window.document, gm });
+  await app.start();
+
+  assert.equal(window.document.getElementById("ghpr-github-root"), null);
+  assert.equal(window.document.getElementById("ghpr-header-entry"), null);
+  const connect = gm.commands.get("Connect ghpr");
+  assert.equal(typeof connect, "function");
+
+  await connect();
+  assert.ok(
+    gm.requests.some((request) =>
+      request.method === "POST" && new URL(request.url).pathname === "/api/v1/pairings"
+    )
+  );
+  assert.equal(gm.storage.get("ghpr.bridge.token"), "cap_upgraded");
+
+  app.stop();
+  window.close();
+});
+test("mounts the ghpr entry before the modern GitHub profile control", async () => {
+  const window = createWindow();
+  window.document.querySelector(".gh-header-actions")?.remove();
+  const header = window.document.createElement("header");
+  header.innerHTML = `
+    <div class="AppHeader-globalBar-end">
+      <button id="native-action">Native action</button>
+      <button class="AppHeader-user" aria-label="Open user navigation menu">Profile</button>
+    </div>
+  `;
+  window.document.body.prepend(header);
+  const app = createGhprApp({
+    window,
+    document: window.document,
+    gm: new FakeGM({ paired: false })
+  });
+  await app.start();
+
+  const globalActions = window.document.querySelector(".AppHeader-globalBar-end");
+  const profile = globalActions.querySelector(".AppHeader-user");
+  const entry = window.document.getElementById("ghpr-header-entry");
+  assert.equal(entry.parentElement, globalActions);
+  assert.equal(profile.previousElementSibling, entry);
+  assert.equal(entry.classList.contains("ghpr-header-floating"), false);
+
+  app.stop();
+  window.close();
+});
+
+
 
 test("defaults the ghpr sidebar card to collapsed on PR checks", async () => {
   const window = createWindow();
@@ -542,6 +669,14 @@ test("renders failed-check actions, local tags, and contribution fallback on PR 
   await app.start();
 
   assert.equal(window.document.querySelector("#ghpr-github-root .ghpr-panel-title")?.textContent, "ghpr");
+  const headerEntry = window.document.getElementById("ghpr-header-entry");
+  assert.ok(headerEntry, "ghpr should mount a header entry on authenticated PR pages");
+  headerEntry.querySelector(".ghpr-header-button").click();
+  assert.match(
+    headerEntry.querySelector(".ghpr-header-menu")?.textContent || "",
+    /Explain CI Failure.*Classify Flaky.*Run Skill.*Run Team Policy.*Tags.*Needs investigation/s
+  );
+  headerEntry.querySelector(".ghpr-header-button").click();
   assert.equal(
     window.document.querySelector("[aria-label='ghpr CI Analysis']"),
     null
@@ -551,10 +686,18 @@ test("renders failed-check actions, local tags, and contribution fallback on PR 
   assert.match(failedRow.textContent, /Likely flaky.*Analyze/s);
   const successRow = window.document.querySelectorAll("[data-testid='check-run-row']")[1];
   assert.doesNotMatch(successRow.textContent, /Analyze/);
-  assert.match(window.document.querySelector(".ghpr-panel-body")?.textContent || "", /Run Team Policy Check/);
   assert.match(
-    window.document.querySelector(".ghpr-panel-body")?.textContent || "",
+    window.document.querySelector("#ghpr-github-root .ghpr-panel-body")?.textContent || "",
+    /Run Team Policy Check/
+  );
+  assert.match(
+    window.document.querySelector("#ghpr-github-root .ghpr-panel-body")?.textContent || "",
     /Local ghpr tags.*Flaky.*Not flaky.*Needs investigation/s
+  );
+  assert.match(
+    window.document.querySelector("#ghpr-header-entry .ghpr-header-menu")?.textContent || "",
+    /Extensions.*Run Team Policy Check/s,
+    "missing semantic anchors must also fall back to the header menu"
   );
 
   const health = gm.requests
@@ -567,7 +710,7 @@ test("renders failed-check actions, local tags, and contribution fallback on PR 
     "missing semantic anchors must be reported and fall back to the ghpr card"
   );
 
-  const classify = [...window.document.querySelectorAll(".ghpr-panel-action")]
+  const classify = [...window.document.querySelectorAll("#ghpr-github-root .ghpr-panel-body .ghpr-panel-action")]
     .find((element) => element.textContent === "Classify Flaky");
   classify.click();
   await settle();
@@ -668,6 +811,36 @@ test("shows an active Skill run and opens its live log from GitHub surfaces", as
   conversationApp.stop();
   checksWindow.close();
   conversationWindow.close();
+});
+
+test("does not expose PR-only analysis actions on workflow run pages", async () => {
+  const snapshot = makeSnapshot();
+  snapshot.page = {
+    type: "workflow_run",
+    key: "github:example-org/example-repo:run:987",
+    repository: "example-org/example-repo",
+    pr_number: null,
+    workflow_run_id: 987
+  };
+  const window = createWindow("/example-org/example-repo/actions/runs/987");
+  const jobHost = window.document.createElement("div");
+  jobHost.setAttribute("data-testid", "check-job-row");
+  window.document.body.append(jobHost);
+  const gm = new FakeGM({ snapshot });
+  const app = createGhprApp({ window, document: window.document, gm });
+  await app.start();
+
+  const text = window.document.querySelector("#ghpr-github-root")?.textContent || "";
+  assert.doesNotMatch(text, /Explain CI Failure|Classify Flaky|Run Skill/);
+  gm.commands.get("Analyze current PR")();
+  await settle();
+  assert.equal(
+    gm.requests.some((request) => new URL(request.url).pathname === "/api/v1/actions"),
+    false
+  );
+
+  app.stop();
+  window.close();
 });
 
 test("offers permission repair instead of actions when skill:run is not granted", async () => {
@@ -809,6 +982,7 @@ test("renders declarative result cards and invokes them with page-scoped identit
       code_review: null,
       markdown: "One actionable finding",
       artifacts: []
+
     },
     error: null,
     retry_of_run_id: null
@@ -836,6 +1010,90 @@ test("renders declarative result cards and invokes them with page-scoped identit
   window.close();
 });
 
+test("renders structured review findings and persists dismissals", async () => {
+  const snapshot = makeSnapshot();
+  snapshot.runs = [{
+    id: "run_review_findings",
+    skill_id: "dev.example.static-review",
+    page: snapshot.page,
+    requested_by_client_id: CLIENT.id,
+    created_at: "2026-08-24T00:00:00Z",
+    started_at: "2026-08-24T00:00:01Z",
+    completed_at: "2026-08-24T00:00:03Z",
+    status: "completed",
+    progress_message: "Completed",
+    progress_current: 3,
+    progress_total: 3,
+    result: {
+      kind: "code_review",
+      title: "Review",
+      summary: "Two actionable findings.",
+      analysis: null,
+      code_review: {
+        overview_markdown: "Two actionable findings.",
+        head_sha: "abc123",
+        engine: "codex",
+        reviewed_at: "2026-08-24T00:00:00Z",
+        findings: [{
+          id: "finding-1",
+          file: "Sources/App.swift",
+          line: 42,
+          body: "Handle the error before continuing.",
+          quoted_code: "try await request()",
+          severity: "warning",
+          confidence: 0.88,
+          category: "correctness",
+          details: {
+            why: "The request failure is otherwise discarded.",
+            suggested_fix: "Return the error.",
+            background: null,
+            trigger_scenarios: []
+          }
+        }]
+      },
+      markdown: "Two actionable findings.",
+      artifacts: []
+    },
+    error: null,
+    retry_of_run_id: null
+  }];
+  const window = createWindow("/example-org/example-repo/pull/1238");
+  const gm = new FakeGM({ snapshot });
+  const app = createGhprApp({ window, document: window.document, gm });
+  await app.start();
+
+  const finding = window.document.querySelector("[data-testid='ghpr-review-finding']");
+  assert.match(finding?.textContent || "", /Handle the error.*Sources\/App\.swift:42/);
+  const view = finding.querySelector("button");
+  assert.equal(view?.textContent, "View in Files changed");
+  view.click();
+  assert.match(window.location.href, /\/changes\?ghpr_finding=finding-1&path=Sources%2FApp\.swift&line=42#L42/);
+
+  const filesWindow = createWindow("/example-org/example-repo/pull/1238/files");
+  const table = filesWindow.document.createElement("table");
+  table.className = "diff-table";
+  filesWindow.document.body.append(table);
+  const filesGM = new FakeGM({ snapshot });
+  const filesApp = createGhprApp({ window: filesWindow, document: filesWindow.document, gm: filesGM });
+  await filesApp.start();
+  assert.equal(filesWindow.document.querySelectorAll("[data-testid='ghpr-review-finding']").length, 1);
+  const dismiss = filesWindow.document.querySelector("[data-testid='ghpr-review-finding'] .ghpr-finding-tools button");
+  assert.equal(dismiss?.textContent, "Dismiss");
+  dismiss.click();
+  await settle();
+  const remainingFinding = filesWindow.document.querySelector(
+    "[data-testid='ghpr-review-finding']"
+  );
+  const persistedDismissals = filesGM.storage.get("ghpr.dismissed.findings");
+
+  app.stop();
+  filesApp.stop();
+  window.close();
+  filesWindow.close();
+
+  assert.equal(remainingFinding, null);
+  assert.deepEqual(persistedDismissals, ["finding-1"]);
+});
 test("renders untrusted analysis text without creating active markup", async () => {
   const snapshot = makeSnapshot();
   snapshot.analyses[0].summary = "<img src=x onerror='globalThis.pwned=true'>";

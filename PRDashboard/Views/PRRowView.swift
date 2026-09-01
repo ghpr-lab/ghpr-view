@@ -2,20 +2,46 @@ import AppKit
 import SwiftUI
 import Combine
 
-private class MenuTracker: ObservableObject {
+final class MenuTracker: ObservableObject {
     static let shared = MenuTracker()
+
     @Published private(set) var isTracking = false
+
+    private var trackedMenus: Set<ObjectIdentifier> = []
     private var cancellables = Set<AnyCancellable>()
 
-    private init() {
-        NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)
+    init(notificationCenter: NotificationCenter = .default) {
+        notificationCenter.publisher(for: NSMenu.didBeginTrackingNotification)
+            .compactMap { $0.object as? NSMenu }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.isTracking = true }
+            .sink { [weak self] menu in
+                self?.beginTracking(menu)
+            }
             .store(in: &cancellables)
-        NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)
+
+        notificationCenter.publisher(for: NSMenu.didEndTrackingNotification)
+            .compactMap { $0.object as? NSMenu }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.isTracking = false }
+            .sink { [weak self] menu in
+                self?.endTracking(menu)
+            }
             .store(in: &cancellables)
+    }
+
+    func beginTracking(_ menu: NSMenu) {
+        trackedMenus.insert(ObjectIdentifier(menu))
+        updateTrackingState()
+    }
+
+    func endTracking(_ menu: NSMenu) {
+        trackedMenus.remove(ObjectIdentifier(menu))
+        updateTrackingState()
+    }
+
+    private func updateTrackingState() {
+        let newValue = !trackedMenus.isEmpty
+        guard newValue != isTracking else { return }
+        isTracking = newValue
     }
 }
 
@@ -31,7 +57,7 @@ struct PRRowView: View {
     var onLoadHoverDetail: (() -> Void)?
     var onTogglePin: (() -> Void)?
     var onAnalyzeCIFailure: (() -> Void)?
-    var onViewCIAnalysis: (() -> Void)?
+    var onOpenRawDiagnostics: (() -> Void)?
     var onRunSkill: ((String) -> Void)?
     var onInstallBrowserUserscript: (() -> Void)?
     var onOpenBrowserIntegrationSettings: (() -> Void)?
@@ -52,8 +78,8 @@ struct PRRowView: View {
     var onboardingManager: OnboardingManager? = nil
     var approvalOnboardingPRID: Int? = nil
     var reviewStatusOnboardingPRID: Int? = nil
-
     @ObservedObject private var menuTracker = MenuTracker.shared
+
     @State private var isHovered = false
 
     private var updateBranchWithRebaseAction: (() -> Void)? {
@@ -376,14 +402,14 @@ struct PRRowView: View {
                     Button {
                         onAnalyzeCIFailure()
                     } label: {
-                        Label("Analyze CI Failure", systemImage: "sparkles")
+                        Label("Analyze CI Failure in Checks", systemImage: "sparkles")
                     }
                 }
-                if extensionAnalysis != nil, let onViewCIAnalysis {
+                if extensionAnalysis != nil, let onOpenRawDiagnostics {
                     Button {
-                        onViewCIAnalysis()
+                        onOpenRawDiagnostics()
                     } label: {
-                        Label("View CI Analysis", systemImage: "waveform.path.ecg")
+                        Label("Raw diagnostics", systemImage: "waveform.path.ecg")
                     }
                 }
                 if pr.category == .authored, let onRerunFailedCI {

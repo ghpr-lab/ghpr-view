@@ -346,12 +346,12 @@ struct MainView: View {
                                 onRerunFailedCI: { viewModel.rerunFailedCI(pr) },
                                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
-                                onAnalyzeCIFailure: { runExtensionSkill("ci.failure.classify_flaky", for: pr) },
-                                onViewCIAnalysis: { openLatestAnalysis(for: pr) },
+                                onAnalyzeCIFailure: { viewModel.openPRChecks(pr) },
+                                onOpenRawDiagnostics: { openRawDiagnostics(for: pr) },
                                 onRunSkill: { runExtensionSkill($0, for: pr) },
                                 onInstallBrowserUserscript: browserUserscriptInstallAction,
                                 onOpenBrowserIntegrationSettings: browserIntegrationSettingsAction,
-                                runnableSkills: extensionPlatformController.runnableSkills(forFailedCI: pr.checkFailureCount > 0),
+                                runnableSkills: extensionPlatformController.runnableRevisionSkills(),
                                 extensionRun: extensionPlatformController.activeRun(repository: pr.repoFullName, number: pr.number),
                                 extensionAnalysis: extensionPlatformController.latestAnalysis(repository: pr.repoFullName, number: pr.number),
                                 extensionTags: extensionPlatformController.tags(repository: pr.repoFullName, number: pr.number),
@@ -389,12 +389,12 @@ struct MainView: View {
                                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                                 onLoadHoverDetail: { viewModel.loadHoverDetailIfNeeded(pr) },
                                 onTogglePin: { viewModel.togglePin(pr) },
-                                onAnalyzeCIFailure: { runExtensionSkill("ci.failure.classify_flaky", for: pr) },
-                                onViewCIAnalysis: { openLatestAnalysis(for: pr) },
+                                onAnalyzeCIFailure: { viewModel.openPRChecks(pr) },
+                                onOpenRawDiagnostics: { openRawDiagnostics(for: pr) },
                                 onRunSkill: { runExtensionSkill($0, for: pr) },
                                 onInstallBrowserUserscript: browserUserscriptInstallAction,
                                 onOpenBrowserIntegrationSettings: browserIntegrationSettingsAction,
-                                runnableSkills: extensionPlatformController.runnableSkills(forFailedCI: pr.checkFailureCount > 0),
+                                runnableSkills: extensionPlatformController.runnableRevisionSkills(),
                                 extensionRun: extensionPlatformController.activeRun(repository: pr.repoFullName, number: pr.number),
                                 extensionAnalysis: extensionPlatformController.latestAnalysis(repository: pr.repoFullName, number: pr.number),
                                 extensionTags: extensionPlatformController.tags(repository: pr.repoFullName, number: pr.number),
@@ -543,12 +543,12 @@ struct MainView: View {
                 onUpdateBranchWithRebase: { viewModel.updateBranchWithRebase(pr) },
                 onLoadHoverDetail: { viewModel.loadHoverDetailIfNeeded(pr) },
                 onTogglePin: showPin ? { viewModel.togglePin(pr) } : nil,
-                onAnalyzeCIFailure: { runExtensionSkill("ci.failure.classify_flaky", for: pr) },
-                onViewCIAnalysis: { openLatestAnalysis(for: pr) },
+                onAnalyzeCIFailure: { viewModel.openPRChecks(pr) },
+                onOpenRawDiagnostics: { openRawDiagnostics(for: pr) },
                 onRunSkill: { runExtensionSkill($0, for: pr) },
                 onInstallBrowserUserscript: browserUserscriptInstallAction,
                 onOpenBrowserIntegrationSettings: browserIntegrationSettingsAction,
-                runnableSkills: extensionPlatformController.runnableSkills(forFailedCI: pr.checkFailureCount > 0),
+                runnableSkills: extensionPlatformController.runnableRevisionSkills(),
                 extensionRun: extensionPlatformController.activeRun(repository: pr.repoFullName, number: pr.number),
                 extensionAnalysis: extensionPlatformController.latestAnalysis(repository: pr.repoFullName, number: pr.number),
                 extensionTags: extensionPlatformController.tags(repository: pr.repoFullName, number: pr.number),
@@ -580,9 +580,7 @@ struct MainView: View {
     }
 
     private var browserIntegrationSettingsAction: (() -> Void)? {
-        guard extensionPlatformController.officialUserscriptClient == nil,
-              extensionPlatformController.installUserscriptURL() == nil,
-              let presentationCoordinator else {
+        guard let presentationCoordinator else {
             return nil
         }
         return {
@@ -591,19 +589,21 @@ struct MainView: View {
     }
 
     private func runExtensionSkill(_ id: String, for pr: PullRequest) {
-        do {
-            try extensionPlatformController.runSkill(
-                id: id,
-                repository: pr.repoFullName,
-                number: pr.number
-            )
-            extensionActionError = nil
-        } catch {
-            extensionActionError = error.localizedDescription
+        Task { @MainActor in
+            do {
+                try await extensionPlatformController.runRevisionSkill(
+                    id: id,
+                    repository: pr.repoFullName,
+                    number: pr.number
+                )
+                extensionActionError = nil
+            } catch {
+                extensionActionError = error.localizedDescription
+            }
         }
     }
 
-    private func openLatestAnalysis(for pr: PullRequest) {
+    private func openRawDiagnostics(for pr: PullRequest) {
         guard let url = extensionPlatformController.latestAnalysisURL(
             repository: pr.repoFullName,
             number: pr.number

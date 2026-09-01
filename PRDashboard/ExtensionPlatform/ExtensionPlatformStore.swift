@@ -60,8 +60,12 @@ final class ExtensionPlatformStore: ObservableObject {
         var tags: [String: TaggedPR] = [:]
         var runs: [String: SkillRun] = [:]
         var analyses: [String: CIAnalysis] = [:]
+        var findings: [String: SkillFinding]? = nil
+        var findingDismissals: [String: Date]? = nil
+        var githubSurfaceV2Enabled: Bool? = nil
         var contributions: [String: BrowserContribution] = [:]
         var slotHealth: [String: SlotHealthReport] = [:]
+        var surfaceHealth: [String: SurfaceHealthReport]? = nil
         var events: [BrowserEvent] = []
         var nextEventID: Int64 = 1
         var agentRuntime: [AgentRuntimeSetting]?
@@ -169,11 +173,75 @@ final class ExtensionPlatformStore: ObservableObject {
     var allRuns: [SkillRun] {
         state.runs.values.sorted { $0.createdAt > $1.createdAt }
     }
+    var allFindings: [SkillFinding] {
+        (state.findings ?? [:]).values.sorted { $0.createdAt > $1.createdAt }
+    }
 
+    func findings(subjectKey: String) -> [SkillFinding] {
+        allFindings.filter { $0.subjectKey == subjectKey }
+    }
+
+    func finding(id: String) -> SkillFinding? {
+        state.findings?[id]
+    }
+
+    func save(finding: SkillFinding) {
+        if state.findings == nil { state.findings = [:] }
+        state.findings?[finding.id] = finding
+        touch()
+    }
+
+    func dismissFinding(fingerprint: String, repository: String, prNumber: Int) {
+        if state.findingDismissals == nil { state.findingDismissals = [:] }
+        state.findingDismissals?["\(repository.lowercased())#\(prNumber):\(fingerprint)"] = Date()
+        touch()
+    }
+
+    func isFindingDismissed(fingerprint: String, repository: String, prNumber: Int) -> Bool {
+        state.findingDismissals?["\(repository.lowercased())#\(prNumber):\(fingerprint)"] != nil
+    }
+
+    var githubSurfaceV2Enabled: Bool {
+        get { state.githubSurfaceV2Enabled ?? true }
+        set { state.githubSurfaceV2Enabled = newValue; touch() }
+    }
+
+    /// Legacy v1 placement health. Suppressed while GitHub-native surfaces are
+    /// active (v1 anchors are not mounted then, so stale reports are noise) and
+    /// deduplicated per slot so one missing anchor is not listed once per page.
     var unhealthySlots: [SlotHealthReport] {
-        state.slotHealth.values
-            .filter { !$0.healthy }
+        guard !githubSurfaceV2Enabled else { return [] }
+        var newestBySlot: [BrowserSlot: SlotHealthReport] = [:]
+        for report in state.slotHealth.values where !report.healthy {
+            if let existing = newestBySlot[report.slot], existing.observedAt >= report.observedAt {
+                continue
+            }
+            newestBySlot[report.slot] = report
+        }
+        return newestBySlot.values.sorted { $0.observedAt > $1.observedAt }
+    }
+
+    var unhealthySurfaces: [SurfaceHealthReport] {
+        (state.surfaceHealth ?? [:]).values
+            .filter { $0.state != .healthy }
             .sorted { $0.observedAt > $1.observedAt }
+    }
+
+    func reportSurfaceHealth(
+        surface: String,
+        state healthState: SurfaceHealthState,
+        detail: String?,
+        now: Date = Date()
+    ) {
+        guard BrowserSurfaceV2(rawValue: surface) != nil else { return }
+        if state.surfaceHealth == nil { state.surfaceHealth = [:] }
+        state.surfaceHealth?[surface] = SurfaceHealthReport(
+            surface: surface,
+            state: healthState,
+            detail: detail,
+            observedAt: now
+        )
+        touch()
     }
 
     func startPairing(
@@ -753,6 +821,7 @@ final class ExtensionPlatformStore: ObservableObject {
         state.contributions = state.contributions.filter { $0.value.expiresAt > now }
         let slotHealthCutoff = now.addingTimeInterval(-7 * 24 * 60 * 60)
         state.slotHealth = state.slotHealth.filter { $0.value.observedAt > slotHealthCutoff }
+        state.surfaceHealth = state.surfaceHealth?.filter { $0.value.observedAt > slotHealthCutoff }
     }
 
     private func touch() {

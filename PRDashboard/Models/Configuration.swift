@@ -15,9 +15,9 @@ struct Configuration: Codable, Equatable {
     var openAtCmuxFirst: Bool  // switch to an existing cmux PR browser tab before falling back to the default browser
     var graphQLEndpoint: String  // developer override for GitHub GraphQL URL; empty = default
     var httpProxyURL: String     // e.g. "http://host:port"; empty = no proxy
-    var httpProxyUsername: String  // empty = no auth; password stored in Keychain
+    var httpProxyUsername: String  // empty = no auth; password stored in the credential store
     var jiraServerURL: String    // e.g. "https://company.atlassian.net"; empty = disabled
-    var jiraEmail: String        // Atlassian account email; token stored in Keychain
+    var jiraEmail: String        // Atlassian account email; token stored in the credential store
     var jiraRefreshInterval: TimeInterval  // seconds
 
     static var `default`: Configuration {
@@ -157,7 +157,7 @@ enum AuthMethod: String, Codable {
     case pat  // Personal Access Token
 }
 
-// OAuth tokens stored separately in Keychain
+// OAuth tokens stored separately from the general configuration.
 struct AuthState: Codable, Equatable {
     var accessToken: String?
     var username: String?

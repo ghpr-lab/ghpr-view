@@ -85,12 +85,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.presentationCoordinator?.present(.settings)
         }
 
-        let isPRActionsUITest = CommandLine.arguments.contains("--ui-testing-browser-pr-actions")
+        let isPRActionsUITest = CommandLine.arguments.contains("--ui-testing-browser-pr-actions") ||
+            CommandLine.arguments.contains("--ui-testing-browser-pr-actions-passing")
         let extensionPlatformController = ExtensionPlatformController(
             snapshotProvider: { [weak self] in
 #if DEBUG
                 if isPRActionsUITest {
-                    return ExtensionPlatformUITestFixture.snapshot
+                    return ExtensionPlatformUITestFixture.snapshot(
+                        hasFailedCI: CommandLine.arguments.contains("--ui-testing-browser-pr-actions")
+                    )
                 }
 #endif
                 return AppDelegate.makeLocalSnapshot(
@@ -114,6 +117,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ports: isExtensionPlatformUITest ? [0] : Array(48120...48129)
         )
         self.extensionPlatformController = extensionPlatformController
+#if DEBUG
+        if CommandLine.arguments.contains("--ui-testing-browser-settings") {
+            ExtensionPlatformUITestFixture.seedSurfaceHealth(in: extensionPlatformController.store)
+        }
+#endif
 
         // 6. Create main view
         let mainView = MainView(
@@ -193,6 +201,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func configureExtensionPlatformUITestIfRequested(viewModel: PRListViewModel) {
         guard let extensionPlatformController else { return }
         if CommandLine.arguments.contains("--ui-testing-browser-settings") {
+            for client in extensionPlatformController.store.pairedClients {
+                extensionPlatformController.store.revokeClient(id: client.id)
+            }
             let descriptor = BrowserClientDescriptor(
                 id: "dev.ghpr.ui-test-client",
                 name: "UI Test Client",
@@ -208,6 +219,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     approvedScopes: descriptor.requestedScopes
                 )
             }
+            browserPairingWindow?.close()
+            browserPairingWindow = nil
             presentationCoordinator?.present(.settings)
         } else if CommandLine.arguments.contains("--ui-testing-browser-pairing") ||
             CommandLine.arguments.contains("--ui-testing-browser-permission-upgrade") {
@@ -231,11 +244,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 #if DEBUG
         let hasFailedCI = CommandLine.arguments.contains("--ui-testing-browser-pr-actions")
-        let hasPassingCI = CommandLine.arguments.contains("--ui-testing-browser-pr-actions-passing")
+        let simulateMenuUpdate = CommandLine.arguments.contains(
+            "--ui-testing-browser-pr-actions-updating"
+        )
+        let hasPassingCI = CommandLine.arguments.contains("--ui-testing-browser-pr-actions-passing") ||
+            simulateMenuUpdate
         if hasFailedCI || hasPassingCI {
             openExtensionPlatformUITestWindow(
                 controller: extensionPlatformController,
-                hasFailedCI: hasFailedCI
+                hasFailedCI: hasFailedCI,
+                simulateMenuUpdate: simulateMenuUpdate
             )
         }
 #endif
@@ -244,7 +262,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 #if DEBUG
     private func openExtensionPlatformUITestWindow(
         controller: ExtensionPlatformController,
-        hasFailedCI: Bool
+        hasFailedCI: Bool,
+        simulateMenuUpdate: Bool
     ) {
         let window = NSWindow(
             contentViewController: NSHostingController(
@@ -261,6 +280,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         extensionPlatformUITestWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+
+        guard simulateMenuUpdate else { return }
+        NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)
+            .compactMap { $0.object as? NSMenu }
+            .filter { menu in
+                menu.items.contains { $0.title == "Run Skill" }
+            }
+            .prefix(1)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak controller, weak window] _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    guard let controller else { return }
+                    let pr = ExtensionPlatformUITestFixture.passingPullRequest
+                    controller.store.setTag(
+                        .needsInvestigation,
+                        pageKey: GitHubPageContext.pullRequest(
+                            repository: pr.repoFullName,
+                            number: pr.number
+                        ).key,
+                        clientID: nil
+                    )
+                    window?.title = "PR Actions Updated"
+                }
+            }
+            .store(in: &cancellables)
     }
 #endif
 
@@ -439,6 +483,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 private enum ExtensionPlatformUITestFixture {
     static let pullRequest = makePullRequest(hasFailedCI: true)
     static let passingPullRequest = makePullRequest(hasFailedCI: false)
+    @MainActor
+    static func seedSurfaceHealth(in store: ExtensionPlatformStore) {
+        store.reportSurfaceHealth(
+            surface: BrowserSurfaceV2.checksJobTrailing.rawValue,
+            state: .missing,
+            detail: "UI fixture: exact Checks job anchor missing"
+        )
+        store.reportSurfaceHealth(
+            surface: BrowserSurfaceV2.actionsJobAfterFailureSummary.rawValue,
+            state: .ambiguous,
+            detail: "UI fixture: multiple Actions failure summaries matched"
+        )
+    }
+
 
     private static func makePullRequest(hasFailedCI: Bool) -> PullRequest {
         PullRequest(
@@ -487,30 +545,33 @@ private enum ExtensionPlatformUITestFixture {
         )
     }
 
-    static let snapshot = LocalSnapshotFactory.makeSnapshot(
-        input: LocalSnapshotInput(
-            appVersion: "1.0.0",
-            buildVersion: "1",
-            bundleIdentifier: "com.example.ghpr-ui-test",
-            authState: AuthState(accessToken: nil, username: "octocat", authMethod: nil),
-            prList: PRList(
-                lastUpdated: Date(timeIntervalSince1970: 1_775_000_100),
-                pullRequests: [pullRequest],
-                isLoading: false,
-                error: nil
+    static func snapshot(hasFailedCI: Bool) -> LocalSnapshot {
+        let fixture = hasFailedCI ? pullRequest : passingPullRequest
+        return LocalSnapshotFactory.makeSnapshot(
+            input: LocalSnapshotInput(
+                appVersion: "1.0.0",
+                buildVersion: "1",
+                bundleIdentifier: "com.example.ghpr-ui-test",
+                authState: AuthState(accessToken: nil, username: "octocat", authMethod: nil),
+                prList: PRList(
+                    lastUpdated: Date(timeIntervalSince1970: 1_775_000_100),
+                    pullRequests: [fixture],
+                    isLoading: false,
+                    error: nil
+                ),
+                rateLimitInfo: RateLimitInfo(
+                    limit: 5_000,
+                    remaining: 4_999,
+                    resetDate: Date(timeIntervalSince1970: 1_775_003_600)
+                ),
+                pinnedPRIdentifiers: [],
+                minimumApprovalsForReadyToMerge: 2,
+                refreshStatus: "idle",
+                refreshError: nil
             ),
-            rateLimitInfo: RateLimitInfo(
-                limit: 5_000,
-                remaining: 4_999,
-                resetDate: Date(timeIntervalSince1970: 1_775_003_600)
-            ),
-            pinnedPRIdentifiers: [],
-            minimumApprovalsForReadyToMerge: 2,
-            refreshStatus: "idle",
-            refreshError: nil
-        ),
-        now: Date(timeIntervalSince1970: 1_775_000_100)
-    )
+            now: Date(timeIntervalSince1970: 1_775_000_100)
+        )
+    }
 }
 
 @MainActor
@@ -543,23 +604,19 @@ private struct ExtensionPlatformPRActionsUITestView: View {
                 onOpenJira: { _ in },
                 onCopyURL: {},
                 onRerunFailedCI: {},
-                onAnalyzeCIFailure: {
-                    _ = try? controller.runSkill(
-                        id: "ci.failure.classify_flaky",
-                        repository: pullRequest.repoFullName,
-                        number: pullRequest.number
-                    )
-                },
-                onViewCIAnalysis: {},
-                onRunSkill: {
-                    _ = try? controller.runSkill(
-                        id: $0,
-                        repository: pullRequest.repoFullName,
-                        number: pullRequest.number
-                    )
+                onAnalyzeCIFailure: {},
+                onOpenRawDiagnostics: {},
+                onRunSkill: { skillID in
+                    Task { @MainActor in
+                        _ = try? await controller.runRevisionSkill(
+                            id: skillID,
+                            repository: pullRequest.repoFullName,
+                            number: pullRequest.number
+                        )
+                    }
                 },
                 onInstallBrowserUserscript: {},
-                runnableSkills: controller.runnableSkills(forFailedCI: hasFailedCI),
+                runnableSkills: controller.runnableRevisionSkills(),
                 extensionRun: controller.activeRun(
                     repository: pullRequest.repoFullName,
                     number: pullRequest.number

@@ -70,27 +70,36 @@ enum CILogFetcher {
     static let commandTimeoutSeconds = 30
     static let logTimeoutSeconds = 180
 
+    /// Injectable bounded `gh` command runner. Defaults to `run`; tests and
+    /// `GitHubSubjectResolver` substitute a fake to avoid spawning real
+    /// processes while exercising resolution/validation logic.
+    typealias GHCommandRunner = @Sendable (URL, [String], String, Int, Int) async throws -> CommandResult
+
     // MARK: - Entry point
 
     static func fetchFailedJobLogs(
         repository: String,
         prNumber: Int,
-        now: Date = Date()
+        now: Date = Date(),
+        runner: GHCommandRunner? = nil
     ) async throws -> FailedJobLogs {
+        let effectiveRunner = runner ?? run
         let gh = try resolveGHExecutable()
-        try await verifyAuthentication(gh)
-        let allowsEscapeSequences = await apiAllowsEscapeSequences(gh)
+        try await verifyAuthentication(gh, runner: effectiveRunner)
+        let allowsEscapeSequences = await apiAllowsEscapeSequences(gh, runner: effectiveRunner)
         let check = try await resolveFailedCheck(
             gh,
             repository: repository,
-            prNumber: prNumber
+            prNumber: prNumber,
+            runner: effectiveRunner
         )
         let raw = try await downloadFailedLog(
             gh: gh,
             repository: repository,
             runID: check.runID,
             jobID: check.jobID,
-            allowsEscapeSequences: allowsEscapeSequences
+            allowsEscapeSequences: allowsEscapeSequences,
+            runner: effectiveRunner
         )
         let normalized = cleanLog(raw.content)
         let content = sliceAroundFailure(
@@ -107,6 +116,58 @@ enum CILogFetcher {
             workflowName: check.name,
             runID: check.runID,
             jobID: check.jobID,
+            capturedBytes: normalized.utf8.count,
+            truncated: truncated,
+            capturedOverflow: raw.overflow,
+            fetchedAt: now,
+            content: content
+        )
+    }
+
+    /// Exact-subject v2 entry point: downloads the log for a canonical,
+    /// already-resolved `WorkflowJobSubject` directly by run/job ID. It never
+    /// lists or matches checks by job name. `prNumber` is carried through only
+    /// to populate `FailedJobLogs` for callers that associate the log with a
+    /// PR page; it plays no role in resolution.
+    static func fetchFailedJobLogs(
+        repository: String,
+        prNumber: Int,
+        subject: WorkflowJobSubject,
+        now: Date = Date(),
+        runner: GHCommandRunner? = nil
+    ) async throws -> FailedJobLogs {
+        guard subject.repository.lowercased() == repository.lowercased() else {
+            throw CILogFetcherError.resolutionFailed(
+                "subject repository \(subject.repository) does not match \(repository)"
+            )
+        }
+        let effectiveRunner = runner ?? run
+        let gh = try resolveGHExecutable()
+        try await verifyAuthentication(gh, runner: effectiveRunner)
+        let allowsEscapeSequences = await apiAllowsEscapeSequences(gh, runner: effectiveRunner)
+        let raw = try await downloadFailedLog(
+            gh: gh,
+            repository: repository,
+            runID: subject.workflowRunID,
+            jobID: subject.workflowJobID,
+            allowsEscapeSequences: allowsEscapeSequences,
+            runner: effectiveRunner
+        )
+        let normalized = cleanLog(raw.content)
+        let content = sliceAroundFailure(
+            normalized,
+            byteLimit: maximumContextBytes
+        )
+        let truncated = normalized.utf8.count > maximumContextBytes
+        ciLogFetcherLogger.info(
+            "Fetched CI log for \(repository)#\(prNumber) via exact job \(subject.workflowJobID): \(normalized.utf8.count) bytes, truncated=\(truncated), overflow=\(raw.overflow)"
+        )
+        return FailedJobLogs(
+            repository: repository,
+            prNumber: prNumber,
+            workflowName: nil,
+            runID: subject.workflowRunID,
+            jobID: subject.workflowJobID,
             capturedBytes: normalized.utf8.count,
             truncated: truncated,
             capturedOverflow: raw.overflow,
@@ -142,13 +203,14 @@ enum CILogFetcher {
         return executable
     }
 
-    static func verifyAuthentication(_ gh: URL) async throws {
-        let result = try await run(
+    static func verifyAuthentication(_ gh: URL, runner: GHCommandRunner? = nil) async throws {
+        let effectiveRunner = runner ?? run
+        let result = try await effectiveRunner(
             gh,
-            arguments: ["auth", "token"],
-            operation: "auth token",
-            timeoutSeconds: commandTimeoutSeconds,
-            maximumOutputBytes: 4 * 1024
+            ["auth", "token"],
+            "auth token",
+            commandTimeoutSeconds,
+            4 * 1024
         )
         guard result.success else {
             throw CILogFetcherError.ghNotAuthenticated
@@ -159,13 +221,14 @@ enum CILogFetcher {
     /// sequences to a non-TTY unless `--allow-escape-sequences` is passed. Older
     /// gh does not know the flag, so probe `gh api --help` once (mirrors
     /// fetch-ci-log.sh).
-    static func apiAllowsEscapeSequences(_ gh: URL) async -> Bool {
-        guard let result = try? await run(
+    static func apiAllowsEscapeSequences(_ gh: URL, runner: GHCommandRunner? = nil) async -> Bool {
+        let effectiveRunner = runner ?? run
+        guard let result = try? await effectiveRunner(
             gh,
-            arguments: ["api", "--help"],
-            operation: "api --help",
-            timeoutSeconds: commandTimeoutSeconds,
-            maximumOutputBytes: 64 * 1024
+            ["api", "--help"],
+            "api --help",
+            commandTimeoutSeconds,
+            64 * 1024
         ), result.success else {
             return false
         }
@@ -183,30 +246,41 @@ enum CILogFetcher {
     static func resolveFailedCheck(
         _ gh: URL,
         repository: String,
-        prNumber: Int
+        prNumber: Int,
+        runner: GHCommandRunner? = nil
     ) async throws -> FailedCheck {
-        let jq = """
-        [.[] | select(.bucket=="fail" and .link != null)] | sort_by(.completedAt) \
-        | last | [.link, .name] | @tsv
-        """
-        let result = try await run(
+        let effectiveRunner = runner ?? run
+        struct Check: Decodable {
+            let name: String
+            let bucket: String
+            let link: String?
+            let completedAt: String?
+        }
+        let result = try await effectiveRunner(
             gh,
-            arguments: [
+            [
                 "pr", "checks", "\(prNumber)",
                 "--repo", repository,
-                "--json", "name,bucket,link,completedAt",
-                "--jq", jq
+                "--json", "name,bucket,link,completedAt"
             ],
-            operation: "pr checks",
-            timeoutSeconds: commandTimeoutSeconds,
-            maximumOutputBytes: 64 * 1024
+            "pr checks",
+            commandTimeoutSeconds,
+            64 * 1024
         )
-        // `gh pr checks` exits 1 when any check failed and 8 when checks are
-        // pending — the exact states this fetcher runs in — so the exit code is
-        // not a pass/fail signal. Judge the parsed stdout; only a non-zero exit
-        // with empty output is a resolution error (mirrors fetch-ci-log.sh).
-        let line = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !line.isEmpty else {
+        guard let data = result.stdout.data(using: .utf8) else {
+            throw CILogFetcherError.resolutionFailed("gh returned invalid UTF-8.")
+        }
+        let checks: [Check]
+        do {
+            checks = try JSONDecoder().decode([Check].self, from: data)
+        } catch {
+            if result.status != 0 {
+                throw CILogFetcherError.resolutionFailed(trimmedDiagnostic(result.stderr))
+            }
+            throw CILogFetcherError.resolutionFailed("gh returned invalid check JSON.")
+        }
+        let failed = checks.filter { $0.bucket == "fail" && $0.link != nil }
+        guard !failed.isEmpty else {
             if result.status != 0 {
                 throw CILogFetcherError.resolutionFailed(trimmedDiagnostic(result.stderr))
             }
@@ -215,15 +289,16 @@ enum CILogFetcher {
                 prNumber: prNumber
             )
         }
-        let parts = line.split(separator: "\t", omittingEmptySubsequences: false)
-        let link = parts.first.map(String.init) ?? ""
-        let name = parts.count > 1 && !parts[1].isEmpty ? String(parts[1]) : nil
-        guard let runID = extractRunID(from: link) else {
+        let selected = failed.max {
+            ($0.completedAt ?? "") < ($1.completedAt ?? "")
+        }!
+        guard let link = selected.link,
+              let runID = extractRunID(from: link) else {
             throw CILogFetcherError.resolutionFailed(
-                "could not extract a workflow run id from \(link)"
+                "could not extract a workflow run id from \(selected.link ?? "")"
             )
         }
-        return FailedCheck(runID: runID, jobID: extractJobID(from: link), name: name)
+        return FailedCheck(runID: runID, jobID: extractJobID(from: link), name: selected.name)
     }
 
     /// Check links look like `…/actions/runs/<RUN_ID>/job/<JOB_ID>`.
@@ -252,8 +327,10 @@ enum CILogFetcher {
         repository: String,
         runID: Int64,
         jobID: Int64?,
-        allowsEscapeSequences: Bool
+        allowsEscapeSequences: Bool,
+        runner: GHCommandRunner? = nil
     ) async throws -> DownloadedLog {
+        let effectiveRunner = runner ?? run
         let parts = repository.split(separator: "/", maxSplits: 1).map(String.init)
         guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
             throw CILogFetcherError.resolutionFailed(
@@ -264,15 +341,15 @@ enum CILogFetcher {
         let name = parts[1]
 
         if let jobID {
-            let jobResult = try await run(
+            let jobResult = try await effectiveRunner(
                 gh,
-                arguments: [
+                [
                     "run", "view", "--repo", repository,
                     "--job", "\(jobID)", "--log"
                 ],
-                operation: "run view --job",
-                timeoutSeconds: logTimeoutSeconds,
-                maximumOutputBytes: maximumCaptureBytes
+                "run view --job",
+                logTimeoutSeconds,
+                maximumCaptureBytes
             )
             if jobResult.status == 0, !jobResult.stdout.isEmpty {
                 return DownloadedLog(
@@ -283,17 +360,17 @@ enum CILogFetcher {
             if isExpired(jobResult.stderr) {
                 throw CILogFetcherError.logsExpired("job \(jobID)")
             }
-            let apiResult = try await run(
+            let apiResult = try await effectiveRunner(
                 gh,
-                arguments: apiLogArguments(
+                apiLogArguments(
                     owner: owner,
                     name: name,
                     jobID: jobID,
                     allowsEscapeSequences: allowsEscapeSequences
                 ),
-                operation: "job logs API",
-                timeoutSeconds: logTimeoutSeconds,
-                maximumOutputBytes: maximumCaptureBytes
+                "job logs API",
+                logTimeoutSeconds,
+                maximumCaptureBytes
             )
             if isExpired(apiResult.stderr) {
                 throw CILogFetcherError.logsExpired("job \(jobID)")
@@ -310,12 +387,12 @@ enum CILogFetcher {
         }
 
         // No job id in the check link: download the run's failed-job log.
-        let runResult = try await run(
+        let runResult = try await effectiveRunner(
             gh,
-            arguments: ["run", "view", "\(runID)", "--repo", repository, "--log-failed"],
-            operation: "run view --log-failed",
-            timeoutSeconds: logTimeoutSeconds,
-            maximumOutputBytes: maximumCaptureBytes
+            ["run", "view", "\(runID)", "--repo", repository, "--log-failed"],
+            "run view --log-failed",
+            logTimeoutSeconds,
+            maximumCaptureBytes
         )
         if runResult.status == 0, !runResult.stdout.isEmpty {
             return DownloadedLog(
@@ -332,15 +409,15 @@ enum CILogFetcher {
         .jobs[] | select((.conclusion // "") as $c | $c != "" and $c != "success" \
         and $c != "skipped" and $c != "neutral") | .databaseId
         """
-        let jobsResult = try await run(
+        let jobsResult = try await effectiveRunner(
             gh,
-            arguments: [
+            [
                 "run", "view", "\(runID)", "--repo", repository,
                 "--json", "jobs", "--jq", jobsJQ
             ],
-            operation: "run jobs list",
-            timeoutSeconds: commandTimeoutSeconds,
-            maximumOutputBytes: 256 * 1024
+            "run jobs list",
+            commandTimeoutSeconds,
+            256 * 1024
         )
         let jobIDs = jobsResult.stdout
             .split(whereSeparator: \.isWhitespace)
@@ -359,17 +436,17 @@ enum CILogFetcher {
         var overflow = false
         for id in jobIDs {
             combined += "=== Job \(id) ===\n"
-            let apiResult = try await run(
+            let apiResult = try await effectiveRunner(
                 gh,
-                arguments: apiLogArguments(
+                apiLogArguments(
                     owner: owner,
                     name: name,
                     jobID: id,
                     allowsEscapeSequences: allowsEscapeSequences
                 ),
-                operation: "job logs API",
-                timeoutSeconds: logTimeoutSeconds,
-                maximumOutputBytes: maximumCaptureBytes
+                "job logs API",
+                logTimeoutSeconds,
+                maximumCaptureBytes
             )
             if isExpired(apiResult.stderr) {
                 throw CILogFetcherError.logsExpired("job \(id)")

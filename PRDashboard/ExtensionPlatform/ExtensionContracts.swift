@@ -1,9 +1,11 @@
 import Foundation
+import CryptoKit
 
 enum GHPRContract {
     static let skillVersion = "ghpr.dev/skill/v1"
     static let presentationVersion = "ghpr.dev/presentation/v1"
     static let browserVersion = "ghpr.dev/browser/v1"
+    static let browserVersionV2 = "ghpr.dev/browser/v2"
     static let bridgeProtocol = "ghpr.browser-bridge/v1"
     static let bridgeAPIVersion = 1
 }
@@ -27,12 +29,13 @@ enum BrowserScope: String, Codable, CaseIterable, Hashable, Identifiable {
     case uiContribute = "ui:contribute"
     case detailOpen = "detail:open"
     case appOpen = "app:open"
+    case findingWrite = "finding:write"
 
     var id: String { rawValue }
 
     var risk: BrowserPermissionRisk {
         switch self {
-        case .artifactRead, .skillRun, .skillCancel, .tagWrite:
+        case .artifactRead, .skillRun, .skillCancel, .tagWrite, .findingWrite:
             return .elevated
         default:
             return .standard
@@ -53,6 +56,7 @@ enum BrowserScope: String, Codable, CaseIterable, Hashable, Identifiable {
         case .uiContribute: return "Add GitHub page UI"
         case .detailOpen: return "Open local analysis"
         case .appOpen: return "Open ghpr-view"
+        case .findingWrite: return "Dismiss findings"
         }
     }
 
@@ -73,6 +77,7 @@ struct BrowserBridgeDiscovery: Codable, Equatable {
     let officialUserscriptVersion: String?
     let apiVersions: [Int]
     let pairingRequired: Bool
+    var githubSurfaceV2: Bool = true
 
     enum CodingKeys: String, CodingKey {
         case protocolName = "protocol"
@@ -81,6 +86,7 @@ struct BrowserBridgeDiscovery: Codable, Equatable {
         case officialUserscriptVersion
         case apiVersions
         case pairingRequired
+        case githubSurfaceV2
     }
 }
 
@@ -209,7 +215,7 @@ enum GitHubPageType: String, Codable, CaseIterable {
     case workflowRun = "workflow_run"
 }
 
-struct GitHubPageContext: Codable, Equatable {
+struct GitHubPageContext: Codable, Equatable, Hashable {
     let type: GitHubPageType
     let key: String
     let repository: String
@@ -249,6 +255,222 @@ extension GitHubPageContext {
         }
     }
 }
+enum SubjectValidationError: Error, Equatable {
+    case invalid(String)
+    case subjectKeyMismatch
+}
+
+private func ghprSHA256(_ value: String) -> String {
+    SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
+private func validateGitHubIdentity(repository: String, positive values: [(String, Int64)]) throws {
+    guard repository.range(of: #"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"#, options: .regularExpression) != nil else {
+        throw SubjectValidationError.invalid("repository")
+    }
+    for (name, value) in values where value <= 0 {
+        throw SubjectValidationError.invalid(name)
+    }
+}
+
+struct PullRequestRevisionSubject: Codable, Equatable, Hashable {
+    let repository: String
+    let prNumber: Int
+    let baseSHA: String
+    let headSHA: String
+
+    init(repository: String, prNumber: Int, baseSHA: String, headSHA: String) throws {
+        try validateGitHubIdentity(repository: repository, positive: [("prNumber", Int64(prNumber))])
+        guard baseSHA.range(of: #"^[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil,
+              headSHA.range(of: #"^[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil else {
+            throw SubjectValidationError.invalid("sha")
+        }
+        self.repository = repository
+        self.prNumber = prNumber
+        self.baseSHA = baseSHA.lowercased()
+        self.headSHA = headSHA.lowercased()
+    }
+}
+
+struct WorkflowJobSubject: Codable, Equatable, Hashable {
+    let repository: String
+    let workflowRunID: Int64
+    let workflowAttempt: Int
+    let workflowJobID: Int64
+    let headSHA: String
+
+    init(repository: String, workflowRunID: Int64, workflowAttempt: Int, workflowJobID: Int64, headSHA: String) throws {
+        try validateGitHubIdentity(repository: repository, positive: [("workflowRunID", workflowRunID), ("workflowAttempt", Int64(workflowAttempt)), ("workflowJobID", workflowJobID)])
+        guard headSHA.range(of: #"^[0-9a-fA-F]{40}$"#, options: .regularExpression) != nil else {
+            throw SubjectValidationError.invalid("headSHA")
+        }
+        self.repository = repository
+        self.workflowRunID = workflowRunID
+        self.workflowAttempt = workflowAttempt
+        self.workflowJobID = workflowJobID
+        self.headSHA = headSHA.lowercased()
+    }
+}
+
+enum DiffSide: String, Codable, Hashable { case left, right }
+
+struct DiffAnchor: Codable, Equatable, Hashable {
+    let repository: String
+    let prNumber: Int
+    let baseSHA: String
+    let headSHA: String
+    let blobSHA: String?
+    let filePath: String
+    let side: DiffSide
+    let startLine: Int
+    let endLine: Int
+    let hunkFingerprint: String?
+    let quotedCode: String?
+
+    init(repository: String, prNumber: Int, baseSHA: String, headSHA: String, blobSHA: String? = nil, filePath: String, side: DiffSide, startLine: Int, endLine: Int, hunkFingerprint: String? = nil, quotedCode: String? = nil) throws {
+        _ = try PullRequestRevisionSubject(repository: repository, prNumber: prNumber, baseSHA: baseSHA, headSHA: headSHA)
+        guard !filePath.isEmpty, !filePath.hasPrefix("/"), !filePath.split(separator: "/").contains(".."), startLine > 0, endLine >= startLine else {
+            throw SubjectValidationError.invalid("diff anchor")
+        }
+        if let blobSHA, blobSHA.range(of: #"^[0-9a-fA-F]{40}$"#, options: .regularExpression) == nil {
+            throw SubjectValidationError.invalid("blobSHA")
+        }
+        self.repository = repository
+        self.prNumber = prNumber
+        self.baseSHA = baseSHA.lowercased()
+        self.headSHA = headSHA.lowercased()
+        self.blobSHA = blobSHA?.lowercased()
+        self.filePath = filePath
+        self.side = side
+        self.startLine = startLine
+        self.endLine = endLine
+        self.hunkFingerprint = hunkFingerprint
+        self.quotedCode = quotedCode
+    }
+}
+
+enum GitHubSubject: Codable, Equatable, Hashable {
+    case pullRequestRevision(PullRequestRevisionSubject)
+    case workflowJob(WorkflowJobSubject)
+    case diffLine(DiffAnchor)
+    case legacyPage(GitHubPageContext)
+
+    var subjectKey: String {
+        switch self {
+        case .pullRequestRevision(let s): return "github:pull-request-revision:\(s.repository.lowercased())#\(s.prNumber)@\(s.baseSHA)..\(s.headSHA)"
+        case .workflowJob(let s): return "github:workflow-job:\(s.repository.lowercased()):run:\(s.workflowRunID):attempt:\(s.workflowAttempt):job:\(s.workflowJobID)@\(s.headSHA)"
+        case .diffLine(let a):
+            let raw = ["v1", a.repository.lowercased(), "\(a.prNumber)", a.baseSHA, a.headSHA, a.blobSHA ?? "-", a.filePath, a.side.rawValue, "\(a.startLine)", "\(a.endLine)"].joined(separator: "\0")
+            return "github:diff-line:\(ghprSHA256(raw))"
+        case .legacyPage(let page): return "github:legacy-page:\(page.key)"
+        }
+    }
+
+    var page: GitHubPageContext? {
+        switch self {
+        case .pullRequestRevision(let s):
+            return .pullRequest(repository: s.repository, number: s.prNumber)
+        case .diffLine(let a):
+            return .pullRequest(repository: a.repository, number: a.prNumber)
+        case .workflowJob(let s):
+            return .workflowRun(repository: s.repository, runID: s.workflowRunID)
+        case .legacyPage(let page): return page
+        }
+    }
+
+    var isLegacy: Bool {
+        if case .legacyPage = self { return true }
+        return false
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, repository, prNumber, baseSHA, headSHA, workflowRunID, workflowAttempt, workflowJobID, blobSHA, filePath, side, startLine, endLine, hunkFingerprint, quotedCode, page, subjectKey }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self); let type = try c.decode(String.self, forKey: .type)
+        switch type {
+        case "pull_request_revision": self = .pullRequestRevision(try PullRequestRevisionSubject(repository: c.decode(String.self, forKey: .repository), prNumber: c.decode(Int.self, forKey: .prNumber), baseSHA: c.decode(String.self, forKey: .baseSHA), headSHA: c.decode(String.self, forKey: .headSHA)))
+        case "workflow_job": self = .workflowJob(try WorkflowJobSubject(repository: c.decode(String.self, forKey: .repository), workflowRunID: c.decode(Int64.self, forKey: .workflowRunID), workflowAttempt: c.decode(Int.self, forKey: .workflowAttempt), workflowJobID: c.decode(Int64.self, forKey: .workflowJobID), headSHA: c.decode(String.self, forKey: .headSHA)))
+        case "diff_line": self = .diffLine(try DiffAnchor(repository: c.decode(String.self, forKey: .repository), prNumber: c.decode(Int.self, forKey: .prNumber), baseSHA: c.decode(String.self, forKey: .baseSHA), headSHA: c.decode(String.self, forKey: .headSHA), blobSHA: c.decodeIfPresent(String.self, forKey: .blobSHA), filePath: c.decode(String.self, forKey: .filePath), side: c.decode(DiffSide.self, forKey: .side), startLine: c.decode(Int.self, forKey: .startLine), endLine: c.decode(Int.self, forKey: .endLine), hunkFingerprint: c.decodeIfPresent(String.self, forKey: .hunkFingerprint), quotedCode: c.decodeIfPresent(String.self, forKey: .quotedCode)))
+        case "legacy_page": self = .legacyPage(try c.decode(GitHubPageContext.self, forKey: .page))
+        default: throw SubjectValidationError.invalid("type")
+        }
+        if let supplied = try c.decodeIfPresent(String.self, forKey: .subjectKey), supplied != subjectKey { throw SubjectValidationError.subjectKeyMismatch }
+    }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .pullRequestRevision(let s): try c.encode("pull_request_revision", forKey: .type); try c.encode(s.repository, forKey: .repository); try c.encode(s.prNumber, forKey: .prNumber); try c.encode(s.baseSHA, forKey: .baseSHA); try c.encode(s.headSHA, forKey: .headSHA)
+        case .workflowJob(let s): try c.encode("workflow_job", forKey: .type); try c.encode(s.repository, forKey: .repository); try c.encode(s.workflowRunID, forKey: .workflowRunID); try c.encode(s.workflowAttempt, forKey: .workflowAttempt); try c.encode(s.workflowJobID, forKey: .workflowJobID); try c.encode(s.headSHA, forKey: .headSHA)
+        case .diffLine(let a): try c.encode("diff_line", forKey: .type); try c.encode(a.repository, forKey: .repository); try c.encode(a.prNumber, forKey: .prNumber); try c.encode(a.baseSHA, forKey: .baseSHA); try c.encode(a.headSHA, forKey: .headSHA); try c.encodeIfPresent(a.blobSHA, forKey: .blobSHA); try c.encode(a.filePath, forKey: .filePath); try c.encode(a.side, forKey: .side); try c.encode(a.startLine, forKey: .startLine); try c.encode(a.endLine, forKey: .endLine); try c.encodeIfPresent(a.hunkFingerprint, forKey: .hunkFingerprint); try c.encodeIfPresent(a.quotedCode, forKey: .quotedCode)
+        case .legacyPage(let p): try c.encode("legacy_page", forKey: .type); try c.encode(p, forKey: .page)
+        }
+        try c.encode(subjectKey, forKey: .subjectKey)
+    }
+}
+enum FindingSeverity: String, Codable { case error, warning, info }
+enum FindingLifecycle: String, Codable { case exact, remapped, outdated, unavailable }
+enum FindingKind: String, Codable { case ciFailureExplanation = "ci_failure_explanation", ciFlakyClassification = "ci_flaky_classification", reviewFinding = "review_finding" }
+struct SkillFinding: Codable, Equatable, Identifiable {
+    let id: String
+    let subjectKey: String
+    let subject: GitHubSubject
+    let kind: FindingKind
+    let severity: FindingSeverity
+    let title: String
+    let summary: String
+    let details: String?
+    let confidence: Double?
+    let lifecycle: FindingLifecycle
+    let createdAt: Date
+    let fingerprint: String
+    var resolvedSubject: GitHubSubject? = nil
+}
+
+extension SkillFinding {
+    private enum CodingKeys: String, CodingKey {
+        case id, subjectKey, subject, kind, severity, title, summary, details
+        case confidence, lifecycle, createdAt, fingerprint, resolvedSubject
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        subject = try container.decode(GitHubSubject.self, forKey: .subject)
+        subjectKey = try container.decode(String.self, forKey: .subjectKey)
+        guard subjectKey == subject.subjectKey else {
+            throw SubjectValidationError.subjectKeyMismatch
+        }
+        kind = try container.decode(FindingKind.self, forKey: .kind)
+        severity = try container.decode(FindingSeverity.self, forKey: .severity)
+        title = try container.decode(String.self, forKey: .title)
+        summary = try container.decode(String.self, forKey: .summary)
+        details = try container.decodeIfPresent(String.self, forKey: .details)
+        confidence = try container.decodeIfPresent(Double.self, forKey: .confidence)
+        lifecycle = try container.decode(FindingLifecycle.self, forKey: .lifecycle)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        fingerprint = try container.decode(String.self, forKey: .fingerprint)
+        resolvedSubject = try container.decodeIfPresent(GitHubSubject.self, forKey: .resolvedSubject)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        guard subjectKey == subject.subjectKey else {
+            throw SubjectValidationError.subjectKeyMismatch
+        }
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(subjectKey, forKey: .subjectKey)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(severity, forKey: .severity)
+        try container.encode(title, forKey: .title)
+        try container.encode(summary, forKey: .summary)
+        try container.encodeIfPresent(details, forKey: .details)
+        try container.encodeIfPresent(confidence, forKey: .confidence)
+        try container.encode(lifecycle, forKey: .lifecycle)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encode(fingerprint, forKey: .fingerprint)
+        try container.encodeIfPresent(resolvedSubject, forKey: .resolvedSubject)
+    }
+}
 
 enum PRTag: String, Codable, CaseIterable, Identifiable {
     case flaky
@@ -274,6 +496,9 @@ struct TaggedPR: Codable, Equatable {
 }
 
 enum SkillTarget: String, Codable, CaseIterable {
+    case pullRequestRevision = "pull_request_revision"
+    case workflowJob = "workflow_job"
+    case diffLine = "diff_line"
     case pullRequest = "pull_request"
     case failedWorkflowRun = "failed_workflow_run"
     case reviewFinding = "review_finding"
@@ -454,6 +679,25 @@ struct ReviewFindingDetails: Codable, Equatable {
     let triggerScenarios: [String]
 }
 
+enum DiffSnippetLineKind: String, Codable, Equatable {
+    case context
+    case added
+    case removed
+    case ellipsis
+}
+
+struct DiffSnippetLine: Codable, Equatable {
+    let kind: DiffSnippetLineKind
+    let oldLine: Int?
+    let newLine: Int?
+    let text: String
+}
+
+struct DiffSnippet: Codable, Equatable {
+    let lines: [DiffSnippetLine]
+    let unavailableReason: String?
+}
+
 struct ReviewFinding: Codable, Equatable, Identifiable {
     let id: String
     let file: String
@@ -464,6 +708,11 @@ struct ReviewFinding: Codable, Equatable, Identifiable {
     let severity: ReviewSeverity
     let confidence: Double
     let category: String
+    var title: String? = nil
+    var side: DiffSide? = nil
+    var startLine: Int? = nil
+    var endLine: Int? = nil
+    var snippet: DiffSnippet? = nil
 }
 
 struct CodeReviewResult: Codable, Equatable {
@@ -472,6 +721,10 @@ struct CodeReviewResult: Codable, Equatable {
     let engine: String?
     let reviewedAt: Date
     let headSHA: String?
+    var reviewedBaseSHA: String? = nil
+    var reviewedHeadSHA: String? = nil
+    var reviewedFiles: [String]? = nil
+    var skippedFiles: [ReviewSkippedFile]? = nil
 }
 
 enum SkillStructuredValue: Codable, Equatable, Sendable {
@@ -584,15 +837,36 @@ enum SkillRunLogKind: String, Codable, Equatable {
     case error
 }
 
+enum SkillRunLogStream: String, Codable, Equatable {
+    case skillInput = "skill_input"
+    case agentOutput = "agent_output"
+}
+
 struct SkillRunLogEntry: Codable, Equatable {
     let timestamp: Date
     let kind: SkillRunLogKind
     let message: String
+    let stream: SkillRunLogStream?
+
+    init(
+        timestamp: Date,
+        kind: SkillRunLogKind,
+        message: String,
+        stream: SkillRunLogStream? = nil
+    ) {
+        self.timestamp = timestamp
+        self.kind = kind
+        self.message = message
+        self.stream = stream
+    }
 }
 
 struct SkillRun: Codable, Equatable, Identifiable {
     let id: String
     let skillID: String
+    let agent: SkillAgent?
+    let subject: GitHubSubject
+    var subjectKey: String { subject.subjectKey }
     let page: GitHubPageContext
     let requestedByClientID: String?
     let createdAt: Date
@@ -606,6 +880,100 @@ struct SkillRun: Codable, Equatable, Identifiable {
     var result: SkillResult?
     var error: String?
     var retryOfRunID: String?
+    init(
+        id: String,
+        skillID: String,
+        agent: SkillAgent? = nil,
+        page: GitHubPageContext,
+        requestedByClientID: String?,
+        createdAt: Date,
+        startedAt: Date?,
+        completedAt: Date?,
+        status: SkillRunStatus,
+        progressMessage: String?,
+        progressCurrent: Int?,
+        progressTotal: Int?,
+        logEntries: [SkillRunLogEntry]? = nil,
+        result: SkillResult?,
+        error: String?,
+        retryOfRunID: String?,
+        subject: GitHubSubject? = nil
+    ) {
+        self.id = id
+        self.skillID = skillID
+        self.agent = agent
+        let effectiveSubject = subject ?? .legacyPage(page)
+        self.subject = effectiveSubject
+        self.page = effectiveSubject.page ?? page
+        self.requestedByClientID = requestedByClientID
+        self.createdAt = createdAt
+        self.startedAt = startedAt
+        self.completedAt = completedAt
+        self.status = status
+        self.progressMessage = progressMessage
+        self.progressCurrent = progressCurrent
+        self.progressTotal = progressTotal
+        self.logEntries = logEntries
+        self.result = result
+        self.error = error
+        self.retryOfRunID = retryOfRunID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, skillID, agent, subject, subjectKey, page, requestedByClientID, createdAt, startedAt, completedAt
+        case status, progressMessage, progressCurrent, progressTotal, logEntries
+        case result, error, retryOfRunID
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        skillID = try container.decode(String.self, forKey: .skillID)
+        agent = try container.decodeIfPresent(SkillAgent.self, forKey: .agent)
+        let decodedPage = try container.decode(GitHubPageContext.self, forKey: .page)
+        subject = try container.decodeIfPresent(GitHubSubject.self, forKey: .subject) ?? .legacyPage(decodedPage)
+        page = subject.page ?? decodedPage
+        if let supplied = try container.decodeIfPresent(String.self, forKey: .subjectKey),
+           supplied != subject.subjectKey {
+            throw SubjectValidationError.subjectKeyMismatch
+        }
+        requestedByClientID = try container.decodeIfPresent(String.self, forKey: .requestedByClientID)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
+        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+        status = try container.decode(SkillRunStatus.self, forKey: .status)
+        progressMessage = try container.decodeIfPresent(String.self, forKey: .progressMessage)
+        progressCurrent = try container.decodeIfPresent(Int.self, forKey: .progressCurrent)
+        progressTotal = try container.decodeIfPresent(Int.self, forKey: .progressTotal)
+        logEntries = try container.decodeIfPresent([SkillRunLogEntry].self, forKey: .logEntries)
+        result = try container.decodeIfPresent(SkillResult.self, forKey: .result)
+        error = try container.decodeIfPresent(String.self, forKey: .error)
+        retryOfRunID = try container.decodeIfPresent(String.self, forKey: .retryOfRunID)
+    }
+}
+
+extension SkillRun {
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(skillID, forKey: .skillID)
+        try container.encodeIfPresent(agent, forKey: .agent)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(subjectKey, forKey: .subjectKey)
+        try container.encode(page, forKey: .page)
+        try container.encodeIfPresent(requestedByClientID, forKey: .requestedByClientID)
+        try container.encode(createdAt, forKey: .createdAt)
+        try container.encodeIfPresent(startedAt, forKey: .startedAt)
+        try container.encodeIfPresent(completedAt, forKey: .completedAt)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(progressMessage, forKey: .progressMessage)
+        try container.encodeIfPresent(progressCurrent, forKey: .progressCurrent)
+        try container.encodeIfPresent(progressTotal, forKey: .progressTotal)
+        try container.encodeIfPresent(logEntries, forKey: .logEntries)
+        try container.encodeIfPresent(result, forKey: .result)
+        try container.encodeIfPresent(error, forKey: .error)
+        try container.encodeIfPresent(retryOfRunID, forKey: .retryOfRunID)
+    }
 }
 
 enum BrowserSlot: String, Codable, CaseIterable, Identifiable {
@@ -665,6 +1033,7 @@ struct BrowserAction: Codable, Equatable {
     let analysisID: String?
     let tag: PRTag?
     let event: String?
+    var subject: GitHubSubject? = nil
 }
 
 struct BrowserContribution: Codable, Equatable, Identifiable {
@@ -700,6 +1069,16 @@ struct SlotHealthReport: Codable, Equatable, Identifiable {
     let detail: String?
     let observedAt: Date
 }
+enum SurfaceHealthState: String, Codable { case healthy, missing, ambiguous }
+
+struct SurfaceHealthReport: Codable, Equatable, Identifiable {
+    let surface: String
+    let state: SurfaceHealthState
+    let detail: String?
+    let observedAt: Date
+    var id: String { surface }
+}
+
 
 struct BrowserEvent: Codable, Equatable, Identifiable {
     let id: Int64
@@ -718,6 +1097,10 @@ struct PageExtensionSnapshot: Codable, Equatable {
     let runs: [SkillRun]
     let skills: [SkillDefinition]
     let contributions: [BrowserContribution]
+    var findings: [SkillFinding] = []
+    var currentRevisionSubject: GitHubSubject? = nil
+    var githubSurfaceV2: Bool = true
+    var surfaceHealth: [SurfaceHealthReport] = []
 }
 
 enum PresentationSectionType: String, Codable, CaseIterable {
@@ -759,6 +1142,52 @@ struct BrowserContributionDeclaration: Codable, Equatable, Identifiable {
     let action: BrowserAction?
 }
 
+enum BrowserTargetKindV2: String, Codable, CaseIterable {
+    case pullRequestRevision = "github.pull_request_revision"
+    case workflowJob = "github.workflow_job"
+    case diffLine = "github.diff_line"
+}
+
+enum BrowserSurfaceV2: String, Codable, CaseIterable {
+    case conversationReviewSummary = "github.pr.conversation.review-summary"
+    case checksJobTrailing = "github.pr.checks.job.trailing"
+    case checksJobInsight = "github.pr.checks.job.insight"
+    case actionsJobAfterFailureSummary = "github.actions.job.after-failure-summary"
+    case filesFileHeader = "github.pr.files.file.header"
+    case filesDiffLineAfter = "github.pr.files.diff.line.after"
+    case findingDrawer = "github.page.finding-drawer"
+}
+
+enum BrowserViewTypeV2: String, Codable, CaseIterable {
+    case jobVerdict = "job_verdict"
+    case ciInsight = "ci_insight"
+    case reviewSummary = "review_summary"
+    case reviewFindingPreview = "review_finding_preview"
+    case findingCount = "finding_count"
+    case reviewFinding = "review_finding"
+    case diffSnippet = "diff_snippet"
+    case detailDrawer = "detail_drawer"
+}
+
+struct BrowserRepeatV2: Codable, Equatable {
+    let source: String
+}
+
+struct BrowserPlacementV2: Codable, Equatable, Identifiable {
+    let id: String
+    let surface: BrowserSurfaceV2
+    let bindTo: String?
+    let repeatBinding: BrowserRepeatV2?
+    let view: BrowserViewTypeV2
+}
+
+struct BrowserContractV2: Codable, Equatable {
+    let apiVersion: String
+    let targetKinds: [BrowserTargetKindV2]
+    let placements: [BrowserPlacementV2]
+}
+
+
 struct ContractCapabilities: Codable, Equatable {
     let skillContract: [String]
     let presentationContract: [String]
@@ -770,10 +1199,10 @@ struct ContractCapabilities: Codable, Equatable {
     static let current = ContractCapabilities(
         skillContract: ["v1"],
         presentationContract: ["v1"],
-        browserContract: ["v1"],
+        browserContract: ["v1", "v2"],
         supportedSections: PresentationSectionType.allCases,
         supportedBrowserSlots: BrowserSlot.allCases,
-        supportedAgents: [.omp, .claudeCode]
+        supportedAgents: [.claudeCode, .codex, .omp]
     )
 }
 

@@ -648,6 +648,15 @@ enum SkillPackageManager {
             return
         }
         let document = SimpleYAMLDocument(text)
+        if document.scalar("api_version") == GHPRContract.browserVersionV2 {
+            validateBrowserContractV2(
+                document: document,
+                text: text,
+                relativePath: relativePath,
+                issues: &issues
+            )
+            return
+        }
         guard document.scalar("api_version") == GHPRContract.browserVersion else {
             issues.append(
                 SkillPackageIssue(
@@ -746,6 +755,143 @@ enum SkillPackageManager {
                 )
             }
         }
+    }
+
+    private static func validateBrowserContractV2(
+        document: SimpleYAMLDocument,
+        text: String,
+        relativePath: String,
+        issues: inout [SkillPackageIssue]
+    ) {
+        func reject(_ message: String) {
+            issues.append(
+                SkillPackageIssue(severity: .error, path: relativePath, message: message)
+            )
+        }
+
+        let allowedRootKeys: Set<String> = ["api_version", "target_kinds", "placements"]
+        for key in document.topLevelKeys where !allowedRootKeys.contains(key) {
+            reject("Browser contract v2 contains unknown root field '\(key)'.")
+        }
+
+        let targetKinds = document.list("target_kinds")
+        if targetKinds.isEmpty ||
+            targetKinds.contains(where: { BrowserTargetKindV2(rawValue: $0) == nil }) {
+            reject("Browser contract v2 target_kinds must be a non-empty list of known target kinds.")
+        }
+
+        let placements = SimpleYAMLDocument.records(in: text, section: "placements")
+        guard !placements.isEmpty else {
+            reject("Browser contract v2 requires at least one placement.")
+            return
+        }
+        let allowedPlacementKeys: Set<String> = [
+            "id", "surface", "bind_to", "repeat.source", "view.type"
+        ]
+        var identifiers = Set<String>()
+        for (index, placement) in placements.enumerated() {
+            let location = "placements[\(index)]"
+            for key in placement.keys where !allowedPlacementKeys.contains(key) {
+                reject("\(location) contains unknown field '\(key)'.")
+            }
+            guard let id = placement["id"], !id.isEmpty else {
+                reject("\(location).id must be a non-empty string.")
+                continue
+            }
+            if !identifiers.insert(id).inserted {
+                reject("Browser placement id '\(id)' is duplicated.")
+            }
+            guard let surface = placement["surface"],
+                  BrowserSurfaceV2(rawValue: surface) != nil else {
+                reject("\(location).surface is not a known Surface ID.")
+                continue
+            }
+            guard let view = placement["view.type"],
+                  BrowserViewTypeV2(rawValue: view) != nil else {
+                reject("\(location).view.type is not a known view type.")
+                continue
+            }
+            let repeatSource = placement["repeat.source"]
+            if let repeatSource,
+               !isBrowserV2Binding(repeatSource, prefix: "result.") {
+                reject("\(location).repeat.source must be a dotted result.* binding.")
+            }
+            if let binding = placement["bind_to"] {
+                let prefix = repeatSource == nil ? "result." : "item."
+                if !isBrowserV2Binding(binding, prefix: prefix) {
+                    reject("\(location).bind_to must be a dotted \(prefix)* binding.")
+                }
+            } else if repeatSource == nil {
+                reject("\(location) must declare bind_to or repeat.source.")
+            }
+        }
+    }
+
+    private static func isBrowserV2Binding(_ value: String, prefix: String) -> Bool {
+        guard value.hasPrefix(prefix) else { return false }
+        let suffix = String(value.dropFirst(prefix.count))
+        guard !suffix.isEmpty else { return false }
+        let pattern = #"^[A-Za-z_][A-Za-z0-9_]*$"#
+        return suffix.split(separator: ".", omittingEmptySubsequences: false).allSatisfy {
+            String($0).range(of: pattern, options: .regularExpression) != nil
+        }
+    }
+
+    static func browserContractV2(for package: SkillPackage) -> BrowserContractV2? {
+        guard let url = package.browserContributionsURL,
+              let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return nil
+        }
+        let document = SimpleYAMLDocument(text)
+        guard document.scalar("api_version") == GHPRContract.browserVersionV2,
+              Set(document.topLevelKeys).isSubset(of: ["api_version", "target_kinds", "placements"]) else {
+            return nil
+        }
+        let targetKinds = document.list("target_kinds").compactMap(BrowserTargetKindV2.init(rawValue:))
+        guard !targetKinds.isEmpty,
+              targetKinds.count == document.list("target_kinds").count else {
+            return nil
+        }
+        let records = SimpleYAMLDocument.records(in: text, section: "placements")
+        let allowedKeys: Set<String> = ["id", "surface", "bind_to", "repeat.source", "view.type"]
+        var identifiers = Set<String>()
+        let placements = records.compactMap { record -> BrowserPlacementV2? in
+            guard Set(record.keys).isSubset(of: allowedKeys),
+                  let id = record["id"], !id.isEmpty, identifiers.insert(id).inserted,
+                  let surfaceValue = record["surface"],
+                  let surface = BrowserSurfaceV2(rawValue: surfaceValue),
+                  let viewValue = record["view.type"],
+                  let view = BrowserViewTypeV2(rawValue: viewValue) else {
+                return nil
+            }
+            let repeatBinding: BrowserRepeatV2?
+            if let source = record["repeat.source"] {
+                guard isBrowserV2Binding(source, prefix: "result.") else { return nil }
+                repeatBinding = BrowserRepeatV2(source: source)
+            } else {
+                repeatBinding = nil
+            }
+            let bindTo = record["bind_to"]
+            if let bindTo {
+                let prefix = repeatBinding == nil ? "result." : "item."
+                guard isBrowserV2Binding(bindTo, prefix: prefix) else { return nil }
+            } else if repeatBinding == nil {
+                return nil
+            }
+            return BrowserPlacementV2(
+                id: id,
+                surface: surface,
+                bindTo: bindTo,
+                repeatBinding: repeatBinding,
+                view: view
+            )
+        }
+        guard !records.isEmpty, placements.count == records.count else { return nil }
+        return BrowserContractV2(
+            apiVersion: GHPRContract.browserVersionV2,
+            targetKinds: targetKinds,
+            placements: placements
+        )
     }
 
     static func browserContract(for package: SkillPackage) -> BrowserContract? {
@@ -1849,6 +1995,7 @@ enum SkillBuilderInstaller {
 
 private struct SimpleYAMLDocument {
     private var scalars: [String: String] = [:]
+    private(set) var topLevelKeys = Set<String>()
     private var lists: [String: [String]] = [:]
 
     init(_ text: String) {
@@ -1873,6 +2020,9 @@ private struct SimpleYAMLDocument {
             let key = String(content[..<colon]).trimmingCharacters(in: .whitespaces)
             let value = String(content[content.index(after: colon)...])
                 .trimmingCharacters(in: .whitespaces)
+            if indent == 0 {
+                topLevelKeys.insert(key)
+            }
             let path = (stack.map(\.key) + [key]).joined(separator: ".")
             if value.isEmpty {
                 stack.append((indent, key))

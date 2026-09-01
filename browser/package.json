@@ -3,9 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "build:userscript": "node build-userscript.mjs",
+    "check:userscript": "node build-userscript.mjs --check",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "happy-dom": "^20.0.0"
   }
 }

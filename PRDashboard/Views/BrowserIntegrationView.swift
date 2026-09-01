@@ -22,14 +22,18 @@ struct BrowserIntegrationView: View {
 
                 Spacer()
 
-                Text("\(activeClientCount) paired")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(bridgeStatusText)
+                        .font(.caption2)
+                        .foregroundColor(bridgeStatusColor)
+                        .accessibilityIdentifier("browser-bridge-status")
+                        .accessibilityValue(bridgeStatusText)
+                    Text("\(activeClientCount) paired")
+                        .accessibilityIdentifier("paired-client-count")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Browser Integration status")
-            .accessibilityValue("\(browserSummaryTitle). Browser Bridge \(bridgeStatusText). \(activeClientCount) paired clients.")
-            .accessibilityIdentifier("browser-bridge-status")
 
             if controller.officialUserscriptClient == nil {
                 Label(
@@ -42,9 +46,9 @@ struct BrowserIntegrationView: View {
                 .accessibilityIdentifier("userscript-reminder")
             }
 
-            if !controller.unhealthySlots.isEmpty {
+            if controller.unhealthyPlacementCount > 0 {
                 Label(
-                    "\(controller.unhealthySlots.count) GitHub placement\(controller.unhealthySlots.count == 1 ? "" : "s") need attention",
+                    "\(controller.unhealthyPlacementCount) GitHub placement\(controller.unhealthyPlacementCount == 1 ? "" : "s") need attention",
                     systemImage: "exclamationmark.triangle.fill"
                 )
                 .font(.caption)
@@ -105,6 +109,36 @@ struct BrowserIntegrationView: View {
                         symbol: controller.isGitHubPageConnected ? "link.circle.fill" : "link.circle",
                         color: controller.isGitHubPageConnected ? .green : .secondary
                     )
+                    Toggle("Use GitHub-native surfaces", isOn: Binding(
+                        get: { controller.githubSurfaceV2Enabled },
+                        set: { controller.githubSurfaceV2Enabled = $0 }
+                    ))
+                    .toggleStyle(.switch)
+                    .accessibilityIdentifier("github-surface-v2-toggle")
+
+                    if !controller.unhealthySurfaces.isEmpty || !controller.unhealthySlots.isEmpty {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Surface health")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                            ForEach(controller.unhealthySurfaces) { report in
+                                Text("\(report.surface): \(report.state.rawValue.capitalized)")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                                    .accessibilityIdentifier("surface-health-row-\(report.id)")
+                            }
+                            ForEach(controller.unhealthySlots) { report in
+                                Text("\(report.slot.rawValue): Missing")
+                                    .font(.caption2)
+                                    .foregroundColor(.orange)
+                                    .accessibilityIdentifier("slot-health-row-\(report.id)")
+                            }
+                        }
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("surface-health-section")
+                    }
+
+                    Divider()
 
                     Divider()
 
@@ -225,7 +259,7 @@ struct BrowserIntegrationView: View {
             if controller.officialUserscriptClient == nil {
                 return "Finish browser setup"
             }
-            if !controller.unhealthySlots.isEmpty {
+            if controller.unhealthyPlacementCount > 0 {
                 return "Needs attention"
             }
             return "Ready"
@@ -244,7 +278,7 @@ struct BrowserIntegrationView: View {
             if controller.officialUserscriptClient == nil {
                 return "Install the userscript once to connect ghpr with GitHub."
             }
-            if !controller.unhealthySlots.isEmpty {
+            if controller.unhealthyPlacementCount > 0 {
                 return "Some ghpr actions could not attach to GitHub."
             }
             return controller.isGitHubPageConnected
@@ -265,7 +299,7 @@ struct BrowserIntegrationView: View {
             if controller.officialUserscriptClient == nil {
                 return "puzzlepiece.extension"
             }
-            if !controller.unhealthySlots.isEmpty {
+            if controller.unhealthyPlacementCount > 0 {
                 return "exclamationmark.triangle.fill"
             }
             return "checkmark.circle.fill"
@@ -281,7 +315,7 @@ struct BrowserIntegrationView: View {
         case .stopped:
             return .secondary
         case .running:
-            return controller.officialUserscriptClient == nil || !controller.unhealthySlots.isEmpty
+            return controller.officialUserscriptClient == nil || controller.unhealthyPlacementCount > 0
                 ? .orange
                 : .green
         }
@@ -791,30 +825,34 @@ struct BrowserPairingApprovalView: View {
                     ForEach(
                         approval.descriptor.requestedScopes.sorted { $0.rawValue < $1.rawValue }
                     ) { scope in
-                        Toggle(isOn: binding(for: scope)) {
-                            HStack(spacing: 7) {
-                                Image(
-                                    systemName: scope.risk == .elevated
-                                        ? "exclamationmark.triangle.fill"
-                                        : "checkmark.shield.fill"
-                                )
-                                .foregroundColor(scope.risk == .elevated ? .orange : .green)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(scope.displayName)
-                                        .accessibilityIdentifier("pairing-scope-name-\(scope.rawValue)")
-                                    if approval.descriptor.requiredScopes.contains(scope) {
-                                        Text("Required for this action")
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundColor(.orange)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Toggle(isOn: binding(for: scope)) {
+                                HStack(spacing: 7) {
+                                    Image(
+                                        systemName: scope.risk == .elevated
+                                            ? "exclamationmark.triangle.fill"
+                                            : "checkmark.shield.fill"
+                                    )
+                                    .foregroundColor(scope.risk == .elevated ? .orange : .green)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text(scope.displayName)
+                                            .accessibilityIdentifier("pairing-scope-name-\(scope.rawValue)")
+                                        Text(scope.rawValue)
+                                            .font(.caption2)
+                                            .foregroundColor(.secondary)
                                     }
-                                    Text(scope.rawValue)
-                                        .font(.caption2)
-                                        .foregroundColor(.secondary)
                                 }
                             }
+                            .toggleStyle(.checkbox)
+                            .accessibilityIdentifier("pairing-scope-\(scope.rawValue)")
+
+                            if approval.descriptor.requiredScopes.contains(scope) {
+                                Text("Required for this action")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundColor(.orange)
+                                    .padding(.leading, 28)
+                            }
                         }
-                        .toggleStyle(.checkbox)
-                        .accessibilityIdentifier("pairing-scope-\(scope.rawValue)")
                     }
                 }
             }

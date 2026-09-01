@@ -75,6 +75,9 @@
 		E1000007 /* ExtensionPlatformController.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000007 /* ExtensionPlatformController.swift */; };
 		E1000008 /* BrowserIntegrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000008 /* BrowserIntegrationView.swift */; };
 		E1000009 /* CILogFetcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2000009 /* CILogFetcher.swift */; };
+		K1000001 /* GitHubSubjectResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = K2000001 /* GitHubSubjectResolver.swift */; };
+		K1000002 /* PRReviewWorkspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = K2000002 /* PRReviewWorkspace.swift */; };
+		K1000003 /* FindingResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = K2000003 /* FindingResolver.swift */; };
 		E1100001 /* BrowserBridgeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E2100001 /* BrowserBridgeTests.swift */; };
 		F1000001 /* BrowserIntegrationUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F2000001 /* BrowserIntegrationUITests.swift */; };
 		F1000002 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B2000006 /* XCTest.framework */; };
@@ -83,6 +86,8 @@
 		G1000003 /* styles.css in Resources */ = {isa = PBXBuildFile; fileRef = G2000003 /* styles.css */; };
 		H1000001 /* userscript-sdk in Resources */ = {isa = PBXBuildFile; fileRef = H2000001 /* userscript-sdk */; };
 		H1000003 /* ghpr-skill-builder in Resources */ = {isa = PBXBuildFile; fileRef = H2000003 /* ghpr-skill-builder */; };
+		I1000001 /* GitHubSurfaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = I2000001 /* GitHubSurfaceTests.swift */; };
+		J1000001 /* surface-renderers.js in Resources */ = {isa = PBXBuildFile; fileRef = J2000001 /* surface-renderers.js */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -168,6 +173,9 @@
 		E2000006 /* BrowserBridgeServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBridgeServer.swift; sourceTree = "<group>"; };
 		E2000007 /* ExtensionPlatformController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExtensionPlatformController.swift; sourceTree = "<group>"; };
 		E2000008 /* BrowserIntegrationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserIntegrationView.swift; sourceTree = "<group>"; };
+		K2000001 /* GitHubSubjectResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSubjectResolver.swift; sourceTree = "<group>"; };
+		K2000002 /* PRReviewWorkspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PRReviewWorkspace.swift; sourceTree = "<group>"; };
+		K2000003 /* FindingResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FindingResolver.swift; sourceTree = "<group>"; };
 		E2000009 /* CILogFetcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CILogFetcher.swift; sourceTree = "<group>"; };
 		E2100001 /* BrowserBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserBridgeTests.swift; sourceTree = "<group>"; };
 		F2000001 /* BrowserIntegrationUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserIntegrationUITests.swift; sourceTree = "<group>"; };
@@ -177,6 +185,8 @@
 		G2000003 /* styles.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = styles.css; sourceTree = "<group>"; };
 		H2000001 /* userscript-sdk */ = {isa = PBXFileReference; explicitFileType = folder; path = "userscript-sdk"; sourceTree = "<group>"; };
 		H2000003 /* ghpr-skill-builder */ = {isa = PBXFileReference; explicitFileType = folder; path = "ghpr-skill-builder"; sourceTree = "<group>"; };
+		I2000001 /* GitHubSurfaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSurfaceTests.swift; sourceTree = "<group>"; };
+		J2000001 /* surface-renderers.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = surface-renderers.js; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -364,6 +374,7 @@
 				C2000007 /* LocalAPITests.swift */,
 				B2000008 /* JiraSetupTests.swift */,
 				E2100001 /* BrowserBridgeTests.swift */,
+				I2000001 /* GitHubSurfaceTests.swift */,
 			);
 			path = PRDashboardTests;
 			sourceTree = "<group>";
@@ -406,6 +417,9 @@
 				E2000004 /* SkillRuntime.swift */,
 				E2000005 /* BrowserBridgeRouter.swift */,
 				E2000006 /* BrowserBridgeServer.swift */,
+				K2000001 /* GitHubSubjectResolver.swift */,
+				K2000002 /* PRReviewWorkspace.swift */,
+				K2000003 /* FindingResolver.swift */,
 				E2000007 /* ExtensionPlatformController.swift */,
 				E2000009 /* CILogFetcher.swift */,
 			);
@@ -426,6 +440,7 @@
 				G2000001 /* ghpr.user.js */,
 				G2000002 /* app.js */,
 				G2000003 /* styles.css */,
+				J2000001 /* surface-renderers.js */,
 			);
 			path = browser;
 			sourceTree = "<group>";
@@ -562,6 +577,7 @@
 				G1000003 /* styles.css in Resources */,
 				H1000001 /* userscript-sdk in Resources */,
 				H1000003 /* ghpr-skill-builder in Resources */,
+				J1000001 /* surface-renderers.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -661,6 +677,9 @@
 				E1000004 /* SkillRuntime.swift in Sources */,
 				E1000005 /* BrowserBridgeRouter.swift in Sources */,
 				E1000006 /* BrowserBridgeServer.swift in Sources */,
+				K1000001 /* GitHubSubjectResolver.swift in Sources */,
+				K1000002 /* PRReviewWorkspace.swift in Sources */,
+				K1000003 /* FindingResolver.swift in Sources */,
 				E1000007 /* ExtensionPlatformController.swift in Sources */,
 				E1000008 /* BrowserIntegrationView.swift in Sources */,
 				E1000009 /* CILogFetcher.swift in Sources */,
@@ -675,6 +694,7 @@
 				C1000007 /* LocalAPITests.swift in Sources */,
 				B1000008 /* JiraSetupTests.swift in Sources */,
 				E1100001 /* BrowserBridgeTests.swift in Sources */,
+				I1000001 /* GitHubSurfaceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

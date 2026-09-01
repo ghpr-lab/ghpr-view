@@ -1,0 +1,31 @@
+{
+  "api_version": "ghpr.dev/browser/v2",
+  "target_kinds": ["github.pull_request_revision", "github.workflow_job"],
+  "placements": [
+    {
+      "id": "review-summary",
+      "surface": "github.pr.conversation.review-summary",
+      "bind_to": "result.review",
+      "view": { "type": "review_summary" }
+    },
+    {
+      "id": "checks-job-verdict",
+      "surface": "github.pr.checks.job.trailing",
+      "bind_to": "result.verdict",
+      "view": { "type": "job_verdict" }
+    },
+    {
+      "id": "checks-job-insight",
+      "surface": "github.pr.checks.job.insight",
+      "bind_to": "result.insight",
+      "view": { "type": "ci_insight" }
+    },
+    {
+      "id": "diff-findings",
+      "surface": "github.pr.files.diff.line.after",
+      "repeat": { "source": "result.findings" },
+      "bind_to": "item.finding",
+      "view": { "type": "review_finding" }
+    }
+  ]
+}

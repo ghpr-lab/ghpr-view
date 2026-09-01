@@ -1,0 +1,12 @@
+{
+  "api_version": "ghpr.dev/browser/v2",
+  "target_kinds": ["github.pull_request_revision"],
+  "placements": [
+    {
+      "id": "global-header-hijack",
+      "surface": "github.header.global-menu",
+      "bind_to": "result.review",
+      "view": { "type": "review_summary" }
+    }
+  ]
+}

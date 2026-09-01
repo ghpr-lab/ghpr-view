@@ -116,7 +116,8 @@ final class BrowserBridgeRouter {
 
     private struct RunSkillBody: Codable {
         let skillID: String
-        let page: GitHubPageContext
+        let page: GitHubPageContext?
+        let subject: GitHubSubject?
     }
 
     private struct TagBody: Codable {
@@ -149,10 +150,28 @@ final class BrowserBridgeRouter {
         let cursor: Int64
     }
 
+    private struct SubjectResolveBody: Codable {
+        let type: String
+        let repository: String
+        let prNumber: Int?
+        let workflowJobID: Int64?
+        let workflowRunID: Int64?
+    }
+
+    private struct FindingsResponse: Codable, Equatable {
+        let findings: [SkillFinding]
+    }
+
     private struct SlotHealthBody: Codable {
         let pageKey: String
         let slot: BrowserSlot
         let healthy: Bool
+        let detail: String?
+    }
+
+    private struct SurfaceHealthBody: Codable {
+        let surface: String
+        let state: SurfaceHealthState
         let detail: String?
     }
 
@@ -214,7 +233,6 @@ final class BrowserBridgeRouter {
         let path: String
         let installed: Bool
     }
-
     let store: ExtensionPlatformStore
     let runtime: SkillRuntime
 
@@ -225,6 +243,8 @@ final class BrowserBridgeRouter {
     private let appVersion: String
     private let draftsRootURL: URL
     private let agentSkillsHomeURL: URL
+    private let subjectResolver: GitHubSubjectResolver
+    private let findingResolutionService: FindingResolutionService
 
     init(
         store: ExtensionPlatformStore,
@@ -235,6 +255,8 @@ final class BrowserBridgeRouter {
         appVersion: String,
         draftsRootURL: URL? = nil,
         agentSkillsHomeURL: URL = FileManager.default.homeDirectoryForCurrentUser,
+        findingResolutionService: FindingResolutionService = FindingResolutionService(),
+        subjectResolver: GitHubSubjectResolver = GitHubSubjectResolver(),
         applicationIconProvider: @escaping ApplicationIconProvider =
             BrowserBridgeRouter.defaultApplicationIconPNG
     ) {
@@ -250,6 +272,8 @@ final class BrowserBridgeRouter {
             .first!
             .appendingPathComponent("ghpr/drafts", isDirectory: true)
         self.agentSkillsHomeURL = agentSkillsHomeURL
+        self.subjectResolver = subjectResolver
+        self.findingResolutionService = findingResolutionService
     }
 
     private var officialUserscriptVersion: String? {
@@ -316,7 +340,8 @@ final class BrowserBridgeRouter {
                     appVersion: appVersion,
                     officialUserscriptVersion: officialUserscriptVersion,
                     apiVersions: [GHPRContract.bridgeAPIVersion],
-                    pairingRequired: true
+                    pairingRequired: true,
+                    githubSurfaceV2: store.githubSurfaceV2Enabled
                 )
             )
         }
@@ -431,6 +456,78 @@ final class BrowserBridgeRouter {
             let client = try authenticatedClient(request)
             return json(client)
         }
+        if request.method == "POST", request.path == "/api/v1/subjects/resolve" {
+            let client = try authenticatedClient(request, requiring: [.prRead])
+            let body = try BrowserJSON.decode(SubjectResolveBody.self, from: request.body)
+            switch body.type {
+            case "pull_request_revision":
+                guard let number = body.prNumber else {
+                    return error(status: 400, code: "invalid_subject", message: "pr_number is required.")
+                }
+                _ = client
+                return json(try await subjectResolver.resolvePullRequestRevision(repository: body.repository, prNumber: number))
+            case "workflow_job":
+                guard let jobID = body.workflowJobID else {
+                    return error(status: 400, code: "invalid_subject", message: "workflow_job_id is required.")
+                }
+                guard client.scopes.contains(.ciRead) else {
+                    throw RouterError.scopeDenied([.ciRead])
+                }
+                return json(
+                    try await subjectResolver.resolveWorkflowJob(
+                        repository: body.repository,
+                        workflowRunID: body.workflowRunID,
+                        workflowJobID: jobID
+                    )
+                )
+            default:
+                return error(status: 400, code: "invalid_subject", message: "Unsupported subject type.")
+            }
+        }
+        if request.method == "GET", request.path == "/api/v1/findings" {
+            _ = try authenticatedClient(request, requiring: [.analysisRead])
+            guard let subjectKey = request.queryValue("subject_key"), !subjectKey.isEmpty else {
+                return error(status: 400, code: "missing_subject_key", message: "subject_key is required.")
+            }
+            guard !subjectKey.hasPrefix("github:legacy-page:") else {
+                return error(status: 400, code: "invalid_subject", message: "A precise subject is required.")
+            }
+            return json(FindingsResponse(findings: store.findings(subjectKey: subjectKey)))
+        }
+        if components.count == 5, components[0] == "api", components[1] == "v1", components[2] == "findings", components[4] == "dismiss", request.method == "POST" {
+            let client = try authenticatedClient(request, requiring: [.findingWrite])
+            guard let finding = store.finding(id: components[3]) else {
+                return error(status: 404, code: "finding_not_found", message: "Finding was not found.")
+            }
+            guard case .diffLine(let anchor) = finding.subject else {
+                return error(status: 400, code: "invalid_finding", message: "Only diff findings can be dismissed.")
+            }
+            store.dismissFinding(fingerprint: finding.fingerprint, repository: anchor.repository, prNumber: anchor.prNumber)
+            _ = client
+            return json(finding)
+        }
+        if components.count == 4, components[0] == "api", components[1] == "v1", components[2] == "findings", request.method == "GET" {
+            _ = try authenticatedClient(request, requiring: [.analysisRead])
+            guard let finding = store.finding(id: components[3]) else {
+                return error(status: 404, code: "finding_not_found", message: "Finding was not found.")
+            }
+            guard !finding.subject.isLegacy else {
+                return error(status: 400, code: "invalid_subject", message: "A precise subject is required.")
+            }
+            if case .diffLine(let anchor) = finding.subject,
+               let revision = try? await subjectResolver.resolvePullRequestRevision(
+                    repository: anchor.repository,
+                    prNumber: anchor.prNumber
+               ) {
+                return json(
+                    await findingResolutionService.resolve(
+                        finding,
+                        currentRevision: revision
+                    )
+                )
+            }
+            return json(finding)
+        }
         if request.method == "GET", request.path == "/api/v1/page" {
             let client = try authenticatedClient(request, requiring: [.prRead])
             guard let page = pageContext(from: request) else {
@@ -463,6 +560,46 @@ final class BrowserBridgeRouter {
             } else {
                 contributions = []
             }
+            let currentRevisionSubject: GitHubSubject?
+            if let prNumber = page.prNumber,
+               let revision = try? await subjectResolver.resolvePullRequestRevision(
+                    repository: page.repository,
+                    prNumber: prNumber
+               ) {
+                currentRevisionSubject = .pullRequestRevision(revision)
+            } else {
+                currentRevisionSubject = nil
+            }
+            var pageFindings: [SkillFinding] = []
+            if client.scopes.contains(.analysisRead) {
+                let pageSubjectKeys = Set(
+                    store.runs(pageKey: page.key).map(\.subjectKey)
+                )
+                pageFindings = store.allFindings.filter { finding in
+                    (finding.subject.page?.key == page.key ||
+                        pageSubjectKeys.contains(finding.subjectKey)) &&
+                        !(page.prNumber.map { prNumber in
+                            store.isFindingDismissed(
+                                fingerprint: finding.fingerprint,
+                                repository: page.repository,
+                                prNumber: prNumber
+                            )
+                        } ?? false)
+                }
+                if case .pullRequestRevision(let revision) = currentRevisionSubject {
+                    var resolved: [SkillFinding] = []
+                    resolved.reserveCapacity(pageFindings.count)
+                    for finding in pageFindings {
+                        resolved.append(
+                            await findingResolutionService.resolve(
+                                finding,
+                                currentRevision: revision
+                            )
+                        )
+                    }
+                    pageFindings = resolved
+                }
+            }
             return json(
                 PageExtensionSnapshot(
                     page: page,
@@ -478,29 +615,47 @@ final class BrowserBridgeRouter {
                         }
                         : [],
                     skills: client.scopes.contains(.skillList) ? runtime.skills : [],
-                    contributions: contributions
+                    contributions: contributions,
+                    findings: pageFindings,
+                    currentRevisionSubject: currentRevisionSubject,
+                    githubSurfaceV2: store.githubSurfaceV2Enabled,
+                    surfaceHealth: store.unhealthySurfaces
+                )
+            )
+        }
+        if request.method == "POST", request.path == "/api/v1/runs" {
+            let client = try authenticatedClient(request, requiring: [.skillRun])
+            let body = try BrowserJSON.decode(RunSkillBody.self, from: request.body)
+            let subject: GitHubSubject
+            let page: GitHubPageContext
+            if let precise = body.subject {
+                guard !precise.isLegacy, let precisePage = precise.page else {
+                    return error(status: 400, code: "invalid_subject", message: "A precise subject is required.")
+                }
+                subject = precise
+                page = precisePage
+            } else if let legacyPage = body.page {
+                subject = .legacyPage(legacyPage)
+                page = legacyPage
+            } else {
+                return error(status: 400, code: "invalid_subject", message: "A precise subject is required.")
+            }
+            return json(
+                runForResponse(
+                    try runtime.start(
+                        skillID: body.skillID,
+                        page: page,
+                        pullRequest: pullRequest(for: page),
+                        requestedByClientID: client.id,
+                        subject: subject
+                    ),
+                    includeArtifacts: client.scopes.contains(.artifactRead)
                 )
             )
         }
         if request.method == "GET", request.path == "/api/v1/skills" {
             _ = try authenticatedClient(request, requiring: [.skillList])
             return json(SkillsResponse(skills: runtime.skills))
-        }
-        if request.method == "POST", request.path == "/api/v1/runs" {
-            let client = try authenticatedClient(request, requiring: [.skillRun])
-            let body = try BrowserJSON.decode(RunSkillBody.self, from: request.body)
-            let pullRequest = pullRequest(for: body.page)
-            return json(
-                runForResponse(
-                    try runtime.start(
-                        skillID: body.skillID,
-                        page: body.page,
-                        pullRequest: pullRequest,
-                        requestedByClientID: client.id
-                    ),
-                    includeArtifacts: client.scopes.contains(.artifactRead)
-                )
-            )
         }
         if request.method == "GET", request.path == "/api/v1/runs" {
             let client = try authenticatedClient(request, requiring: [.analysisRead])
@@ -696,6 +851,19 @@ final class BrowserBridgeRouter {
             )
             return json(EmptyResponse(ok: true))
         }
+        if request.method == "POST", request.path == "/api/v1/surface-health" {
+            _ = try authenticatedClient(request, requiring: [.uiContribute])
+            let body = try BrowserJSON.decode(SurfaceHealthBody.self, from: request.body)
+            guard BrowserSurfaceV2(rawValue: body.surface) != nil else {
+                return error(status: 400, code: "invalid_surface", message: "Unknown GitHub-native surface.")
+            }
+            store.reportSurfaceHealth(
+                surface: body.surface,
+                state: body.state,
+                detail: body.detail
+            )
+            return json(EmptyResponse(ok: true))
+        }
         if request.method == "GET", request.path == "/api/v1/events" {
             let client = try authenticatedClient(request, requiring: [.uiContribute])
             let cursor = Int64(request.queryValue("cursor") ?? "") ?? 0
@@ -757,7 +925,8 @@ final class BrowserBridgeRouter {
                     skillID: skillID,
                     page: page,
                     pullRequest: pullRequest(for: page),
-                    requestedByClientID: client.id
+                    requestedByClientID: client.id,
+                    subject: action.subject
                 )
                 return json(
                     ActionResponse(
@@ -1285,19 +1454,25 @@ final class BrowserBridgeRouter {
         if let entries = redacted.logEntries {
             var safeEntries: [SkillRunLogEntry] = []
             for entry in entries.suffix(SkillRuntime.maximumLogEntries) {
-                let message = allowedMessages.contains(entry.message)
-                    ? entry.message
-                    : logEvent(for: entry.kind).message
+                let message = entry.stream == nil
+                    ? (
+                        allowedMessages.contains(entry.message)
+                            ? entry.message
+                            : logEvent(for: entry.kind).message
+                    )
+                    : SkillRuntime.browserSafeLogLine(entry.message)
                 if let last = safeEntries.last,
                    last.kind == entry.kind,
-                   last.message == message {
+                   last.message == message,
+                   last.stream == entry.stream {
                     continue
                 }
                 safeEntries.append(
                     SkillRunLogEntry(
                         timestamp: entry.timestamp,
                         kind: entry.kind,
-                        message: message
+                        message: message,
+                        stream: entry.stream
                     )
                 )
             }

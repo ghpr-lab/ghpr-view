@@ -34,6 +34,9 @@ final class ExtensionPlatformController: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var announcedPairingIDs = Set<String>()
     private let snapshotProvider: BrowserBridgeRouter.SnapshotProvider
+    private let menuTracker: MenuTracker
+    private let subjectResolver: GitHubSubjectResolver
+    private var revisionUpdateBuffer = MenuTrackingUpdateBuffer<UInt64>()
 
     init(
         snapshotProvider: @escaping BrowserBridgeRouter.SnapshotProvider,
@@ -44,7 +47,9 @@ final class ExtensionPlatformController: ObservableObject {
         ports: [UInt16] = Array(48120...48129),
         draftsRootURL: URL? = nil,
         installedSkillsRootURL: URL = SkillPackageManager.defaultInstalledSkillsURL(),
-        bundledSkillsRootURL: URL? = nil
+        bundledSkillsRootURL: URL? = nil,
+        menuTracker: MenuTracker = .shared,
+        subjectResolver: GitHubSubjectResolver = GitHubSubjectResolver()
     ) {
         let store = ExtensionPlatformStore(storageURL: storageURL)
         let runtime = SkillRuntime(
@@ -59,9 +64,12 @@ final class ExtensionPlatformController: ObservableObject {
             rerunFailedJobs: rerunFailedJobs,
             assetProvider: assetProvider,
             appVersion: appVersion,
-            draftsRootURL: draftsRootURL
+            draftsRootURL: draftsRootURL,
+            subjectResolver: subjectResolver
         )
         self.snapshotProvider = snapshotProvider
+        self.menuTracker = menuTracker
+        self.subjectResolver = subjectResolver
         self.store = store
         self.runtime = runtime
         self.router = router
@@ -73,11 +81,26 @@ final class ExtensionPlatformController: ObservableObject {
             }
             .store(in: &cancellables)
 
+        menuTracker.$isTracking
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] isTracking in
+                guard let self,
+                      let pendingRevision = self.revisionUpdateBuffer.setTracking(isTracking) else {
+                    return
+                }
+                self.revision = pendingRevision
+            }
+            .store(in: &cancellables)
+
         store.$revision
             .sink { [weak self] revision in
                 guard let self else { return }
-                self.revision = revision
                 self.announcePendingPairingIfNeeded()
+                guard let visibleRevision = self.revisionUpdateBuffer.receive(revision) else {
+                    return
+                }
+                self.revision = visibleRevision
             }
             .store(in: &cancellables)
     }
@@ -95,6 +118,20 @@ final class ExtensionPlatformController: ObservableObject {
     var unhealthySlots: [SlotHealthReport] {
         _ = revision
         return store.unhealthySlots
+    }
+    var unhealthySurfaces: [SurfaceHealthReport] {
+        _ = revision
+        return store.unhealthySurfaces
+    }
+    /// Every GitHub placement that currently needs attention, across the active
+    /// GitHub-native surfaces and the legacy v1 slots.
+    var unhealthyPlacementCount: Int {
+        unhealthySurfaces.count + unhealthySlots.count
+    }
+
+    var githubSurfaceV2Enabled: Bool {
+        get { store.githubSurfaceV2Enabled }
+        set { store.githubSurfaceV2Enabled = newValue }
     }
 
     var skills: [SkillDefinition] {
@@ -217,21 +254,38 @@ final class ExtensionPlatformController: ObservableObject {
     @discardableResult
     func runSkill(
         id: String,
-        repository: String,
-        number: Int
+        subject: GitHubSubject
     ) throws -> SkillRun {
-        let page = GitHubPageContext.pullRequest(repository: repository, number: number)
-        let pullRequest = LocalAPIHandler.findPullRequest(
-            in: snapshotProvider(),
-            repository: repository,
-            number: number
-        )
+        guard !subject.isLegacy, let page = subject.page else {
+            throw SkillRuntime.RuntimeError.subjectPageMismatch
+        }
+        let pullRequest = page.prNumber.flatMap { number in
+            LocalAPIHandler.findPullRequest(
+                in: snapshotProvider(),
+                repository: page.repository,
+                number: number
+            )
+        }
         return try runtime.start(
             skillID: id,
             page: page,
             pullRequest: pullRequest,
-            requestedByClientID: nil
+            requestedByClientID: nil,
+            subject: subject
         )
+    }
+
+    @discardableResult
+    func runRevisionSkill(
+        id: String,
+        repository: String,
+        number: Int
+    ) async throws -> SkillRun {
+        let revision = try await subjectResolver.resolvePullRequestRevision(
+            repository: repository,
+            prNumber: number
+        )
+        return try runSkill(id: id, subject: .pullRequestRevision(revision))
     }
 
     func latestAnalysis(repository: String, number: Int) -> CIAnalysis? {
@@ -246,11 +300,10 @@ final class ExtensionPlatformController: ObservableObject {
         }
     }
 
-    func runnableSkills(forFailedCI hasFailedCI: Bool) -> [SkillDefinition] {
+    func runnableRevisionSkills() -> [SkillDefinition] {
         runtime.skills.filter {
             $0.isRunnable &&
-                ($0.targets.contains(.pullRequest) ||
-                    (hasFailedCI && $0.targets.contains(.failedWorkflowRun)))
+                ($0.targets.contains(.pullRequestRevision) || $0.targets.contains(.pullRequest))
         }
     }
 

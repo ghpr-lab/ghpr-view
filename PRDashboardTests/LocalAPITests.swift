@@ -410,6 +410,11 @@ final class LocalAPITests: XCTestCase {
             ) == true,
             "Capabilities should advertise the stable GitHub header fallback slot."
         )
+        XCTAssertEqual(
+            object["supported_agents"] as? [String],
+            [SkillAgent.claudeCode.rawValue, SkillAgent.codex.rawValue, SkillAgent.omp.rawValue],
+            "Capabilities should advertise every supported user-scope agent."
+        )
     }
 
     func testCLISkillLifecycleScaffoldsTestsPreviewsInstallsAndPacks() throws {

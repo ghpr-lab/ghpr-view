@@ -1,4 +1,5 @@
 import Darwin
+import CryptoKit
 import Combine
 import Foundation
 import os
@@ -11,6 +12,11 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
         let repository: String
         let pullRequestNumber: Int?
         let workflowRunID: Int64?
+        let workflowAttempt: Int?
+        let workflowJobID: Int64?
+        let baseSHA: String?
+        let headSHA: String?
+        let subjectKey: String?
         let githubURL: String?
     }
 
@@ -40,6 +46,15 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
         let failureCount: Int
         let pendingCount: Int
     }
+    struct ReviewRevision: Codable, Equatable, Sendable {
+        let baseSHA: String
+        let headSHA: String
+        let mergeBaseSHA: String?
+        let reviewedFiles: [String]
+        let skippedFiles: [ReviewSkippedFile]
+        let unifiedDiff: String
+    }
+
 
     let apiVersion: String
     let skillID: String
@@ -49,6 +64,7 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
     let pullRequest: PullRequest?
     let ciStatus: CIStatus?
     let failedJobLogs: FailedJobLogs?
+    let reviewRevision: ReviewRevision?
     let generatedAt: Date
 
     static func make(
@@ -57,6 +73,12 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
         page: GitHubPageContext,
         pullRequest snapshot: LocalPRSnapshot?,
         failedJobLogs: FailedJobLogs? = nil,
+        subject: GitHubSubject? = nil,
+        reviewSubject: PullRequestRevisionSubject? = nil,
+        reviewDiff: String? = nil,
+        reviewMergeBaseSHA: String? = nil,
+        reviewedFiles: [String] = [],
+        skippedFiles: [ReviewSkippedFile] = [],
         now: Date = Date()
     ) -> AgentSkillInvocationContext {
         let requestedSet = Set(requested)
@@ -66,6 +88,8 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
                 return snapshot == nil
             case "failed_job_logs":
                 return failedJobLogs == nil
+            case "pr_revision", "pr_diff":
+                return reviewSubject == nil || reviewDiff == nil
             default:
                 return true
             }
@@ -105,21 +129,82 @@ struct AgentSkillInvocationContext: Codable, Equatable, Sendable {
                 )
                 : nil
         }
+        let target: Target
+        switch subject {
+        case .pullRequestRevision(let revision):
+            target = Target(
+                type: "pull_request_revision",
+                repository: revision.repository,
+                pullRequestNumber: revision.prNumber,
+                workflowRunID: nil,
+                workflowAttempt: nil,
+                workflowJobID: nil,
+                baseSHA: revision.baseSHA,
+                headSHA: revision.headSHA,
+                subjectKey: subject?.subjectKey,
+                githubURL: page.githubURL?.absoluteString
+            )
+        case .workflowJob(let job):
+            target = Target(
+                type: "workflow_job",
+                repository: job.repository,
+                pullRequestNumber: page.prNumber,
+                workflowRunID: job.workflowRunID,
+                workflowAttempt: job.workflowAttempt,
+                workflowJobID: job.workflowJobID,
+                baseSHA: nil,
+                headSHA: job.headSHA,
+                subjectKey: subject?.subjectKey,
+                githubURL: page.githubURL?.absoluteString
+            )
+        case .diffLine(let anchor):
+            target = Target(
+                type: "diff_line",
+                repository: anchor.repository,
+                pullRequestNumber: anchor.prNumber,
+                workflowRunID: nil,
+                workflowAttempt: nil,
+                workflowJobID: nil,
+                baseSHA: anchor.baseSHA,
+                headSHA: anchor.headSHA,
+                subjectKey: subject?.subjectKey,
+                githubURL: page.githubURL?.absoluteString
+            )
+        case .legacyPage, .none:
+            target = Target(
+                type: page.type.rawValue,
+                repository: page.repository,
+                pullRequestNumber: page.prNumber,
+                workflowRunID: page.workflowRunID,
+                workflowAttempt: nil,
+                workflowJobID: nil,
+                baseSHA: nil,
+                headSHA: nil,
+                subjectKey: subject?.subjectKey,
+                githubURL: page.githubURL?.absoluteString
+            )
+        }
         return AgentSkillInvocationContext(
             apiVersion: "ghpr.dev/agent-context/v1",
             skillID: skillID,
             requestedSections: requested,
             unavailableSections: unavailable,
-            target: Target(
-                type: page.type.rawValue,
-                repository: page.repository,
-                pullRequestNumber: page.prNumber,
-                workflowRunID: page.workflowRunID,
-                githubURL: page.githubURL?.absoluteString
-            ),
+            target: target,
             pullRequest: pullRequest,
             ciStatus: ciStatus,
             failedJobLogs: requestedSet.contains("failed_job_logs") ? failedJobLogs : nil,
+            reviewRevision: reviewSubject.flatMap { subject in
+                reviewDiff.map {
+                    ReviewRevision(
+                        baseSHA: subject.baseSHA,
+                        headSHA: subject.headSHA,
+                        mergeBaseSHA: reviewMergeBaseSHA,
+                        reviewedFiles: reviewedFiles,
+                        skippedFiles: skippedFiles,
+                        unifiedDiff: $0
+                    )
+                }
+            },
             generatedAt: now
         )
     }
@@ -145,6 +230,9 @@ final class SkillRuntime: ObservableObject {
         case missingPullRequest
         case noFailedChecks
         case runNotCancellable
+        case subjectPageMismatch
+        case subjectTargetMismatch
+        case duplicateActiveRun
 
         var errorDescription: String? {
             switch self {
@@ -157,6 +245,12 @@ final class SkillRuntime: ObservableObject {
                 return "The PR has no failed CI checks to analyze."
             case .runNotCancellable:
                 return "The Skill run is not active."
+            case .subjectPageMismatch:
+                return "The exact GitHub subject does not belong to this page."
+            case .subjectTargetMismatch:
+                return "The Skill does not support this exact GitHub subject type."
+            case .duplicateActiveRun:
+                return "This Skill is already running for the exact GitHub subject."
             }
         }
     }
@@ -218,20 +312,33 @@ final class SkillRuntime: ObservableObject {
         }
     }
 
-    static let maximumLogEntries = 200
-    static let maximumLogMessageLength = 240
+    nonisolated static let maximumLogEntries = 200
+    nonisolated static let maximumLogMessageLength = 240
 
     typealias ProgressHandler = @MainActor @Sendable (ProgressEvent) -> Void
 
     struct ProgressReporter: Sendable {
         private let handler: ProgressHandler
+        private let outputHandler: @MainActor @Sendable ([String]) -> Void
 
-        init(_ handler: @escaping ProgressHandler) {
+        init(
+            _ handler: @escaping ProgressHandler,
+            output: @escaping @MainActor @Sendable ([String]) -> Void = { _ in }
+        ) {
             self.handler = handler
+            self.outputHandler = output
         }
 
         func callAsFunction(_ event: ProgressEvent) async {
             await handler(event)
+        }
+
+        func output(_ line: String) async {
+            await outputHandler([line])
+        }
+
+        func output(_ lines: [String]) async {
+            await outputHandler(lines)
         }
     }
 
@@ -240,12 +347,20 @@ final class SkillRuntime: ObservableObject {
         ProgressReporter
     ) async throws -> SkillResult
 
-    /// Fetches the failed CI job log for (repository, prNumber) via the gh CLI,
-    /// mirroring the kong-ci-log skill's fetch-ci-log.sh resolution logic.
+    /// Fetches the most recently completed failed CI job log for legacy v1 PR runs.
     typealias CILogFetchHandler = @Sendable (String, Int) async throws -> FailedJobLogs
+    typealias ExactCILogFetchHandler = @Sendable (
+        String,
+        Int,
+        WorkflowJobSubject
+    ) async throws -> FailedJobLogs
+    typealias ReviewWorkspaceHandler = @Sendable (
+        PullRequestRevisionSubject
+    ) async throws -> PRReviewWorkspace
 
     static let classifyFlakySkillID = "ci.failure.classify_flaky"
     static let explainFailureSkillID = "ci.failure.explain"
+    static let reviewPRSkillID = "pr.review"
 
     @Published private(set) var activeRunIDs: Set<String> = []
 
@@ -254,6 +369,8 @@ final class SkillRuntime: ObservableObject {
     private let bundledSkillsRootURL: URL?
     private let agentRunner: AgentRunner
     private let ciLogFetch: CILogFetchHandler
+    private let exactCILogFetch: ExactCILogFetchHandler
+    private let reviewWorkspace: ReviewWorkspaceHandler
     private var tasks: [String: Task<Void, Never>] = [:]
 
     init(
@@ -262,7 +379,11 @@ final class SkillRuntime: ObservableObject {
         bundledSkillsRootURL: URL? = nil,
         agentRunner: AgentRunner? = nil,
         agentExecutableURLs: [SkillAgent: URL] = [:],
-        ciLogFetch: CILogFetchHandler? = nil
+        ciLogFetch: CILogFetchHandler? = nil,
+        exactCILogFetch: ExactCILogFetchHandler? = nil,
+        reviewWorkspace: @escaping ReviewWorkspaceHandler = { subject in
+            try await PRReviewWorkspaceManager().prepare(subject: subject)
+        }
     ) {
         self.store = store
         self.installedSkillsRootURL = installedSkillsRootURL
@@ -284,6 +405,14 @@ final class SkillRuntime: ObservableObject {
                 prNumber: prNumber
             )
         }
+        self.exactCILogFetch = exactCILogFetch ?? { repository, prNumber, subject in
+            try await CILogFetcher.fetchFailedJobLogs(
+                repository: repository,
+                prNumber: prNumber,
+                subject: subject
+            )
+        }
+        self.reviewWorkspace = reviewWorkspace
     }
 
     var skills: [SkillDefinition] {
@@ -293,7 +422,7 @@ final class SkillRuntime: ObservableObject {
                 version: "1.0.0",
                 displayName: "Classify Flaky",
                 summary: "Compare a failed CI signature with ghpr run history.",
-                targets: [.pullRequest, .failedWorkflowRun],
+                targets: [.workflowJob],
                 agents: [.omp, .claudeCode],
                 defaultAgent: .omp,
                 isBuiltIn: true,
@@ -305,8 +434,20 @@ final class SkillRuntime: ObservableObject {
                 version: "1.0.0",
                 displayName: "Explain CI Failure",
                 summary: "Summarize failed checks and the evidence available to ghpr.",
-                targets: [.pullRequest, .failedWorkflowRun],
+                targets: [.workflowJob],
                 agents: [.omp, .claudeCode],
+                defaultAgent: .omp,
+                isBuiltIn: true,
+                hasBrowserCompanion: false,
+                isRunnable: true
+            ),
+            SkillDefinition(
+                id: Self.reviewPRSkillID,
+                version: "1.0.0",
+                displayName: "Review PR",
+                summary: "Review the exact pull request revision and publish line findings.",
+                targets: [.pullRequestRevision],
+                agents: [.omp, .claudeCode, .codex],
                 defaultAgent: .omp,
                 isBuiltIn: true,
                 hasBrowserCompanion: false,
@@ -375,6 +516,7 @@ final class SkillRuntime: ObservableObject {
         pullRequest: LocalPRSnapshot?,
         requestedByClientID: String?,
         retryOfRunID: String? = nil,
+        subject: GitHubSubject? = nil,
         now: Date = Date()
     ) throws -> SkillRun {
         guard let definition = skills.first(where: { $0.id == skillID }) else {
@@ -383,9 +525,25 @@ final class SkillRuntime: ObservableObject {
         guard definition.isRunnable else {
             throw RuntimeError.unavailableRuntime(skillID)
         }
+        let effectiveSubject = subject ?? .legacyPage(page)
+        guard Self.subject(effectiveSubject, belongsTo: page) else {
+            throw RuntimeError.subjectPageMismatch
+        }
+        let supportedTargets = Self.supportedTargets(for: effectiveSubject)
+        if !supportedTargets.isEmpty && supportedTargets.isDisjoint(with: definition.targets) {
+            throw RuntimeError.subjectTargetMismatch
+        }
+        if store.allRuns.contains(where: {
+            $0.skillID == skillID &&
+                $0.subjectKey == effectiveSubject.subjectKey &&
+                !$0.status.isTerminal
+        }) {
+            throw RuntimeError.duplicateActiveRun
+        }
         var run = SkillRun(
             id: "run_\(Self.randomID())",
             skillID: skillID,
+            agent: definition.defaultAgent,
             page: page,
             requestedByClientID: requestedByClientID,
             createdAt: now,
@@ -398,13 +556,18 @@ final class SkillRuntime: ObservableObject {
             logEntries: [],
             result: nil,
             error: nil,
-            retryOfRunID: retryOfRunID
+            retryOfRunID: retryOfRunID,
+            subject: effectiveSubject
         )
         Self.recordLogEvent(.queued, at: now, to: &run)
         store.save(run: run)
         activeRunIDs.insert(run.id)
         tasks[run.id] = Task { [weak self] in
-            await self?.execute(runID: run.id, pullRequest: pullRequest)
+            await self?.execute(
+                runID: run.id,
+                sourcePage: page,
+                pullRequest: pullRequest
+            )
         }
         return run
     }
@@ -439,11 +602,52 @@ final class SkillRuntime: ObservableObject {
             page: oldRun.page,
             pullRequest: pullRequest,
             requestedByClientID: requestedByClientID,
-            retryOfRunID: oldRun.id
+            retryOfRunID: oldRun.id,
+            subject: oldRun.subject
         )
     }
+    private static func supportedTargets(for subject: GitHubSubject) -> Set<SkillTarget> {
+        switch subject {
+        case .pullRequestRevision:
+            return [.pullRequestRevision, .pullRequest]
+        case .workflowJob:
+            return [.workflowJob, .failedWorkflowRun]
+        case .diffLine:
+            return [.diffLine, .reviewFinding]
+        case .legacyPage:
+            return []
+        }
+    }
 
-    private func execute(runID: String, pullRequest: LocalPRSnapshot?) async {
+    private static func subject(
+        _ subject: GitHubSubject,
+        belongsTo page: GitHubPageContext
+    ) -> Bool {
+        guard subject.page?.repository.lowercased() == page.repository.lowercased() else {
+            return false
+        }
+        switch (page.type, subject) {
+        case (.pullRequest, .pullRequestRevision(let revision)):
+            return page.prNumber == revision.prNumber
+        case (.pullRequest, .diffLine(let anchor)):
+            return page.prNumber == anchor.prNumber
+        case (.pullRequest, .workflowJob):
+            return true
+        case (.workflowRun, .workflowJob(let job)):
+            return page.workflowRunID == job.workflowRunID
+        case (_, .legacyPage(let legacy)):
+            return legacy.key == page.key
+        default:
+            return false
+        }
+    }
+
+
+    private func execute(
+        runID: String,
+        sourcePage: GitHubPageContext,
+        pullRequest: LocalPRSnapshot?
+    ) async {
         guard var run = store.run(id: runID) else { return }
         run.status = .running
         let startedAt = Date()
@@ -454,25 +658,64 @@ final class SkillRuntime: ObservableObject {
         store.save(run: run)
 
         do {
-            try Task.checkCancellation()
             let result: SkillResult
             switch run.skillID {
             case Self.classifyFlakySkillID, Self.explainFailureSkillID:
                 let request = try await Self.builtInRequest(
                     skillID: run.skillID,
-                    page: run.page,
+                    page: sourcePage,
                     pullRequest: pullRequest,
-                    ciLogFetch: ciLogFetch
+                    subject: run.subject,
+                    ciLogFetch: ciLogFetch,
+                    exactCILogFetch: exactCILogFetch
                 )
                 let rawResult = try await runAgent(request, runID: runID)
-                result = try Self.analysisResult(
+                let normalizedResult = try Self.analysisResult(
                     from: rawResult,
                     page: run.page,
                     pullRequest: pullRequest,
+                    subject: run.subject,
                     agent: request.agent,
                     startedAt: startedAt,
-                    preferredJobName: request.context.failedJobLogs?.workflowName
+                    resolvedJobName: request.context.failedJobLogs?.workflowName
                 )
+                if case .workflowJob = run.subject,
+                   let finding = Self.ciFinding(
+                    from: normalizedResult,
+                    skillID: run.skillID,
+                    runID: runID,
+                    subject: run.subject
+                   ) {
+                    store.save(finding: finding)
+                }
+                result = normalizedResult
+            case Self.reviewPRSkillID:
+                guard case .pullRequestRevision(let revision) = run.subject else {
+                    throw RuntimeError.subjectPageMismatch
+                }
+                let workspace = try await reviewWorkspace(revision)
+                defer {
+                    if let cleanupURL = workspace.cleanupURL {
+                        try? FileManager.default.removeItem(at: cleanupURL)
+                    }
+                }
+                let request = Self.reviewRequest(
+                    page: run.page,
+                    pullRequest: pullRequest,
+                    subject: revision,
+                    workspace: workspace
+                )
+                let rawResult = try await runAgent(request, runID: runID)
+                let review = try Self.reviewResult(
+                    from: rawResult,
+                    runID: runID,
+                    workspace: workspace,
+                    agent: request.agent
+                )
+                for finding in review.findings {
+                    store.save(finding: finding)
+                }
+                result = review.result
             default:
                 guard let package = installedPackage(id: run.skillID) else {
                     throw RuntimeError.unknownSkill(run.skillID)
@@ -481,11 +724,13 @@ final class SkillRuntime: ObservableObject {
                     skillID: package.manifest.id,
                     requestedSections: package.manifest.contextIncludes,
                     page: run.page,
-                    pullRequest: pullRequest
+                    pullRequest: pullRequest,
+                    subject: run.subject
                 )
                 let request = try Self.packageRequest(package, context: context)
                 result = try await runAgent(request, runID: runID)
             }
+            recordAgentOutput(runID: runID, result: result)
             updateProgress(runID: runID, event: .finalizing)
             try Task.checkCancellation()
             guard var completed = store.run(id: runID), !completed.status.isTerminal else {
@@ -540,11 +785,17 @@ final class SkillRuntime: ObservableObject {
         let preference = store.agentRuntimePreference(for: request.agent)
         request.model = preference.model
         request.reasoningEffort = preference.reasoningEffort
+        recordExecutionInput(runID: runID, request: request)
         return try await agentRunner(
             request,
-            ProgressReporter { [weak self] event in
-                self?.updateProgress(runID: runID, event: event)
-            }
+            ProgressReporter(
+                { [weak self] event in
+                    self?.updateProgress(runID: runID, event: event)
+                },
+                output: { [weak self] lines in
+                    self?.recordAgentOutputLines(runID: runID, lines: lines)
+                }
+            )
         )
     }
 
@@ -571,23 +822,76 @@ final class SkillRuntime: ObservableObject {
         at timestamp: Date = Date(),
         to run: inout SkillRun
     ) {
-        let normalized = message
+        recordLogEntry(
+            kind: event.kind,
+            message: message,
+            stream: nil,
+            at: timestamp,
+            to: &run
+        )
+    }
+
+    nonisolated static func browserSafeLogLine(_ message: String) -> String {
+        var normalized = message
             .components(separatedBy: .newlines)
             .joined(separator: " ")
             .split(whereSeparator: \.isWhitespace)
             .joined(separator: " ")
-        let bounded: String
-        if normalized.count > maximumLogMessageLength {
-            bounded = "\(normalized.prefix(maximumLogMessageLength - 1))…"
-        } else {
-            bounded = normalized
+        for (pattern, replacement) in [
+            (
+                #"(?i)\bAuthorization\s*:\s*(?:Bearer\s+)?[A-Za-z0-9._~+/=-]+"#,
+                "Authorization: [redacted]"
+            ),
+            (
+                #"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})\b"#,
+                "[redacted github token]"
+            ),
+            (
+                #"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"#,
+                "[redacted aws key]"
+            ),
+            (
+                #"\b(?:sk|xai)-[A-Za-z0-9_-]{20,}\b"#,
+                "[redacted provider key]"
+            ),
+            (
+                #"(?i)\b(api[_-]?key|token|secret|password|credential)\b["']?\s*[:=]\s*["']?[^\s,;}"']+["']?"#,
+                "$1=[redacted]"
+            ),
+            (
+                #"(?:/Users|/private|/tmp|/var/folders)/[^\s]+"#,
+                "[local path]"
+            )
+        ] {
+            guard let expression = try? NSRegularExpression(pattern: pattern) else { continue }
+            normalized = expression.stringByReplacingMatches(
+                in: normalized,
+                range: NSRange(normalized.startIndex..., in: normalized),
+                withTemplate: replacement
+            )
         }
+        if normalized.count > maximumLogMessageLength {
+            return "\(normalized.prefix(maximumLogMessageLength - 1))…"
+        }
+        return normalized
+    }
+
+    static func recordLogEntry(
+        kind: SkillRunLogKind,
+        message: String,
+        stream: SkillRunLogStream?,
+        at timestamp: Date = Date(),
+        to run: inout SkillRun
+    ) {
+        let bounded = browserSafeLogLine(message)
+        guard !bounded.isEmpty else { return }
         if run.logEntries == nil {
             run.logEntries = []
         }
         if let last = run.logEntries?.last,
-           last.kind == event.kind,
-           last.message == bounded {
+           last.kind == kind,
+           last.message == bounded,
+           last.stream == stream {
             return
         }
         let overflow = (run.logEntries?.count ?? 0) - maximumLogEntries + 1
@@ -595,22 +899,186 @@ final class SkillRuntime: ObservableObject {
             run.logEntries?.removeFirst(overflow)
         }
         run.logEntries?.append(
-            SkillRunLogEntry(timestamp: timestamp, kind: event.kind, message: bounded)
+            SkillRunLogEntry(
+                timestamp: timestamp,
+                kind: kind,
+                message: bounded,
+                stream: stream
+            )
         )
     }
 
-    private static let builtInResultSchema = """
+    private func recordExecutionInput(
+        runID: String,
+        request: AgentExecutionRequest
+    ) {
+        guard var run = store.run(id: runID), run.status == .running else { return }
+        for line in Self.executionInputLines(request) {
+            Self.recordLogEntry(
+                kind: .running,
+                message: line,
+                stream: .skillInput,
+                to: &run
+            )
+        }
+        store.save(run: run)
+    }
+
+    private func markReceivingAgentOutput(_ run: inout SkillRun) {
+        run.progressMessage = LogEvent.receivingAgentOutput.message
+        run.progressCurrent = 2
+        let alreadyRecorded = run.logEntries?.contains {
+            $0.stream == nil &&
+                $0.message == LogEvent.receivingAgentOutput.message
+        } ?? false
+        if !alreadyRecorded {
+            Self.recordLogEvent(.receivingAgentOutput, to: &run)
+        }
+    }
+
+    private func recordAgentOutputLines(runID: String, lines: [String]) {
+        guard !lines.isEmpty,
+              var run = store.run(id: runID),
+              run.status == .running else {
+            return
+        }
+        markReceivingAgentOutput(&run)
+        for line in lines {
+            Self.recordLogEntry(
+                kind: .running,
+                message: line,
+                stream: .agentOutput,
+                to: &run
+            )
+        }
+        store.save(run: run)
+    }
+
+    private func recordAgentOutput(runID: String, result: SkillResult) {
+        guard var run = store.run(id: runID), run.status == .running else { return }
+        markReceivingAgentOutput(&run)
+        for line in Self.agentOutputLines(result) {
+            Self.recordLogEntry(
+                kind: .running,
+                message: line,
+                stream: .agentOutput,
+                to: &run
+            )
+        }
+        store.save(run: run)
+    }
+
+    private static func executionInputLines(_ request: AgentExecutionRequest) -> [String] {
+        let target = request.context.target
+        var targetLine = "Target: \(target.type) · \(target.repository)"
+        if let pullRequestNumber = target.pullRequestNumber {
+            targetLine += "#\(pullRequestNumber)"
+        }
+        if let headSHA = target.headSHA {
+            targetLine += " @ \(headSHA.prefix(7))"
+        }
+        let instruction = request.instructions
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+        var lines = [
+            "Skill: \(request.displayName) (\(request.skillID))",
+            targetLine,
+            "Agent: \(request.agent.rawValue) · timeout \(request.timeoutSeconds)s",
+            "Context: \(request.context.requestedSections.joined(separator: ", "))"
+        ]
+        if let instruction {
+            lines.append("Instructions: \(instruction)")
+        }
+        if let revision = request.context.reviewRevision {
+            let diffLineCount = revision.unifiedDiff.split(
+                separator: "\n",
+                omittingEmptySubsequences: false
+            ).count
+            lines.append(
+                "Revision: \(revision.baseSHA.prefix(7)) → \(revision.headSHA.prefix(7))"
+            )
+            let fileLabel = revision.reviewedFiles.count == 1 ? "file" : "files"
+            lines.append(
+                "Diff: \(revision.reviewedFiles.count) \(fileLabel) · \(diffLineCount) lines · \(revision.unifiedDiff.utf8.count) bytes"
+            )
+            for file in revision.reviewedFiles.prefix(12) {
+                lines.append("File: \(file)")
+            }
+            if revision.reviewedFiles.count > 12 {
+                lines.append("Files: +\(revision.reviewedFiles.count - 12) more")
+            }
+        }
+        return lines
+    }
+
+    private static func agentOutputLines(_ result: SkillResult) -> [String] {
+        var lines = ["Result: \(result.title)"]
+        if let review = result.codeReview {
+            lines.append("Overview: \(review.overviewMarkdown)")
+            lines.append("Findings: \(review.findings.count)")
+            for finding in review.findings.prefix(20) {
+                let line = finding.line.map { ":\($0)" } ?? ""
+                let title = finding.title ?? finding.body
+                lines.append(
+                    "\(finding.severity.rawValue) · \(finding.file)\(line) · \(title)"
+                )
+            }
+        } else if let analysis = result.analysis {
+            lines.append("Verdict: \(analysis.verdict.rawValue)")
+            lines.append("Summary: \(analysis.summary)")
+            lines.append("Suggested action: \(analysis.suggestedAction)")
+        } else {
+            lines.append(contentsOf:
+                result.summary
+                    .split(separator: "\n")
+                    .prefix(20)
+                    .map { "Output: \($0)" }
+            )
+        }
+        return lines
+    }
+
+    private static let classifyResultSchema = """
     {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "type": "object",
-      "required": ["status", "summary", "evidence", "suggested_action"],
+      "required": ["verdict", "confidence", "flaky_evidence", "suggested_action"],
       "properties": {
-        "status": {
+        "verdict": {
           "type": "string",
           "enum": ["likely_flaky", "likely_related", "needs_investigation"]
         },
-        "summary": { "type": "string" },
-        "evidence": {
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "flaky_evidence": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "history": {
+          "type": "object",
+          "required": ["failed_runs", "total_runs", "window_days"],
+          "properties": {
+            "failed_runs": { "type": "integer", "minimum": 0 },
+            "total_runs": { "type": "integer", "minimum": 0 },
+            "window_days": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "reproduction": { "type": "string" },
+        "suggested_action": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+    """
+
+    private static let explainResultSchema = """
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "required": ["why_it_failed", "relevant_evidence", "suggested_action"],
+      "properties": {
+        "why_it_failed": { "type": "string" },
+        "relevant_evidence": {
           "type": "array",
           "items": { "type": "string" }
         },
@@ -620,26 +1088,117 @@ final class SkillRuntime: ObservableObject {
     }
     """
 
+    private static let reviewResultSchema = """
+    {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "required": ["overview_markdown", "findings"],
+      "properties": {
+        "overview_markdown": { "type": "string" },
+        "findings": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "required": [
+              "file", "start_line", "end_line", "side", "title", "summary",
+              "severity", "confidence", "category"
+            ],
+            "properties": {
+              "file": { "type": "string" },
+              "start_line": { "type": "integer", "minimum": 1 },
+              "end_line": { "type": "integer", "minimum": 1 },
+              "side": { "type": "string", "enum": ["left", "right"] },
+              "title": { "type": "string" },
+              "summary": { "type": "string" },
+              "why": { "type": "string" },
+              "suggested_fix": { "type": "string" },
+              "background": { "type": "string" },
+              "quoted_code": { "type": "string" },
+              "severity": { "type": "string", "enum": ["error", "warning", "info"] },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+              "category": { "type": "string" }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+    """
+
+    private static func reviewRequest(
+        page: GitHubPageContext,
+        pullRequest: LocalPRSnapshot?,
+        subject: PullRequestRevisionSubject,
+        workspace: PRReviewWorkspace
+    ) -> AgentExecutionRequest {
+        let exactSubject = GitHubSubject.pullRequestRevision(subject)
+        let context = AgentSkillInvocationContext.make(
+            skillID: reviewPRSkillID,
+            requestedSections: ["pr_metadata", "pr_revision", "pr_diff"],
+            page: page,
+            pullRequest: pullRequest,
+            subject: exactSubject,
+            reviewSubject: subject,
+            reviewDiff: workspace.diff,
+            reviewMergeBaseSHA: workspace.mergeBaseSHA,
+            reviewedFiles: workspace.reviewedFiles,
+            skippedFiles: workspace.skippedFiles
+        )
+        return AgentExecutionRequest(
+            skillID: reviewPRSkillID,
+            displayName: "Review PR",
+            agent: .omp,
+            timeoutSeconds: 300,
+            instructions: """
+            Review only the exact unified diff in ghpr_context.review_revision. Report only
+            actionable correctness, security, concurrency, and data-loss problems introduced
+            between the supplied base_sha and head_sha. Do not report style preferences or
+            pre-existing code. Every finding must identify the changed-side file and exact line
+            range from the diff, quote the relevant code when useful, explain the observable
+            failure, and provide a concrete fix. Use side \"right\" for added or context lines in
+            the head revision and \"left\" only for removed lines. Return no finding when the
+            evidence is insufficient. Use only the supplied ghpr context.
+            """,
+            resultSchema: Data(reviewResultSchema.utf8),
+            context: context
+        )
+    }
+
     private static func builtInRequest(
         skillID: String,
         page: GitHubPageContext,
         pullRequest: LocalPRSnapshot?,
-        ciLogFetch: CILogFetchHandler
+        subject: GitHubSubject?,
+        ciLogFetch: CILogFetchHandler,
+        exactCILogFetch: ExactCILogFetchHandler
     ) async throws -> AgentExecutionRequest {
-        guard let pullRequest, let prNumber = page.prNumber else {
+        let exactJob: WorkflowJobSubject?
+        if case .workflowJob(let job) = subject {
+            exactJob = job
+        } else {
+            exactJob = nil
+        }
+        guard pullRequest != nil || exactJob != nil else {
             throw RuntimeError.missingPullRequest
         }
-        let failedWorkflows = pullRequest.ciWorkflows?.filter {
-            $0.failureCount > 0
-        } ?? []
-        guard pullRequest.checkFailureCount > 0 || !failedWorkflows.isEmpty else {
-            throw RuntimeError.noFailedChecks
+        let prNumber = page.prNumber ?? pullRequest?.number ?? 0
+        if exactJob == nil {
+            let failedWorkflows = pullRequest?.ciWorkflows?.filter {
+                $0.failureCount > 0
+            } ?? []
+            guard (pullRequest?.checkFailureCount ?? 0) > 0 || !failedWorkflows.isEmpty else {
+                throw RuntimeError.noFailedChecks
+            }
         }
         let instructions: String
         let displayName: String
+        let resultSchema: String
         switch skillID {
         case classifyFlakySkillID:
             displayName = "Classify Flaky"
+            resultSchema = classifyResultSchema
             instructions = """
             Classify the failed CI evidence for this pull request.
             ghpr_context.failed_job_logs contains the most recent failed job log, fetched \
@@ -650,11 +1209,12 @@ final class SkillRuntime: ObservableObject {
             window top-to-bottom: the first error is the root cause; later errors are \
             usually downstream cascades. Use only the supplied ghpr context. Do not \
             claim that changed files or rerun history were inspected when those sections \
-            are unavailable. Return a conservative status, concise summary, explicit \
-            evidence, and one next action.
+            are unavailable. Return verdict, numeric confidence, flaky_evidence, optional \
+            history/reproduction only when supplied by context, and one suggested_action.
             """
         case explainFailureSkillID:
             displayName = "Explain CI Failure"
+            resultSchema = explainResultSchema
             instructions = """
             Explain the failed CI evidence for this pull request.
             ghpr_context.failed_job_logs contains the most recent failed job log, fetched \
@@ -664,20 +1224,29 @@ final class SkillRuntime: ObservableObject {
             markers — say so. Identify the first failing step, the failing spec path or \
             error line, and distinguish observed facts from inferred causes. Use only the \
             supplied ghpr context. Do not claim that changed files or rerun history were \
-            inspected when those sections are unavailable. Return status \
-            needs_investigation unless the log clearly attributes the failure to a \
-            specific cause, a concise summary, evidence, and one next action.
+            inspected when those sections are unavailable. Return why_it_failed, \
+            relevant_evidence, and one suggested_action.
             """
         default:
             throw RuntimeError.unknownSkill(skillID)
         }
-        let failedJobLogs = try await ciLogFetch(page.repository, prNumber)
+        let failedJobLogs: FailedJobLogs
+        if let exactJob {
+            failedJobLogs = try await exactCILogFetch(
+                exactJob.repository,
+                prNumber,
+                exactJob
+            )
+        } else {
+            failedJobLogs = try await ciLogFetch(page.repository, prNumber)
+        }
         let context = AgentSkillInvocationContext.make(
             skillID: skillID,
             requestedSections: ["pr_metadata", "ci_status", "failed_job_logs"],
             page: page,
             pullRequest: pullRequest,
-            failedJobLogs: failedJobLogs
+            failedJobLogs: failedJobLogs,
+            subject: subject
         )
         return AgentExecutionRequest(
             skillID: skillID,
@@ -685,7 +1254,7 @@ final class SkillRuntime: ObservableObject {
             agent: .omp,
             timeoutSeconds: 600,
             instructions: instructions,
-            resultSchema: Data(builtInResultSchema.utf8),
+            resultSchema: Data(resultSchema.utf8),
             context: context
         )
     }
@@ -715,22 +1284,37 @@ final class SkillRuntime: ObservableObject {
         from result: SkillResult,
         page: GitHubPageContext,
         pullRequest: LocalPRSnapshot?,
+        subject: GitHubSubject?,
         agent: SkillAgent,
         startedAt: Date,
-        preferredJobName: String? = nil
+        resolvedJobName: String? = nil
     ) throws -> SkillResult {
+        let status = result.payload?.objectString(for: "verdict") ??
+            result.payload?.objectString(for: "status")
+        let verdict = status.flatMap(AnalysisVerdict.init(rawValue:))
+            ?? .needsInvestigation
+        let suggestedAction = result.payload?.objectString(for: "suggested_action") ??
+            "Inspect the failed job evidence before taking action."
         guard let pullRequest, let prNumber = page.prNumber else {
-            throw RuntimeError.missingPullRequest
+            guard case .workflowJob = subject else {
+                throw RuntimeError.missingPullRequest
+            }
+            return SkillResult(
+                kind: .ciAnalysis,
+                title: verdict.displayName,
+                summary: result.summary,
+                analysis: nil,
+                codeReview: nil,
+                markdown: result.markdown,
+                artifacts: result.artifacts,
+                payload: result.payload
+            )
         }
-        let failed = preferredJobName.flatMap { name in
+        let failed = resolvedJobName.flatMap { name in
             name.isEmpty ? nil : [name]
         } ?? pullRequest.ciWorkflows?
             .filter { $0.failureCount > 0 }
             .map(\.name) ?? []
-        let status = result.payload?.objectString(for: "status")
-        let verdict = status.flatMap(AnalysisVerdict.init(rawValue:)) ?? .needsInvestigation
-        let suggestedAction = result.payload?.objectString(for: "suggested_action") ??
-            "Inspect the failed job evidence before taking action."
         let confidence: AnalysisConfidence = verdict == .needsInvestigation ? .low : .medium
         let analysis = CIAnalysis(
             id: "analysis_\(randomID())",
@@ -766,6 +1350,230 @@ final class SkillRuntime: ObservableObject {
             markdown: result.markdown,
             artifacts: result.artifacts,
             payload: result.payload
+        )
+    }
+
+
+    private static func ciFinding(
+        from result: SkillResult,
+        skillID: String,
+        runID: String,
+        subject: GitHubSubject
+    ) -> SkillFinding? {
+        guard case .workflowJob = subject, let payload = result.payload else {
+            return nil
+        }
+        let kind: FindingKind
+        let title: String
+        let confidence: Double?
+        let summary: String
+        switch skillID {
+        case explainFailureSkillID:
+            kind = .ciFailureExplanation
+            title = "CI failure explained"
+            confidence = nil
+            summary = payload.objectString(for: "why_it_failed") ?? result.summary
+        case classifyFlakySkillID:
+            kind = .ciFlakyClassification
+            let verdict = payload.objectString(for: "verdict")
+                .flatMap(AnalysisVerdict.init(rawValue:)) ?? .needsInvestigation
+            title = verdict.displayName
+            confidence = payload.objectNumber(for: "confidence")
+            summary = payload.objectStrings(for: "flaky_evidence").first
+                ?? payload.objectString(for: "suggested_action")
+                ?? result.summary
+        default:
+            return nil
+        }
+        let evidence = payload.objectStrings(
+            for: kind == .ciFailureExplanation ? "relevant_evidence" : "flaky_evidence"
+        )
+        let suggestedAction = payload.objectString(for: "suggested_action")
+        let details = (evidence + [suggestedAction].compactMap { $0 })
+            .joined(separator: "\n")
+        let fingerprint = reviewSHA256(
+            "ci:v1\0\(skillID)\0\(summary)\0\(evidence.joined(separator: "\0"))"
+        )
+        return SkillFinding(
+            id: "finding_\(reviewSHA256("\(runID)\0\(fingerprint)").prefix(24))",
+            subjectKey: subject.subjectKey,
+            subject: subject,
+            kind: kind,
+            severity: kind == .ciFailureExplanation ? .warning : .info,
+            title: title,
+            summary: String(summary.prefix(2_000)),
+            details: details.isEmpty ? nil : String(details.prefix(20_000)),
+            confidence: confidence,
+            lifecycle: .exact,
+            createdAt: Date(),
+            fingerprint: fingerprint
+        )
+    }
+    private static func reviewResult(
+        from rawResult: SkillResult,
+        runID: String,
+        workspace: PRReviewWorkspace,
+        agent: SkillAgent
+    ) throws -> (result: SkillResult, findings: [SkillFinding]) {
+        guard case .object(let payload) = rawResult.payload,
+              case .string(let overviewValue) = payload["overview_markdown"],
+              case .array(let findingValues) = payload["findings"] else {
+            throw AgentCLIAdapterError.invalidResult
+        }
+        let subject = workspace.subject
+        let patch = ReviewPatchIndex(workspace.diff)
+        let overview = String(overviewValue.prefix(100_000))
+        var reviewFindings: [ReviewFinding] = []
+        var persistedFindings: [SkillFinding] = []
+        for (ordinal, value) in findingValues.prefix(50).enumerated() {
+            guard case .object(let finding) = value,
+                  let file = finding.string(for: "file"),
+                  let startLine = finding.integer(for: "start_line"),
+                  let endLine = finding.integer(for: "end_line"),
+                  startLine > 0,
+                  endLine >= startLine,
+                  let sideValue = finding.string(for: "side"),
+                  let side = DiffSide(rawValue: sideValue),
+                  let titleValue = finding.string(for: "title"),
+                  let summaryValue = finding.string(for: "summary"),
+                  let severityValue = finding.string(for: "severity"),
+                  let reviewSeverity = ReviewSeverity(rawValue: severityValue),
+                  let findingSeverity = FindingSeverity(rawValue: severityValue),
+                  let confidenceValue = finding.number(for: "confidence"),
+                  (0...1).contains(confidenceValue),
+                  let categoryValue = finding.string(for: "category") else {
+                throw AgentCLIAdapterError.invalidResult
+            }
+            let title = String(titleValue.prefix(200))
+            let summary = String(summaryValue.prefix(2_000))
+            let category = String(categoryValue.prefix(200))
+            let quotedCode = finding.string(for: "quoted_code").map {
+                String($0.prefix(20_000))
+            }
+            let why = finding.string(for: "why").map { String($0.prefix(20_000)) }
+            let suggestedFix = finding.string(for: "suggested_fix").map {
+                String($0.prefix(20_000))
+            }
+            let background = finding.string(for: "background").map {
+                String($0.prefix(20_000))
+            }
+            let detailSections = [
+                why.map { "Why\n\($0)" },
+                suggestedFix.map { "Suggested fix\n\($0)" },
+                background.map { "Background\n\($0)" }
+            ].compactMap { $0 }
+            let fileWasReviewed = workspace.reviewedFiles.isEmpty
+                ? patch.hasFile(file)
+                : workspace.reviewedFiles.contains(file)
+            let targetCode = patch.targetCode(
+                file: file,
+                side: side,
+                startLine: startLine,
+                endLine: endLine
+            )
+            let fingerprint = reviewFindingFingerprint(
+                skillID: reviewPRSkillID,
+                category: category,
+                file: file,
+                side: side,
+                targetCode: targetCode ?? quotedCode ?? summary
+            )
+            let findingID = "finding_\(reviewSHA256("\(runID)\0\(fingerprint)\0\(ordinal)").prefix(24))"
+            let isExact = fileWasReviewed && targetCode != nil
+            let snippet = isExact
+                ? patch.snippet(file: file, side: side, startLine: startLine, endLine: endLine)
+                : DiffSnippet(lines: [], unavailableReason: "The reported range is not present in the reviewed patch.")
+            reviewFindings.append(
+                ReviewFinding(
+                    id: findingID,
+                    file: file,
+                    line: endLine,
+                    body: summary,
+                    quotedCode: quotedCode,
+                    details: ReviewFindingDetails(
+                        why: why,
+                        suggestedFix: suggestedFix,
+                        background: background,
+                        triggerScenarios: []
+                    ),
+                    severity: reviewSeverity,
+                    confidence: confidenceValue,
+                    category: category,
+                    title: title,
+                    side: side,
+                    startLine: startLine,
+                    endLine: endLine,
+                    snippet: snippet
+                )
+            )
+
+            let findingSubject: GitHubSubject
+            let lifecycle: FindingLifecycle
+            if isExact {
+                let anchor = try DiffAnchor(
+                    repository: subject.repository,
+                    prNumber: subject.prNumber,
+                    baseSHA: subject.baseSHA,
+                    headSHA: subject.headSHA,
+                    blobSHA: workspace.blobSHAs[file],
+                    filePath: file,
+                    side: side,
+                    startLine: startLine,
+                    endLine: endLine,
+                    hunkFingerprint: patch.hunkFingerprint(
+                        file: file,
+                        side: side,
+                        startLine: startLine,
+                        endLine: endLine
+                    ),
+                    quotedCode: quotedCode
+                )
+                findingSubject = .diffLine(anchor)
+                lifecycle = .exact
+            } else {
+                findingSubject = .pullRequestRevision(subject)
+                lifecycle = .unavailable
+            }
+            persistedFindings.append(
+                SkillFinding(
+                    id: findingID,
+                    subjectKey: findingSubject.subjectKey,
+                    subject: findingSubject,
+                    kind: .reviewFinding,
+                    severity: findingSeverity,
+                    title: title,
+                    summary: summary,
+                    details: detailSections.isEmpty ? nil : detailSections.joined(separator: "\n\n"),
+                    confidence: confidenceValue,
+                    lifecycle: lifecycle,
+                    createdAt: Date(),
+                    fingerprint: fingerprint
+                )
+            )
+        }
+        let codeReview = CodeReviewResult(
+            overviewMarkdown: overview,
+            findings: reviewFindings,
+            engine: agent.displayName,
+            reviewedAt: Date(),
+            headSHA: subject.headSHA,
+            reviewedBaseSHA: subject.baseSHA,
+            reviewedHeadSHA: subject.headSHA,
+            reviewedFiles: workspace.reviewedFiles,
+            skippedFiles: workspace.skippedFiles
+        )
+        return (
+            SkillResult(
+                kind: .codeReview,
+                title: "Review Summary",
+                summary: String(overview.prefix(2_000)),
+                analysis: nil,
+                codeReview: codeReview,
+                markdown: overview,
+                artifacts: rawResult.artifacts,
+                payload: rawResult.payload
+            ),
+            persistedFindings
         )
     }
 
@@ -882,7 +1690,8 @@ final class SkillRuntime: ObservableObject {
                 action.kind == .openDetail ? run?.result?.analysis?.id : nil
             ),
             tag: action.tag,
-            event: action.event
+            event: action.event,
+            subject: action.subject
         )
     }
 
@@ -892,6 +1701,329 @@ final class SkillRuntime: ObservableObject {
     }
 }
 
+private struct ReviewPatchLine {
+    let hunk: Int
+    let oldLine: Int?
+    let newLine: Int?
+    let kind: DiffSnippetLineKind
+    let text: String
+}
+
+struct ReviewPatchIndex {
+    private let files: [String: [ReviewPatchLine]]
+
+    init(_ diff: String) {
+        var parsed: [String: [ReviewPatchLine]] = [:]
+        var currentFile: String?
+        var fallbackFile: String?
+        var oldLine = 0
+        var newLine = 0
+        var hunk = 0
+        var inHunk = false
+
+        for line in diff.components(separatedBy: .newlines) {
+            if line.hasPrefix("diff --git ") {
+                fallbackFile = line.range(of: " b/", options: .backwards).map {
+                    String(line[$0.upperBound...])
+                }
+                currentFile = fallbackFile
+                inHunk = false
+                continue
+            }
+            if line.hasPrefix("+++ ") {
+                let path = String(line.dropFirst(4))
+                currentFile = path == "/dev/null"
+                    ? fallbackFile
+                    : path.hasPrefix("b/") ? String(path.dropFirst(2)) : path
+                continue
+            }
+            if line.hasPrefix("@@ "),
+               let range = line.range(of: "@@", options: [], range: line.index(line.startIndex, offsetBy: 2)..<line.endIndex) {
+                let header = line[line.index(line.startIndex, offsetBy: 2)..<range.lowerBound]
+                let tokens = header.split(separator: " ")
+                guard tokens.count >= 2,
+                      let parsedOld = Self.hunkStart(tokens[0], marker: "-"),
+                      let parsedNew = Self.hunkStart(tokens[1], marker: "+") else {
+                    inHunk = false
+                    continue
+                }
+                oldLine = parsedOld
+                newLine = parsedNew
+                hunk += 1
+                inHunk = true
+                continue
+            }
+            guard inHunk, let currentFile, let marker = line.first else { continue }
+            let body = String(line.dropFirst())
+            switch marker {
+            case "+":
+                parsed[currentFile, default: []].append(
+                    ReviewPatchLine(hunk: hunk, oldLine: nil, newLine: newLine, kind: .added, text: body)
+                )
+                newLine += 1
+            case "-":
+                parsed[currentFile, default: []].append(
+                    ReviewPatchLine(hunk: hunk, oldLine: oldLine, newLine: nil, kind: .removed, text: body)
+                )
+                oldLine += 1
+            case " ":
+                parsed[currentFile, default: []].append(
+                    ReviewPatchLine(
+                        hunk: hunk,
+                        oldLine: oldLine,
+                        newLine: newLine,
+                        kind: .context,
+                        text: body
+                    )
+                )
+                oldLine += 1
+                newLine += 1
+            case "\\":
+                continue
+            default:
+                inHunk = false
+            }
+        }
+        files = parsed
+    }
+
+    func hasFile(_ file: String) -> Bool {
+        files[file] != nil
+    }
+
+    func targetCode(
+        file: String,
+        side: DiffSide,
+        startLine: Int,
+        endLine: Int
+    ) -> String? {
+        guard let matched = targetLines(
+            file: file,
+            side: side,
+            startLine: startLine,
+            endLine: endLine
+        ) else {
+            return nil
+        }
+        return matched.map(\.line.text).joined(separator: "\n")
+    }
+
+    func snippet(
+        file: String,
+        side: DiffSide,
+        startLine: Int,
+        endLine: Int
+    ) -> DiffSnippet {
+        guard let fileLines = files[file],
+              let matched = targetLines(
+                file: file,
+                side: side,
+                startLine: startLine,
+                endLine: endLine
+              ),
+              let first = matched.first,
+              let last = matched.last else {
+            return DiffSnippet(lines: [], unavailableReason: "The reviewed patch does not contain this range.")
+        }
+        let hunkLines = fileLines.enumerated().filter { $0.element.hunk == first.line.hunk }
+        guard let startIndex = hunkLines.firstIndex(where: { $0.offset == first.offset }),
+              let endIndex = hunkLines.firstIndex(where: { $0.offset == last.offset }) else {
+            return DiffSnippet(lines: [], unavailableReason: "The reviewed hunk is unavailable.")
+        }
+        let targetCount = endLine - startLine + 1
+        var selected: [ReviewPatchLine]
+        if targetCount <= 3 {
+            let lower = max(0, startIndex - 2)
+            let upper = min(hunkLines.count - 1, endIndex + 2)
+            selected = Array(hunkLines[lower...upper].map(\.element).prefix(7))
+        } else {
+            let before = startIndex > 0 ? [hunkLines[startIndex - 1].element] : []
+            let firstTargets = hunkLines[startIndex...min(startIndex + 1, endIndex)].map(\.element)
+            let lastTargets = hunkLines[max(startIndex, endIndex - 1)...endIndex].map(\.element)
+            let after = endIndex + 1 < hunkLines.count ? [hunkLines[endIndex + 1].element] : []
+            selected = before + firstTargets
+            selected.append(
+                ReviewPatchLine(hunk: first.line.hunk, oldLine: nil, newLine: nil, kind: .ellipsis, text: "…")
+            )
+            selected += lastTargets + after
+        }
+        return DiffSnippet(
+            lines: selected.prefix(7).map {
+                DiffSnippetLine(kind: $0.kind, oldLine: $0.oldLine, newLine: $0.newLine, text: $0.text)
+            },
+            unavailableReason: nil
+        )
+    }
+
+    func hunkFingerprint(
+        file: String,
+        side: DiffSide,
+        startLine: Int,
+        endLine: Int
+    ) -> String? {
+        guard let fileLines = files[file],
+              let matched = targetLines(
+                file: file,
+                side: side,
+                startLine: startLine,
+                endLine: endLine
+              ),
+              let first = matched.first,
+              let last = matched.last else {
+            return nil
+        }
+        let sameHunk = fileLines.enumerated().filter { $0.element.hunk == first.line.hunk }
+        guard let startIndex = sameHunk.firstIndex(where: { $0.offset == first.offset }),
+              let endIndex = sameHunk.firstIndex(where: { $0.offset == last.offset }) else {
+            return nil
+        }
+        let lower = max(0, startIndex - 3)
+        let upper = min(sameHunk.count - 1, endIndex + 3)
+        let context = sameHunk[lower...upper].map(\.element.text).joined(separator: "\n")
+        return reviewSHA256("hunk:v1\0\(normalizeReviewCode(context))")
+    }
+
+    func anchors(
+        matchingHunkFingerprint fingerprint: String,
+        original: DiffAnchor,
+        currentRevision: PullRequestRevisionSubject
+    ) -> [DiffAnchor] {
+        candidateAnchors(original: original, currentRevision: currentRevision).filter { candidate in
+            hunkFingerprint(
+                file: candidate.filePath,
+                side: candidate.side,
+                startLine: candidate.startLine,
+                endLine: candidate.endLine
+            ) == fingerprint
+        }
+    }
+
+    func anchors(
+        matchingQuotedCode quotedCode: String,
+        original: DiffAnchor,
+        currentRevision: PullRequestRevisionSubject
+    ) -> [DiffAnchor] {
+        let normalizedQuote = normalizeReviewCode(
+            quotedCode.components(separatedBy: .newlines).map { line in
+                guard let first = line.first, first == "+" || first == "-" || first == " " else {
+                    return line
+                }
+                return String(line.dropFirst())
+            }.joined(separator: "\n")
+        )
+        guard !normalizedQuote.isEmpty else { return [] }
+        return candidateAnchors(original: original, currentRevision: currentRevision).filter { candidate in
+            guard let code = targetCode(
+                file: candidate.filePath,
+                side: candidate.side,
+                startLine: candidate.startLine,
+                endLine: candidate.endLine
+            ) else {
+                return false
+            }
+            return normalizeReviewCode(code) == normalizedQuote
+        }
+    }
+
+    private func candidateAnchors(
+        original: DiffAnchor,
+        currentRevision: PullRequestRevisionSubject
+    ) -> [DiffAnchor] {
+        let lineCount = original.endLine - original.startLine + 1
+        guard lineCount > 0 else { return [] }
+        var candidates: [DiffAnchor] = []
+        for file in files.keys.sorted() {
+            guard let lines = files[file] else { continue }
+            for line in lines {
+                guard let startLine = original.side == .right ? line.newLine : line.oldLine else {
+                    continue
+                }
+                let endLine = startLine + lineCount - 1
+                guard targetLines(
+                    file: file,
+                    side: original.side,
+                    startLine: startLine,
+                    endLine: endLine
+                ) != nil,
+                      let candidate = try? DiffAnchor(
+                        repository: currentRevision.repository,
+                        prNumber: currentRevision.prNumber,
+                        baseSHA: currentRevision.baseSHA,
+                        headSHA: currentRevision.headSHA,
+                        blobSHA: nil,
+                        filePath: file,
+                        side: original.side,
+                        startLine: startLine,
+                        endLine: endLine,
+                        hunkFingerprint: original.hunkFingerprint,
+                        quotedCode: original.quotedCode
+                      ) else {
+                    continue
+                }
+                if !candidates.contains(candidate) {
+                    candidates.append(candidate)
+                }
+            }
+        }
+        return candidates
+    }
+
+    private func targetLines(
+        file: String,
+        side: DiffSide,
+        startLine: Int,
+        endLine: Int
+    ) -> [(offset: Int, line: ReviewPatchLine)]? {
+        guard let fileLines = files[file], endLine >= startLine else { return nil }
+        var matched: [(offset: Int, line: ReviewPatchLine)] = []
+        for number in startLine...endLine {
+            guard let pair = fileLines.enumerated().first(where: {
+                side == .right ? $0.element.newLine == number : $0.element.oldLine == number
+            }) else {
+                return nil
+            }
+            matched.append((pair.offset, pair.element))
+        }
+        guard Set(matched.map(\.line.hunk)).count == 1 else { return nil }
+        return matched
+    }
+
+    private static func hunkStart(_ token: Substring, marker: Character) -> Int? {
+        guard token.first == marker else { return nil }
+        let number = token.dropFirst().split(separator: ",", maxSplits: 1).first
+        return number.flatMap { Int($0) }
+    }
+}
+
+private func reviewFindingFingerprint(
+    skillID: String,
+    category: String,
+    file: String,
+    side: DiffSide,
+    targetCode: String
+) -> String {
+    reviewSHA256(
+        "finding:v1\0\(skillID)\0\(category)\0\(file)\0\(side.rawValue)\0\(normalizeReviewCode(targetCode))"
+    )
+}
+
+func normalizeReviewCode(_ value: String) -> String {
+    value.replacingOccurrences(of: "\r\n", with: "\n")
+        .components(separatedBy: "\n")
+        .map {
+            $0.replacingOccurrences(
+                of: #"[ \t]+"#,
+                with: " ",
+                options: .regularExpression
+            ).trimmingCharacters(in: .whitespaces)
+        }
+        .joined(separator: "\n")
+}
+
+func reviewSHA256(_ value: String) -> String {
+    SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+}
+
 private extension SkillStructuredValue {
     func objectString(for key: String) -> String? {
         guard case .object(let object) = self,
@@ -899,6 +2031,25 @@ private extension SkillStructuredValue {
             return nil
         }
         return value
+    }
+
+    func objectNumber(for key: String) -> Double? {
+        guard case .object(let object) = self,
+              case .number(let value) = object[key] else {
+            return nil
+        }
+        return value
+    }
+
+    func objectStrings(for key: String) -> [String] {
+        guard case .object(let object) = self,
+              case .array(let values) = object[key] else {
+            return []
+        }
+        return values.compactMap {
+            guard case .string(let value) = $0 else { return nil }
+            return value
+        }
     }
 }
 
@@ -940,6 +2091,51 @@ enum AgentCLIAdapterError: LocalizedError {
         case .invalidResult:
             return "The Agent result is not valid contract JSON."
         }
+    }
+}
+
+actor AgentOutputStreamDecoder {
+    private var pending = Data()
+    private var discardingOversizedEvent = false
+    private let maximumPendingBytes: Int
+
+    init(maximumPendingBytes: Int) {
+        self.maximumPendingBytes = maximumPendingBytes
+    }
+
+    func append(_ chunk: Data) -> [String] {
+        guard !chunk.isEmpty else { return [] }
+        var remaining = chunk
+        if discardingOversizedEvent {
+            guard let newline = remaining.firstIndex(of: 0x0A) else { return [] }
+            remaining.removeSubrange(remaining.startIndex...newline)
+            discardingOversizedEvent = false
+        }
+        pending.append(remaining)
+        var lines: [String] = []
+        while let newline = pending.firstIndex(of: 0x0A) {
+            let byteCount = pending.distance(from: pending.startIndex, to: newline)
+            if byteCount <= maximumPendingBytes {
+                let event = Data(pending[..<newline])
+                lines.append(contentsOf: AgentCLIAdapter.outputPreviewLines(from: event))
+            }
+            pending.removeSubrange(pending.startIndex...newline)
+        }
+        if pending.count > maximumPendingBytes {
+            pending.removeAll(keepingCapacity: true)
+            discardingOversizedEvent = true
+        }
+        return lines
+    }
+
+    func finish() -> [String] {
+        guard !discardingOversizedEvent, !pending.isEmpty else {
+            pending.removeAll(keepingCapacity: false)
+            return []
+        }
+        let event = pending
+        pending.removeAll(keepingCapacity: false)
+        return AgentCLIAdapter.outputPreviewLines(from: event)
     }
 }
 
@@ -1020,6 +2216,9 @@ enum AgentCLIAdapter {
             reasoningEffort: request.reasoningEffort
         )
         await progress(.executing)
+        let outputStream = AgentOutputStreamDecoder(
+            maximumPendingBytes: maximumOutputBytes
+        )
         let processResult = try await AgentSubprocess.run(
             agent: request.agent,
             executableURL: command.executableURL,
@@ -1030,10 +2229,19 @@ enum AgentCLIAdapter {
             timeoutSeconds: request.timeoutSeconds,
             maximumOutputBytes: maximumOutputBytes,
             maximumDiagnosticBytes: maximumDiagnosticBytes,
-            onStandardOutput: {
-                await progress(.receivingOutput)
+            onStandardOutput: { chunk in
+                let lines = await outputStream.append(chunk)
+                if lines.isEmpty {
+                    await progress(.receivingOutput)
+                } else {
+                    await progress.output(lines)
+                }
             }
         )
+        let trailingLines = await outputStream.finish()
+        if !trailingLines.isEmpty {
+            await progress.output(trailingLines)
+        }
         guard processResult.status == 0 else {
             throw AgentCLIAdapterError.processFailed(
                 request.agent,
@@ -1056,6 +2264,133 @@ enum AgentCLIAdapter {
             from: payloadData,
             displayName: request.displayName
         )
+    }
+
+    static func outputPreviewLines(from data: Data) -> [String] {
+        func textFragments(_ value: Any, depth: Int = 0) -> [String] {
+            guard depth < 6 else { return [] }
+            if let string = value as? String { return [string] }
+            if let values = value as? [Any] {
+                return values.flatMap { textFragments($0, depth: depth + 1) }
+            }
+            guard let object = value as? [String: Any] else { return [] }
+            if object["type"] as? String == "text", let text = object["text"] {
+                return textFragments(text, depth: depth + 1)
+            }
+            if let content = object["content"] {
+                return textFragments(content, depth: depth + 1)
+            }
+            if let text = object["text"] {
+                return textFragments(text, depth: depth + 1)
+            }
+            return []
+        }
+
+        func structuredFragments(_ value: Any, depth: Int = 0) -> [String] {
+            guard depth < 5 else { return [] }
+            if let string = value as? String {
+                let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let nestedData = trimmed.data(using: .utf8),
+                   let nested = try? JSONSerialization.jsonObject(
+                    with: nestedData,
+                    options: [.fragmentsAllowed]
+                   ) {
+                    return structuredFragments(nested, depth: depth + 1)
+                }
+                return trimmed.isEmpty ? [] : ["Output: \(trimmed)"]
+            }
+            guard let object = value as? [String: Any] else { return [] }
+            var result: [String] = []
+            for (key, label) in [
+                ("title", "Title"),
+                ("status", "Status"),
+                ("verdict", "Verdict"),
+                ("summary", "Summary"),
+                ("overview_markdown", "Overview"),
+                ("suggested_action", "Suggested action")
+            ] {
+                if let text = object[key] as? String, !text.isEmpty {
+                    result.append("\(label): \(text)")
+                }
+            }
+            if let findings = object["findings"] as? [[String: Any]] {
+                result.append("Findings: \(findings.count)")
+                for finding in findings.prefix(6) {
+                    let title = finding["title"] as? String
+                        ?? finding["summary"] as? String
+                        ?? finding["body"] as? String
+                    guard let title else { continue }
+                    let file = finding["file"] as? String
+                    let line = finding["line"] as? Int
+                        ?? finding["start_line"] as? Int
+                    let location = file.map { filePath in
+                        line.map { "\(filePath):\($0)" } ?? filePath
+                    }
+                    result.append(
+                        [location, title].compactMap { $0 }.joined(separator: " · ")
+                    )
+                }
+            }
+            if let evidence = object["evidence"] as? [String] {
+                result.append(contentsOf: evidence.prefix(4).map { "Evidence: \($0)" })
+            }
+            for key in ["output", "markdown"] {
+                if let text = object[key] as? String {
+                    result.append(contentsOf:
+                        text.split(separator: "\n").prefix(6).map { "Output: \($0)" }
+                    )
+                }
+            }
+            return result
+        }
+
+        func eventFragments(_ object: [String: Any]) -> [String] {
+            switch object["type"] as? String {
+            case "item.completed":
+                guard let item = object["item"] as? [String: Any],
+                      item["type"] as? String == "agent_message" else {
+                    return []
+                }
+                return textFragments(item["text"] as Any)
+            case "assistant":
+                return textFragments(object["message"] as Any)
+            case "content_block_delta":
+                return textFragments(object["delta"] as Any)
+            case "message":
+                return textFragments(object["content"] as Any)
+            case "result":
+                if let structured = object["structured_output"] {
+                    return structuredFragments(structured)
+                }
+                if let result = object["result"] {
+                    return structuredFragments(result)
+                }
+                return []
+            default:
+                return []
+            }
+        }
+
+        var lines: [String] = []
+        var seen = Set<String>()
+        for rawLine in String(decoding: data, as: UTF8.self)
+            .split(separator: "\n", omittingEmptySubsequences: true) {
+            guard let value = try? JSONSerialization.jsonObject(
+                with: Data(rawLine.utf8),
+                options: [.fragmentsAllowed]
+            ), let object = value as? [String: Any] else {
+                continue
+            }
+            for value in eventFragments(object) {
+                for line in value.split(separator: "\n", omittingEmptySubsequences: true) {
+                    let safe = SkillRuntime.browserSafeLogLine(String(line))
+                    guard !safe.isEmpty, seen.insert(safe).inserted else { continue }
+                    lines.append(safe)
+                    if lines.count == 12 { return lines }
+                }
+            }
+        }
+        return lines
     }
 
     static func resolveExecutable(
@@ -1539,6 +2874,21 @@ private extension Dictionary where Key == String, Value == SkillStructuredValue 
         guard case .string(let value) = self[key] else { return nil }
         return value
     }
+
+    func number(for key: String) -> Double? {
+        guard case .number(let value) = self[key], value.isFinite else { return nil }
+        return value
+    }
+
+    func integer(for key: String) -> Int? {
+        guard let value = number(for: key),
+              value.rounded(.towardZero) == value,
+              value >= Double(Int.min),
+              value <= Double(Int.max) else {
+            return nil
+        }
+        return Int(value)
+    }
 }
 
 private struct AgentSubprocessResult {
@@ -1621,7 +2971,7 @@ private enum AgentSubprocess {
         timeoutSeconds: Int,
         maximumOutputBytes: Int,
         maximumDiagnosticBytes: Int,
-        onStandardOutput: @escaping @Sendable () async -> Void
+        onStandardOutput: @escaping @Sendable (Data) async -> Void
     ) async throws -> AgentSubprocessResult {
         let control = AgentProcessControl()
         let timeoutTask = Task.detached(priority: .utility) {
@@ -1667,7 +3017,7 @@ private enum AgentSubprocess {
         standardInput: Data?,
         maximumOutputBytes: Int,
         maximumDiagnosticBytes: Int,
-        onStandardOutput: @escaping @Sendable () async -> Void,
+        onStandardOutput: @escaping @Sendable (Data) async -> Void,
         control: AgentProcessControl
     ) async throws -> AgentSubprocessResult {
         let pipes = try makePipes(count: 3)
@@ -1766,7 +3116,7 @@ private enum AgentSubprocess {
             try await drain(
                 stdoutHandle,
                 maximumBytes: maximumOutputBytes,
-                onFirstChunk: onStandardOutput
+                onChunk: onStandardOutput
             )
         }
         let stderrTask = Task.detached(priority: .utility) {
@@ -1877,12 +3227,11 @@ private enum AgentSubprocess {
     private static func drain(
         _ handle: FileHandle,
         maximumBytes: Int,
-        onFirstChunk: (@Sendable () async -> Void)? = nil
+        onChunk: (@Sendable (Data) async -> Void)? = nil
     ) async throws -> BoundedOutput {
         defer { try? handle.close() }
         var data = Data()
         var overflow = false
-        var reportedFirstChunk = false
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
         while true {
             let count = buffer.withUnsafeMutableBytes {
@@ -1897,13 +3246,11 @@ private enum AgentSubprocess {
                 }
                 throw AgentCLIAdapterError.launchFailed(errno)
             }
-            if !reportedFirstChunk {
-                reportedFirstChunk = true
-                await onFirstChunk?()
-            }
+            let chunk = Data(buffer.prefix(count))
+            await onChunk?(chunk)
             let remaining = maximumBytes - data.count
             if remaining > 0 {
-                data.append(contentsOf: buffer.prefix(min(count, remaining)))
+                data.append(contentsOf: chunk.prefix(min(count, remaining)))
             }
             if count > remaining {
                 overflow = true
@@ -2000,7 +3347,7 @@ enum AgentCapabilityProbe {
             timeoutSeconds: timeoutSeconds,
             maximumOutputBytes: maximumOutputBytes,
             maximumDiagnosticBytes: AgentCLIAdapter.maximumDiagnosticBytes,
-            onStandardOutput: {}
+            onStandardOutput: { _ in }
         )
         guard result.status == 0, !result.stdoutOverflow else {
             throw AgentCapabilityCatalogError.probeFailed(agent, result.status)

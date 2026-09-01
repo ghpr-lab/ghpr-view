@@ -284,8 +284,32 @@ test("run detail groups the lifecycle into expandable steps", async () => {
       { timestamp: "2026-08-24T00:00:00Z", kind: "queued", message: "Queued" },
       { timestamp: "2026-08-24T00:00:01Z", kind: "running", message: "Preparing strict context" },
       { timestamp: "2026-08-24T00:00:02Z", kind: "running", message: "Starting Skill runtime" },
+      {
+        timestamp: "2026-08-24T00:00:02Z",
+        kind: "running",
+        message: "Skill: Explain CI Failure (ci.failure.explain)",
+        stream: "skill_input"
+      },
+      {
+        timestamp: "2026-08-24T00:00:02Z",
+        kind: "running",
+        message: "Target: workflow_job · owner/repo#42",
+        stream: "skill_input"
+      },
       { timestamp: "2026-08-24T00:00:03Z", kind: "running", message: "Executing Skill" },
-      { timestamp: "2026-08-24T00:00:09Z", kind: "running", message: "Receiving Agent output" }
+      { timestamp: "2026-08-24T00:00:09Z", kind: "running", message: "Receiving Agent output" },
+      {
+        timestamp: "2026-08-24T00:00:10Z",
+        kind: "running",
+        message: "Inspecting failing test output",
+        stream: "agent_output"
+      },
+      {
+        timestamp: "2026-08-24T00:00:11Z",
+        kind: "running",
+        message: "Finding: database readiness timeout",
+        stream: "agent_output"
+      }
     ]
   };
   const app = createLocalApp({ window, document: window.document, fetch: async (path) => {
@@ -299,18 +323,37 @@ test("run detail groups the lifecycle into expandable steps", async () => {
     "queue",
     "context",
     "runtime",
-    "execute"
+    "execute",
+    "receive"
   ]);
   assert.deepEqual(
     steps.map((step) => step.querySelector(".run-step-name").textContent),
-    ["Queue run", "Prepare strict context", "Start Skill runtime", "Execute Skill"]
+    [
+      "Queue run",
+      "Prepare strict context",
+      "Start Skill runtime",
+      "Executing Skill",
+      "Receiving Agent output"
+    ]
   );
-  assert.deepEqual(steps.map((step) => step.open), [false, false, false, true]);
-  assert.equal(steps[3].className, "run-step running");
-  assert.match(steps[3].querySelector(".run-step-meta").textContent, /^2 events · \d+s$/);
+  assert.deepEqual(steps.map((step) => step.open), [false, false, false, false, true]);
+  assert.equal(steps[4].className, "run-step running");
+  assert.match(steps[3].querySelector(".run-step-meta").textContent, /^3 events · \d+s$/);
   assert.deepEqual(
     [...steps[3].querySelectorAll(".run-log-line code")].map((line) => line.textContent),
-    ["Executing Skill", "Receiving Agent output"]
+    [
+      "Skill: Explain CI Failure (ci.failure.explain)",
+      "Target: workflow_job · owner/repo#42",
+      "Executing Skill"
+    ]
+  );
+  assert.deepEqual(
+    [...steps[4].querySelectorAll(".run-log-line code")].map((line) => line.textContent),
+    [
+      "Receiving Agent output",
+      "Inspecting failing test output",
+      "Finding: database readiness timeout"
+    ]
   );
   assert.equal(steps[0].querySelector(".run-step-meta").textContent, "1 event · 1s");
 
@@ -322,6 +365,7 @@ test("run detail groups the lifecycle into expandable steps", async () => {
   );
 
   steps[3].querySelector("summary").click();
+  steps[4].querySelector("summary").click();
   run.log_entries.push({
     timestamp: "2026-08-24T00:00:12Z",
     kind: "success",
@@ -337,11 +381,16 @@ test("run detail groups the lifecycle into expandable steps", async () => {
     "context",
     "runtime",
     "execute",
+    "receive",
     "complete"
   ]);
-  assert.deepEqual(refreshed.map((step) => step.open), [true, false, false, false, false]);
+  assert.deepEqual(
+    refreshed.map((step) => step.open),
+    [true, false, false, true, false, false]
+  );
   assert.equal(refreshed[3].className, "run-step success");
-  assert.equal(refreshed[4].querySelector(".run-step-meta").textContent, "1 event · 0s");
+  assert.equal(refreshed[4].className, "run-step success");
+  assert.equal(refreshed[5].querySelector(".run-step-meta").textContent, "1 event · 0s");
   app.stop();
   window.close();
 });

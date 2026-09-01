@@ -16,8 +16,13 @@
     { id: "runtime", name: "Start Skill runtime", messages: ["Starting Skill runtime"] },
     {
       id: "execute",
-      name: "Execute Skill",
-      messages: ["Executing Skill", "Receiving Agent output"]
+      name: "Executing Skill",
+      messages: ["Executing Skill"]
+    },
+    {
+      id: "receive",
+      name: "Receiving Agent output",
+      messages: ["Receiving Agent output"]
     },
     { id: "finalize", name: "Finalize result", messages: ["Finalizing result"] },
     {
@@ -736,7 +741,14 @@
       const terminalKinds = ["success", "warning", "error"];
       let cursor = 0;
       for (const entry of this.runLogEntries(run)) {
-        let index = groups.findIndex((group) => group.messages.includes(entry.message));
+        const streamStepID = entry.stream === "skill_input"
+          ? "execute"
+          : entry.stream === "agent_output"
+            ? "receive"
+            : null;
+        let index = streamStepID
+          ? groups.findIndex((group) => group.id === streamStepID)
+          : groups.findIndex((group) => group.messages.includes(entry.message));
         if (index === -1 && terminalKinds.includes(entry.kind)) index = groups.length - 1;
         if (index === -1) {
           index = cursor;

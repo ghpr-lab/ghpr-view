@@ -1,0 +1,12 @@
+{
+  "api_version": "ghpr.dev/browser/v2",
+  "target_kinds": ["github.pull_request_revision"],
+  "placements": [
+    {
+      "id": "global-binding-escape",
+      "surface": "github.pr.conversation.review-summary",
+      "bind_to": "window.location.href",
+      "view": { "type": "review_summary" }
+    }
+  ]
+}

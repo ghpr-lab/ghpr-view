@@ -279,6 +279,76 @@ final class BrowserBridgeTests: XCTestCase {
         )
     }
 
+    func testAgentOutputPreviewExtractsTextAndRedactsSecrets() {
+        let data = Data(
+            """
+            {"type":"item.completed","item":{"type":"agent_message","text":"Inspecting cache writes"}}
+            {"type":"result","result":"Finding at /Users/example/private token=secret"}
+            """.utf8
+        )
+
+        XCTAssertEqual(
+            AgentCLIAdapter.outputPreviewLines(from: data),
+            [
+                "Inspecting cache writes",
+                "Output: Finding at [local path] token=[redacted]"
+            ]
+        )
+    }
+
+    func testAgentOutputStreamDecoderBuffersSplitUTF8AndOMPStructuredOutput() async throws {
+        let decoder = AgentOutputStreamDecoder(maximumPendingBytes: 4_096)
+        let event = Data(
+            """
+            {"type":"item.completed","item":{"type":"agent_message","text":"Inspecting 缓存 writes"}}
+
+            """.utf8
+        )
+        let marker = try XCTUnwrap(event.range(of: Data("缓存".utf8)))
+        let splitIndex = marker.lowerBound + 1
+
+        let firstChunk = await decoder.append(Data(event[..<splitIndex]))
+        XCTAssertTrue(firstChunk.isEmpty)
+        let secondChunk = await decoder.append(Data(event[splitIndex...]))
+        XCTAssertEqual(secondChunk, ["Inspecting 缓存 writes"])
+
+        let ompResult = Data(
+            """
+            {"type":"result","structured_output":{"status":"needs_investigation","summary":"Agent examined strict context.","findings":[{"file":"src/cache.ts","line":42,"title":"Lost update"}]}}
+            """.utf8
+        )
+        let bufferedResult = await decoder.append(ompResult)
+        XCTAssertTrue(bufferedResult.isEmpty)
+        let completedResult = await decoder.finish()
+        XCTAssertEqual(
+            completedResult,
+            [
+                "Status: needs_investigation",
+                "Summary: Agent examined strict context.",
+                "Findings: 1",
+                "src/cache.ts:42 · Lost update"
+            ]
+        )
+    }
+
+    func testBrowserSafeLogLineRedactsBearerGitHubAndAWSCredentials() {
+        let source = """
+        Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.signature \
+        ghp_abcdefghijklmnopqrstuvwxyz123456 \
+        github_pat_abcdefghijklmnopqrstuvwxyz123456 \
+        AKIA1234567890ABCDEF
+        """
+        let safe = SkillRuntime.browserSafeLogLine(source)
+
+        XCTAssertTrue(safe.contains("Authorization: [redacted]"))
+        XCTAssertTrue(safe.contains("[redacted github token]"))
+        XCTAssertTrue(safe.contains("[redacted aws key]"))
+        XCTAssertFalse(safe.contains("signature"))
+        XCTAssertFalse(safe.contains("ghp_"))
+        XCTAssertFalse(safe.contains("github_pat_"))
+        XCTAssertFalse(safe.contains("AKIA"))
+    }
+
     func testRealLoopbackDiscoveryEndpoint() async throws {
         let root = temporaryDirectory()
         let browserRoot = root.appendingPathComponent("browser", isDirectory: true)
@@ -451,6 +521,63 @@ final class BrowserBridgeTests: XCTestCase {
             approved.client?.scopes.contains(.skillRun) ?? true,
             "Native approval must be able to withhold an elevated scope"
         )
+        let subject = GitHubSubject.pullRequestRevision(
+            try PullRequestRevisionSubject(
+                repository: "owner/repo",
+                prNumber: 42,
+                baseSHA: String(repeating: "a", count: 40),
+                headSHA: String(repeating: "b", count: 40)
+            )
+        )
+        let finding = SkillFinding(
+            id: "finding-envelope",
+            subjectKey: subject.subjectKey,
+            subject: subject,
+            kind: .reviewFinding,
+            severity: .warning,
+            title: "Test finding",
+            summary: "Envelope test",
+            details: nil,
+            confidence: 0.9,
+            lifecycle: .exact,
+            createdAt: Date(),
+            fingerprint: "fingerprint-envelope"
+        )
+        store.save(finding: finding)
+        let encodedSubjectKey = try XCTUnwrap(
+            finding.subjectKey.addingPercentEncoding(withAllowedCharacters: .alphanumerics)
+        )
+        let findingsResponse = await router.response(
+            for: BrowserHTTPRequest(
+                method: "GET",
+                target: "/api/v1/findings?subject_key=\(encodedSubjectKey)",
+                headers: ["Authorization": "Bearer \(try XCTUnwrap(approved.token))"]
+            ),
+            baseURL: baseURL
+        )
+        XCTAssertEqual(findingsResponse.status, 200)
+        struct FindingsEnvelope: Codable, Equatable {
+            let findings: [SkillFinding]
+        }
+        let envelope = try decodeValue(FindingsEnvelope.self, from: findingsResponse.body)
+        XCTAssertEqual(envelope.findings.count, 1)
+        XCTAssertEqual(envelope.findings.first?.id, finding.id)
+        XCTAssertEqual(envelope.findings.first?.subjectKey, finding.subjectKey)
+        let legacySubject = GitHubSubject.legacyPage(
+            .pullRequest(repository: "owner/repo", number: 42)
+        )
+        let encodedLegacySubjectKey = try XCTUnwrap(
+            legacySubject.subjectKey.addingPercentEncoding(withAllowedCharacters: .alphanumerics)
+        )
+        let legacyFindingsResponse = await router.response(
+            for: BrowserHTTPRequest(
+                method: "GET",
+                target: "/api/v1/findings?subject_key=\(encodedLegacySubjectKey)",
+                headers: ["Authorization": "Bearer \(try XCTUnwrap(approved.token))"]
+            ),
+            baseURL: baseURL
+        )
+        XCTAssertEqual(legacyFindingsResponse.status, 400)
 
         let readOnlyToken = try XCTUnwrap(approved.token)
         let deniedResponse = await router.response(
@@ -497,6 +624,136 @@ final class BrowserBridgeTests: XCTestCase {
             revokedResponse.status,
             401,
             "Revoking a paired client must immediately invalidate its capability"
+        )
+    }
+
+    func testCustomPullRequestSkillRunsThroughRouterWithExactRevisionSubject() async throws {
+        let root = temporaryDirectory()
+        let installedRoot = root.appendingPathComponent("installed", isDirectory: true)
+        let draft = try SkillPackageManager.scaffold(
+            at: root.appendingPathComponent("source", isDirectory: true),
+            id: "team.release-risk",
+            displayName: "Release Risk"
+        )
+        _ = try SkillPackageManager.install(packageURL: draft, skillsRootURL: installedRoot)
+
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let recorder = RequestRecorder()
+        let runtime = SkillRuntime(
+            store: store,
+            installedSkillsRootURL: installedRoot,
+            bundledSkillsRootURL: nil,
+            agentRunner: { request, _ in
+                await recorder.record(request)
+                return SkillResult(
+                    kind: .generic,
+                    title: "Release Risk",
+                    summary: "No release risk found.",
+                    analysis: nil,
+                    codeReview: nil,
+                    markdown: nil,
+                    artifacts: [],
+                    payload: .object(["status": .string("completed")])
+                )
+            }
+        )
+        let customSkill = try XCTUnwrap(runtime.skills.first { $0.id == "team.release-risk" })
+        XCTAssertTrue(customSkill.targets.contains(.pullRequest))
+        XCTAssertFalse(customSkill.targets.contains(.pullRequestRevision))
+
+        let router = BrowserBridgeRouter(
+            store: store,
+            runtime: runtime,
+            snapshotProvider: Self.emptySnapshot,
+            assetProvider: BrowserAssetProvider(roots: []),
+            appVersion: "1.0",
+            draftsRootURL: root.appendingPathComponent("drafts")
+        )
+        let token = try approveClient(
+            store: store,
+            id: "dev.ghpr.custom-skill-test",
+            scopes: [.skillRun]
+        )
+        let page = GitHubPageContext.pullRequest(repository: "owner/repo", number: 42)
+        let revision = try PullRequestRevisionSubject(
+            repository: "owner/repo",
+            prNumber: 42,
+            baseSHA: String(repeating: "a", count: 40),
+            headSHA: String(repeating: "b", count: 40)
+        )
+        let baseURL = URL(string: "http://127.0.0.1:48120")!
+        let response = await router.response(
+            for: BrowserHTTPRequest(
+                method: "POST",
+                target: "/api/v1/actions",
+                headers: [
+                    "Authorization": "Bearer \(token)",
+                    "Content-Type": "application/json"
+                ],
+                body: try BrowserJSON.encode(
+                    ActionEnvelope(
+                        page: page,
+                        action: BrowserAction(
+                            kind: .runSkill,
+                            skillID: customSkill.id,
+                            runID: nil,
+                            analysisID: nil,
+                            tag: nil,
+                            event: nil,
+                            subject: .pullRequestRevision(revision)
+                        ),
+                        confirmed: false
+                    )
+                )
+            ),
+            baseURL: baseURL
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let run = try XCTUnwrap(store.allRuns.first { $0.skillID == customSkill.id })
+        XCTAssertEqual(run.subject, .pullRequestRevision(revision))
+        XCTAssertEqual(run.subjectKey, GitHubSubject.pullRequestRevision(revision).subjectKey)
+        _ = try await terminalRun(store: store, id: run.id)
+        let recordedRequest = await recorder.request
+        let request = try XCTUnwrap(recordedRequest)
+        XCTAssertEqual(request.context.target.type, "pull_request_revision")
+        XCTAssertEqual(request.context.target.baseSHA, revision.baseSHA)
+        XCTAssertEqual(request.context.target.headSHA, revision.headSHA)
+        XCTAssertEqual(
+            request.context.target.subjectKey,
+            GitHubSubject.pullRequestRevision(revision).subjectKey
+        )
+
+        let mismatchedResponse = await router.response(
+            for: BrowserHTTPRequest(
+                method: "POST",
+                target: "/api/v1/actions",
+                headers: [
+                    "Authorization": "Bearer \(token)",
+                    "Content-Type": "application/json"
+                ],
+                body: try BrowserJSON.encode(
+                    ActionEnvelope(
+                        page: page,
+                        action: BrowserAction(
+                            kind: .runSkill,
+                            skillID: SkillRuntime.classifyFlakySkillID,
+                            runID: nil,
+                            analysisID: nil,
+                            tag: nil,
+                            event: nil,
+                            subject: .pullRequestRevision(revision)
+                        ),
+                        confirmed: false
+                    )
+                )
+            ),
+            baseURL: baseURL
+        )
+        XCTAssertEqual(
+            mismatchedResponse.status,
+            400,
+            "Exact revision compatibility must not allow workflow-only Skills."
         )
     }
 
@@ -1221,6 +1478,18 @@ final class BrowserBridgeTests: XCTestCase {
                         message: "credential=secret"
                     ),
                     SkillRunLogEntry(
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_002),
+                        kind: .running,
+                        message: "Target owner/repo#42 token=secret",
+                        stream: .skillInput
+                    ),
+                    SkillRunLogEntry(
+                        timestamp: Date(timeIntervalSince1970: 1_700_000_002),
+                        kind: .running,
+                        message: "Finding at /Users/example/private credential=secret",
+                        stream: .agentOutput
+                    ),
+                    SkillRunLogEntry(
                         timestamp: Date(timeIntervalSince1970: 1_700_000_003),
                         kind: .success,
                         message: "Completed"
@@ -1270,8 +1539,17 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertNil(snapshot.runs.first?.error)
         XCTAssertEqual(
             snapshot.runs.first?.logEntries?.map(\.message),
-            ["Executing Skill", "Completed"],
-            "Historical arbitrary progress and error text must not cross the Browser Bridge"
+            [
+                "Executing Skill",
+                "Target owner/repo#42 token=[redacted]",
+                "Finding at [local path] credential=[redacted]",
+                "Completed"
+            ],
+            "Only fixed lifecycle events and bounded, sanitized input/output lines may cross the Browser Bridge"
+        )
+        XCTAssertEqual(
+            snapshot.runs.first?.logEntries?.compactMap(\.stream),
+            [.skillInput, .agentOutput]
         )
 
         let pageKey = page.key.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!
@@ -1316,7 +1594,12 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertNil(detailedRun.error)
         XCTAssertEqual(
             detailedRun.logEntries?.map(\.message),
-            ["Executing Skill", "Completed"]
+            [
+                "Executing Skill",
+                "Target owner/repo#42 token=[redacted]",
+                "Finding at [local path] credential=[redacted]",
+                "Completed"
+            ]
         )
     }
 
@@ -1468,12 +1751,16 @@ final class BrowserBridgeTests: XCTestCase {
         )
         XCTAssertEqual(queued.status, .queued)
         XCTAssertNil(queued.result)
+        XCTAssertEqual(queued.agent, .omp, "Queued runs must expose the concrete Agent backend.")
 
         let completed = try await terminalRun(store: store, id: queued.id)
         XCTAssertEqual(completed.status, .completed)
+        XCTAssertEqual(completed.agent, .omp, "Completed runs must retain the concrete Agent backend.")
         XCTAssertEqual(completed.result?.summary, "Agent examined strict context.")
         XCTAssertEqual(
-            completed.logEntries?.map(\.message),
+            completed.logEntries?
+                .filter { $0.stream == nil }
+                .map(\.message),
             [
                 "Queued",
                 "Preparing strict context",
@@ -1483,6 +1770,12 @@ final class BrowserBridgeTests: XCTestCase {
                 "Finalizing result",
                 "Completed"
             ]
+        )
+        XCTAssertFalse(
+            completed.logEntries?.filter { $0.stream == .skillInput }.isEmpty ?? true
+        )
+        XCTAssertFalse(
+            completed.logEntries?.filter { $0.stream == .agentOutput }.isEmpty ?? true
         )
         guard case .object(let payload)? = completed.result?.payload,
               case .string(let status)? = payload["status"] else {
@@ -1632,7 +1925,10 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(executing.status, .running)
         XCTAssertEqual(executing.progressMessage, "Executing Skill")
         XCTAssertEqual(executing.progressCurrent, 2)
-        XCTAssertEqual(executing.logEntries?.last?.message, "Executing Skill")
+        XCTAssertEqual(
+            executing.logEntries?.last { $0.stream == nil }?.message,
+            "Executing Skill"
+        )
         XCTAssertNil(executing.result)
 
         try Data().write(to: allowOutputURL)
@@ -1648,8 +1944,14 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(receivingOutput.progressMessage, "Receiving Agent output")
         XCTAssertEqual(receivingOutput.progressCurrent, 2)
         XCTAssertEqual(
-            receivingOutput.logEntries?.last?.message,
+            receivingOutput.logEntries?.last { $0.stream == nil }?.message,
             "Receiving Agent output"
+        )
+        XCTAssertTrue(
+            receivingOutput.logEntries?
+                .filter { $0.stream == .agentOutput }
+                .isEmpty ?? false,
+            "An incomplete JSON event must remain buffered until its terminating newline arrives."
         )
 
         try await Task.sleep(nanoseconds: 100_000_000)
@@ -1663,7 +1965,9 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(completed.status, .completed)
         XCTAssertEqual(completed.result?.summary, "Live execution completed.")
         XCTAssertEqual(
-            completed.logEntries?.map(\.message),
+            completed.logEntries?
+                .filter { $0.stream == nil }
+                .map(\.message),
             [
                 "Queued",
                 "Preparing strict context",
@@ -1674,9 +1978,15 @@ final class BrowserBridgeTests: XCTestCase {
                 "Completed"
             ]
         )
+        XCTAssertTrue(
+            completed.logEntries?.contains {
+                $0.stream == .agentOutput &&
+                    $0.message == "Output: Live execution completed."
+            } ?? false
+        )
     }
 
-    func testSkillRuntimeRejectsMalformedAgentResultWithoutLeakingOutput() async throws {
+    func testSkillRuntimeRejectsMalformedAgentOutputWithoutPublishingRawText() async throws {
         let root = temporaryDirectory()
         let installedRoot = root.appendingPathComponent("installed", isDirectory: true)
         let packageURL = try SkillPackageManager.scaffold(
@@ -1713,8 +2023,15 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertNil(failed.result)
         XCTAssertEqual(failed.error, "The Agent result is not valid contract JSON.")
         XCTAssertFalse(
-            failed.logEntries?.contains { $0.message.contains("private malformed output") } ?? true,
-            "Raw Agent output must not enter Browser-visible lifecycle logs."
+            failed.logEntries?.contains {
+                $0.stream == .agentOutput &&
+                    $0.message.contains("private malformed output")
+            } ?? true,
+            "Non-protocol stdout must never enter Browser-visible execution logs."
+        )
+        XCTAssertFalse(
+            failed.error?.contains("private malformed output") ?? true,
+            "Agent stdout must not leak into the run error channel."
         )
     }
 
@@ -2343,6 +2660,7 @@ final class BrowserBridgeTests: XCTestCase {
         private(set) var request: AgentExecutionRequest?
         private(set) var fetchRepository: String?
         private(set) var fetchPRNumber: Int?
+        private(set) var exactSubject: WorkflowJobSubject?
 
         func record(_ request: AgentExecutionRequest) {
             self.request = request
@@ -2351,6 +2669,10 @@ final class BrowserBridgeTests: XCTestCase {
         func recordFetch(repository: String, prNumber: Int) {
             fetchRepository = repository
             fetchPRNumber = prNumber
+        }
+
+        func recordExactSubject(_ subject: WorkflowJobSubject) {
+            exactSubject = subject
         }
     }
 
@@ -2415,7 +2737,10 @@ final class BrowserBridgeTests: XCTestCase {
                 )
             },
             ciLogFetch: { repository, prNumber in
-                await recorder.recordFetch(repository: repository, prNumber: prNumber)
+                await recorder.recordFetch(
+                    repository: repository,
+                    prNumber: prNumber
+                )
                 return FailedJobLogs(
                     repository: repository,
                     prNumber: prNumber,
@@ -2462,6 +2787,210 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(fetchPRNumber, 42)
     }
 
+
+    func testExactWorkflowJobRunFetchesByCanonicalSubjectAndRejectsDuplicate() async throws {
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let recorder = RequestRecorder()
+        let subject = try WorkflowJobSubject(
+            repository: "owner/repo",
+            workflowRunID: 1001,
+            workflowAttempt: 2,
+            workflowJobID: 2001,
+            headSHA: String(repeating: "a", count: 40)
+        )
+        let runtime = SkillRuntime(
+            store: store,
+            installedSkillsRootURL: temporaryDirectory(),
+            bundledSkillsRootURL: nil,
+            agentRunner: { request, _ in
+                await recorder.record(request)
+                return SkillResult(
+                    kind: .generic,
+                    title: "Explain CI Failure",
+                    summary: "The exact job failed.",
+                    analysis: nil,
+                    codeReview: nil,
+                    markdown: nil,
+                    artifacts: [],
+                    payload: .object([
+                        "status": .string("needs_investigation"),
+                        "summary": .string("The exact job failed."),
+                        "evidence": .array([.string("exit code 1")]),
+                        "suggested_action": .string("Inspect the failing step.")
+                    ])
+                )
+            },
+            exactCILogFetch: { repository, prNumber, exactSubject in
+                XCTAssertEqual(repository, "owner/repo")
+                XCTAssertEqual(prNumber, 42)
+                await recorder.recordExactSubject(exactSubject)
+                return FailedJobLogs(
+                    repository: repository,
+                    prNumber: prNumber,
+                    workflowName: nil,
+                    runID: exactSubject.workflowRunID,
+                    jobID: exactSubject.workflowJobID,
+                    capturedBytes: 11,
+                    truncated: false,
+                    capturedOverflow: false,
+                    fetchedAt: Date(),
+                    content: "exit code 1"
+                )
+            }
+        )
+        let page = GitHubPageContext.pullRequest(repository: "owner/repo", number: 42)
+        let queued = try runtime.start(
+            skillID: SkillRuntime.explainFailureSkillID,
+            page: page,
+            pullRequest: nil,
+            requestedByClientID: "dev.ghpr.test",
+            subject: .workflowJob(subject)
+        )
+        XCTAssertThrowsError(
+            try runtime.start(
+                skillID: SkillRuntime.explainFailureSkillID,
+                page: page,
+                pullRequest: nil,
+                requestedByClientID: "dev.ghpr.test",
+                subject: .workflowJob(subject)
+            )
+        ) { error in
+            guard case SkillRuntime.RuntimeError.duplicateActiveRun = error else {
+                return XCTFail("Expected duplicateActiveRun, got \(error)")
+            }
+        }
+
+        let completed = try await terminalRun(store: store, id: queued.id)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertEqual(completed.subject, .workflowJob(subject))
+        let recordedSubject = await recorder.exactSubject
+        XCTAssertEqual(recordedSubject, subject)
+        guard case .object(let payload) = completed.result?.payload,
+              case .string(let summary) = payload["summary"] else {
+            return XCTFail("Expected the exact CI result payload.")
+        }
+        XCTAssertEqual(summary, "The exact job failed.")
+    }
+
+    func testReviewPRPersistsExactDiffFindings() async throws {
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let recorder = RequestRecorder()
+        let revision = try PullRequestRevisionSubject(
+            repository: "owner/repo",
+            prNumber: 42,
+            baseSHA: String(repeating: "b", count: 40),
+            headSHA: String(repeating: "a", count: 40)
+        )
+        let runtime = SkillRuntime(
+            store: store,
+            installedSkillsRootURL: temporaryDirectory(),
+            bundledSkillsRootURL: nil,
+            agentRunner: { request, progress in
+                await recorder.record(request)
+                await progress(.executing)
+                await progress.output("Inspecting Sources/Worker.swift")
+                await progress(.receivingOutput)
+                await progress.output("Finding: lost update at Sources/Worker.swift:18")
+                return SkillResult(
+                    kind: .generic,
+                    title: "Review PR",
+                    summary: "One correctness issue.",
+                    analysis: nil,
+                    codeReview: nil,
+                    markdown: nil,
+                    artifacts: [],
+                    payload: .object([
+                        "overview_markdown": .string("One correctness issue."),
+                        "findings": .array([
+                            .object([
+                                "file": .string("Sources/Worker.swift"),
+                                "start_line": .number(18),
+                                "end_line": .number(18),
+                                "side": .string("right"),
+                                "title": .string("Lost update"),
+                                "summary": .string("The write drops concurrent changes."),
+                                "why": .string("Both tasks replace the same stale value."),
+                                "suggested_fix": .string("Perform the mutation atomically."),
+                                "quoted_code": .string("+state = next"),
+                                "severity": .string("error"),
+                                "confidence": .number(0.95),
+                                "category": .string("concurrency")
+                            ])
+                        ])
+                    ])
+                )
+            },
+            reviewWorkspace: { subject in
+                PRReviewWorkspace(
+                    subject: subject,
+                    checkoutURL: URL(fileURLWithPath: "/tmp/exact-review"),
+                    diff: """
+                    diff --git a/Sources/Worker.swift b/Sources/Worker.swift
+                    --- a/Sources/Worker.swift
+                    +++ b/Sources/Worker.swift
+                    @@ -18,1 +18,1 @@
+                    -state = current
+                    +state = next
+                    """,
+                    reviewedFiles: ["Sources/Worker.swift"],
+                    blobSHAs: ["Sources/Worker.swift": String(repeating: "c", count: 40)]
+                )
+            }
+        )
+        let queued = try runtime.start(
+            skillID: SkillRuntime.reviewPRSkillID,
+            page: .pullRequest(repository: "owner/repo", number: 42),
+            pullRequest: nil,
+            requestedByClientID: "dev.ghpr.test",
+            subject: .pullRequestRevision(revision)
+        )
+        let completed = try await terminalRun(store: store, id: queued.id)
+        XCTAssertEqual(completed.status, .completed)
+        XCTAssertEqual(completed.result?.kind, .codeReview)
+        XCTAssertEqual(completed.result?.codeReview?.headSHA, revision.headSHA)
+        XCTAssertEqual(completed.result?.codeReview?.findings.first?.file, "Sources/Worker.swift")
+        let inputLines = completed.logEntries?
+            .filter { $0.stream == .skillInput }
+            .map(\.message) ?? []
+        XCTAssertTrue(inputLines.contains("Skill: Review PR (pr.review)"))
+        XCTAssertTrue(
+            inputLines.contains {
+                $0 == "Target: pull_request_revision · owner/repo#42 @ aaaaaaa"
+            }
+        )
+        XCTAssertTrue(
+            inputLines.contains {
+                $0.hasPrefix("Diff: 1 file · ") && $0.hasSuffix(" bytes")
+            }
+        )
+        XCTAssertTrue(inputLines.contains("File: Sources/Worker.swift"))
+        let outputLines = completed.logEntries?
+            .filter { $0.stream == .agentOutput }
+            .map(\.message) ?? []
+        XCTAssertTrue(outputLines.contains("Inspecting Sources/Worker.swift"))
+        XCTAssertTrue(
+            outputLines.contains("Finding: lost update at Sources/Worker.swift:18")
+        )
+        XCTAssertTrue(outputLines.contains("Overview: One correctness issue."))
+        XCTAssertTrue(outputLines.contains("Findings: 1"))
+
+        let finding = try XCTUnwrap(store.allFindings.first)
+        XCTAssertEqual(finding.title, "Lost update")
+        XCTAssertEqual(finding.lifecycle, .exact)
+        guard case .diffLine(let anchor) = finding.subject else {
+            return XCTFail("Expected an exact diff-line subject.")
+        }
+        XCTAssertEqual(anchor.baseSHA, revision.baseSHA)
+        XCTAssertEqual(anchor.headSHA, revision.headSHA)
+        XCTAssertEqual(anchor.side, .right)
+        XCTAssertEqual(anchor.startLine, 18)
+        XCTAssertEqual(anchor.endLine, 18)
+
+        let recordedRequest = await recorder.request
+        let request = try XCTUnwrap(recordedRequest)
+        XCTAssertEqual(request.context.reviewRevision?.baseSHA, revision.baseSHA)
+        XCTAssertTrue(request.context.reviewRevision?.unifiedDiff.contains("state = next") == true)
+    }
 
     private func approveClient(
         store: ExtensionPlatformStore,
