@@ -194,6 +194,9 @@ enum JiraPrompt: Identifiable, Equatable {
 final class PRListViewModel: ObservableObject {
     @Published var prList: PRList = .empty
     @Published var searchText: String = ""
+    @Published private(set) var activeFacetSelections: [FacetFieldID: Set<String>] = [:]
+    @Published private(set) var savedViews: [SavedView]
+    @Published var isFacetPanelPresented = false
     @Published private(set) var authState: AuthState = .empty
     @Published private(set) var pinnedPRIdentifiers: Set<String> = []
     @Published private(set) var pinChangeToken = UUID()
@@ -214,6 +217,7 @@ final class PRListViewModel: ObservableObject {
     private let oauthManager: GitHubOAuthManager
     private let linkOpener: PRLinkOpening
     private let jiraURLOpener: (URL) -> Void
+    private let savedViewStore: SavedViewStore
     private var cancellables = Set<AnyCancellable>()
 
     var isJiraConfigured: Bool { jiraConnectionState == .configured }
@@ -222,13 +226,15 @@ final class PRListViewModel: ObservableObject {
         prManager: PRManager,
         oauthManager: GitHubOAuthManager,
         linkOpener: PRLinkOpening,
-        jiraURLOpener: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) }
+        jiraURLOpener: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
+        savedViewStore: SavedViewStore = SavedViewStore()
     ) {
         self.prManager = prManager
         self.oauthManager = oauthManager
         self.linkOpener = linkOpener
         self.jiraURLOpener = jiraURLOpener
-
+        self.savedViewStore = savedViewStore
+        self.savedViews = savedViewStore.views
         setupBindings()
     }
 
@@ -419,6 +425,136 @@ final class PRListViewModel: ObservableObject {
 
     var summaryCIRunning: Int {
         filteredPRs.filter { $0.ciIsRunning }.count
+    }
+
+    var sourcePRs: [PullRequest] {
+        var seen = Set<Int>()
+        return (prList.pullRequests + prList.mentionedPullRequests + prList.directMentionPullRequests + prList.mergedPullRequests)
+            .filter { seen.insert($0.id).inserted }
+    }
+
+    var facetChips: [FacetChip] {
+        let builder = FacetIndexBuilder(
+            sourcePRs: sourcePRs,
+            searchText: searchText,
+            selections: activeFacetSelections
+        )
+        var namesByField: [FacetFieldID: [String: String]] = [:]
+        for field in activeFacetSelections.keys {
+            namesByField[field] = Dictionary(
+                uniqueKeysWithValues: builder.options(for: field).map { ($0.key, $0.displayName) }
+            )
+        }
+        return activeFacetSelections.flatMap { field, keys in
+            keys.sorted().map { key in
+                FacetChip(
+                    field: field,
+                    key: key,
+                    displayName: namesByField[field]?[key] ?? key,
+                    provider: field.provider
+                )
+            }
+        }.sorted { $0.field.rawValue < $1.field.rawValue }
+    }
+    var searchLabelSuggestions: [FacetOption] {
+        let parsedSearch = PRSearchScope.parse(searchText)
+        guard parsedSearch.kind == .all else { return [] }
+        let query = FacetValues.normalized(parsedSearch.term)
+        guard !query.isEmpty else { return [] }
+
+        let builder = FacetIndexBuilder(
+            sourcePRs: sourcePRs,
+            searchText: "",
+            selections: activeFacetSelections
+        )
+        let suggestions = [FacetFieldID.githubLabel, .jiraLabel]
+            .flatMap { builder.options(for: $0) }
+            .filter { option in
+                !(activeFacetSelections[option.field] ?? []).contains(option.key) &&
+                    FacetValues.normalized(option.displayName).contains(query)
+            }
+            .sorted { lhs, rhs in
+                let lhsName = FacetValues.normalized(lhs.displayName)
+                let rhsName = FacetValues.normalized(rhs.displayName)
+                let lhsStartsWithQuery = lhsName.hasPrefix(query)
+                let rhsStartsWithQuery = rhsName.hasPrefix(query)
+                if lhsStartsWithQuery != rhsStartsWithQuery {
+                    return lhsStartsWithQuery
+                }
+                if lhs.count != rhs.count {
+                    return lhs.count > rhs.count
+                }
+                if lhs.provider != rhs.provider {
+                    return lhs.provider.rawValue < rhs.provider.rawValue
+                }
+                return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
+            }
+        return Array(suggestions.prefix(6))
+    }
+
+    func selectLabelSuggestion(_ option: FacetOption) {
+        guard option.field == .githubLabel || option.field == .jiraLabel else { return }
+        toggleFacet(field: option.field, key: option.key)
+        searchText = ""
+    }
+
+
+    func facetOptions(for field: FacetFieldID) -> [FacetOption] {
+        FacetIndexBuilder(sourcePRs: sourcePRs, searchText: searchText, selections: activeFacetSelections).options(for: field)
+    }
+
+    func toggleFacet(field: FacetFieldID, key: String) {
+        var updated = activeFacetSelections
+        var keys = updated[field] ?? []
+        if keys.contains(key) { keys.remove(key) } else { keys.insert(key) }
+        if keys.isEmpty { updated.removeValue(forKey: field) } else { updated[field] = keys }
+        activeFacetSelections = updated
+    }
+
+    func clearFacetField(_ field: FacetFieldID) {
+        var updated = activeFacetSelections
+        updated.removeValue(forKey: field)
+        activeFacetSelections = updated
+    }
+
+    func clearAllFacets() { activeFacetSelections = [:] }
+
+    @discardableResult
+    func saveCurrentView(name: String) -> SavedView? {
+        guard let view = savedViewStore.create(
+            name: name,
+            selections: activeFacetSelections.map {
+                ActiveFacetSelection(field: $0.key, selectedKeys: $0.value)
+            },
+            searchText: searchText
+        ) else {
+            return nil
+        }
+        savedViews = savedViewStore.views
+        return view
+    }
+
+    func applySavedView(_ view: SavedView) {
+        searchText = view.searchText
+        var restored: [FacetFieldID: Set<String>] = [:]
+        for selection in view.selections {
+            restored[selection.field, default: []].formUnion(selection.selectedKeys)
+        }
+        activeFacetSelections = restored
+    }
+
+    func renameSavedView(_ view: SavedView, name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var updated = view
+        updated.name = trimmed
+        savedViewStore.update(updated)
+        savedViews = savedViewStore.views
+    }
+
+    func deleteSavedView(_ view: SavedView) {
+        savedViewStore.delete(view)
+        savedViews = savedViewStore.views
     }
 
     var summaryWaitingForMyReview: Int {
@@ -649,103 +785,13 @@ final class PRListViewModel: ObservableObject {
     }
 
     private func filterPRs(_ prs: [PullRequest]) -> [PullRequest] {
-        let parsed = PRSearchScope.parse(searchText)
-        switch parsed.kind {
-        case .all:
-            guard !parsed.term.isEmpty else { return prs }
-            let term = parsed.term
-            return prs.filter { pr in
-                PRSearchScope.contains(term, in: pr.title) ||
-                PRSearchScope.contains(term, in: pr.repoFullName) ||
-                PRSearchScope.contains(term, in: pr.author) ||
-                matchesJiraFields(pr, term: term) ||
-                String(pr.number).contains(term)
-            }
-        case .jira:
-            return prs.filter { pr in
-                parsed.term.isEmpty ? hasAnyJiraField(pr) : matchesJiraFields(pr, term: parsed.term)
-            }
-        case .ci:
-            return prs.filter { pr in
-                matchesCIState(pr, term: parsed.term)
-            }
-        case .pr:
-            return prs.filter { pr in
-                matchesPRState(pr, term: parsed.term)
-            }
-        case .approval:
-            return prs.filter { pr in
-                matchesApprovalCount(pr, term: parsed.term)
-            }
-        }
-    }
-
-    private func hasAnyJiraField(_ pr: PullRequest) -> Bool {
-        pr.jiraTicket?.isEmpty == false ||
-            pr.jiraTitle?.isEmpty == false ||
-            pr.jiraStatusName?.isEmpty == false ||
-            pr.jiraStatusCategoryKey?.isEmpty == false ||
-            pr.jiraLabels?.isEmpty == false
-    }
-
-    private func matchesJiraFields(_ pr: PullRequest, term: String) -> Bool {
-        if let ticket = pr.jiraTicket, PRSearchScope.contains(term, in: ticket) { return true }
-        if let title = pr.jiraTitle, PRSearchScope.contains(term, in: title) { return true }
-        if let status = pr.jiraStatusName, PRSearchScope.contains(term, in: status) { return true }
-        if let category = pr.jiraStatusCategoryKey, PRSearchScope.contains(term, in: category) { return true }
-        if let labels = pr.jiraLabels, labels.contains(where: { PRSearchScope.contains(term, in: $0) }) { return true }
-        return false
-    }
-
-    private func matchesCIState(_ pr: PullRequest, term: String) -> Bool {
-        switch term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "", "any", "value":
-            return pr.ciStatus != nil || pr.checkTotalCount > 0 || pr.ciIsRunning
-        case "pass", "passed", "success", "green":
-            return pr.ciStatus == .success
-        case "failure", "fail", "failed", "failing", "red":
-            return pr.ciStatus == .failure || pr.ciStatus == .unknown || pr.checkFailureCount > 0
-        case "running", "pending", "inflight", "in-flight":
-            return pr.ciIsInFlight
-        default:
-            return false
-        }
-    }
-
-    private func matchesPRState(_ pr: PullRequest, term: String) -> Bool {
-        switch term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "conflict", "conflicts":
-            return pr.hasBaseConflicts
-        default:
-            return false
-        }
-    }
-
-    private func matchesApprovalCount(_ pr: PullRequest, term: String) -> Bool {
-        let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return pr.approvalCount > 0 }
-
-        let operators = [">=", "<=", "==", ">", "<", "="]
-        let matchedOperator = operators.first { trimmed.hasPrefix($0) }
-        let op = matchedOperator ?? "="
-        let numberText = String(trimmed.dropFirst(matchedOperator?.count ?? 0))
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard let expected = Int(numberText) else { return false }
-
-        switch op {
-        case ">=":
-            return pr.approvalCount >= expected
-        case ">":
-            return pr.approvalCount > expected
-        case "<=":
-            return pr.approvalCount <= expected
-        case "<":
-            return pr.approvalCount < expected
-        case "=", "==":
-            return pr.approvalCount == expected
-        default:
-            return false
+        let parsedSearch = PRSearchScope.parse(searchText)
+        return prs.filter {
+            FacetPredicate.matches(
+                $0,
+                parsedSearch: parsedSearch,
+                selections: activeFacetSelections
+            )
         }
     }
 

@@ -2,7 +2,7 @@ import Foundation
 import os
 
 private let jiraLogger = Logger(subsystem: "com.prdashboard", category: "JiraAPIClient")
-private let jiraMetadataCacheSchemaVersion = 2
+private let jiraMetadataCacheSchemaVersion = 3
 
 struct JiraIssueMetadata: Codable, Equatable {
     let key: String
@@ -10,6 +10,7 @@ struct JiraIssueMetadata: Codable, Equatable {
     var labels: [String]
     var statusName: String?
     var statusCategoryKey: String?
+    var projectKey: String? = nil
     var updatedAt: Date?
     var fetchedAt: Date
     var metadataSchemaVersion: Int? = jiraMetadataCacheSchemaVersion
@@ -370,7 +371,7 @@ final class JiraAPIClient {
         let jql = "key in (\(issueKeys.joined(separator: ",")))"
         let payload: [String: Any] = [
             "jql": jql,
-            "fields": ["summary", "labels", "status", "updated"],
+            "fields": ["summary", "labels", "status", "project", "updated"],
             "maxResults": issueKeys.count
         ]
 
@@ -420,6 +421,7 @@ final class JiraAPIClient {
                 labels: issue.fields.labels ?? [],
                 statusName: issue.fields.status?.name,
                 statusCategoryKey: issue.fields.status?.statusCategory?.key,
+                projectKey: issue.fields.project?.key,
                 updatedAt: Self.parseJiraDate(issue.fields.updated),
                 fetchedAt: now
             )
@@ -475,12 +477,16 @@ private struct JiraSearchResponse: Decodable {
         let key: String
         let fields: Fields
     }
-
     struct Fields: Decodable {
         let summary: String?
         let labels: [String]?
         let status: Status?
+        let project: Project?
         let updated: String?
+    }
+
+    struct Project: Decodable {
+        let key: String?
     }
 
     struct Status: Decodable {

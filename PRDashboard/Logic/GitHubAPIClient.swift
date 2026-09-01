@@ -29,6 +29,25 @@ struct RateLimitInfo: Equatable {
     }
 }
 
+struct GraphQLForwardPageInfo: Decodable {
+    let hasNextPage: Bool
+    let endCursor: String?
+}
+
+struct GitHubLabelNodeResponse: Decodable {
+    let name: String
+    let color: String?
+}
+
+struct GitHubLabelConnectionResponse: Decodable {
+    let nodes: [GitHubLabelNodeResponse]
+    let pageInfo: GraphQLForwardPageInfo?
+}
+
+struct GitHubMilestoneResponse: Decodable {
+    let title: String
+}
+
 /// Lightweight snapshot produced by the index query. Holds only the scalars
 /// we need to decide whether a cached detail can be reused.
 struct IndexedPR {
@@ -53,6 +72,9 @@ struct IndexedPR {
     let hasBaseConflicts: Bool?
     let category: PRCategory
     let isMerged: Bool
+    var githubLabels: [GitHubLabel]?
+    let githubLabelsEndCursor: String?
+    let githubMilestone: GitHubMilestone?
     let snapshot: IndexSnapshot
 
     var reference: PullRequestReference {
@@ -140,7 +162,10 @@ struct IndexedPR {
             jiraUpdatedAt: existing?.jiraUpdatedAt ?? visible?.jiraUpdatedAt,
             jiraMetadataFetchedAt: existing?.jiraMetadataFetchedAt ?? visible?.jiraMetadataFetchedAt,
             isOpenInCmux: visible?.isOpenInCmux ?? existing?.isOpenInCmux,
-            mentionCount: visible?.mentionCount
+            mentionCount: visible?.mentionCount,
+            githubLabels: githubLabels ?? existing?.githubLabels ?? visible?.githubLabels,
+            githubMilestone: githubMilestone ?? existing?.githubMilestone ?? visible?.githubMilestone,
+            jiraProjectKey: existing?.jiraProjectKey ?? visible?.jiraProjectKey
         )
     }
 
@@ -562,7 +587,7 @@ final class GitHubAPIClient: ObservableObject {
     func fetchPullRequests(username: String, searchQuery: String, category: PRCategory) async throws -> [PullRequest] {
         let query = buildGraphQLQuery(searchQuery: searchQuery)
         let responseData = try await executeGraphQL(query: query, operation: "fetchPullRequests")
-        var prs = try parseSearchResponse(data: responseData, category: category)
+        var prs = try await parseSearchResponse(data: responseData, category: category)
         await applyWorkflowRunCompletionGuards(to: &prs)
         return prs
     }
@@ -2074,6 +2099,9 @@ final class GitHubAPIClient: ObservableObject {
             isOpenInCmux: old.isOpenInCmux
         )
         updated.mentionCount = old.mentionCount
+        updated.githubLabels = old.githubLabels
+        updated.githubMilestone = old.githubMilestone
+        updated.jiraProjectKey = old.jiraProjectKey
         return updated
     }
     func validateToken() async throws -> Bool {
@@ -2890,6 +2918,11 @@ final class GitHubAPIClient: ObservableObject {
             mergedAt
             mergeable
             mergeStateStatus
+            labels(first: 100) {
+                nodes { name color }
+                pageInfo { hasNextPage endCursor }
+            }
+            milestone { title }
             author {
                 login
                 avatarUrl
@@ -3540,6 +3573,11 @@ final class GitHubAPIClient: ObservableObject {
         mergedAt
         mergeable
         mergeStateStatus
+        labels(first: 100) {
+            nodes { name color }
+            pageInfo { hasNextPage endCursor }
+        }
+        milestone { title }
         author {
             login
             avatarUrl
@@ -3633,13 +3671,15 @@ final class GitHubAPIClient: ObservableObject {
             operation: "fetchIndex.mergedInvolved")
 
         let groups = try await (authored, reviewRequested, reviewedBy, mergedInvolved)
-        return buildIndexedPRs(
+        var indexed = buildIndexedPRs(
             authored: groups.0,
             reviewRequested: groups.1,
             reviewedBy: groups.2,
             mergedInvolved: groups.3,
             username: username
         )
+        await enrichIndexedLabels(&indexed)
+        return indexed
     }
 
     private func fetchIndexSearch(
@@ -3745,6 +3785,9 @@ final class GitHubAPIClient: ObservableObject {
                 hasBaseConflicts: hasBaseConflicts,
                 category: category,
                 isMerged: isMerged,
+                githubLabels: node.labels?.nodes.map { GitHubLabel(name: $0.name, color: $0.color) },
+                githubLabelsEndCursor: node.labels?.pageInfo?.hasNextPage == true ? node.labels?.pageInfo?.endCursor : nil,
+                githubMilestone: node.milestone.map { GitHubMilestone(title: $0.title) },
                 snapshot: snapshot
             )
         }
@@ -4059,14 +4102,16 @@ final class GitHubAPIClient: ObservableObject {
         return Double.random(in: 0.5...cap)
     }
 
-    private func parseSearchResponse(data: Data, category: PRCategory) throws -> [PullRequest] {
+    private func parseSearchResponse(data: Data, category: PRCategory) async throws -> [PullRequest] {
         let decoder = JSONDecoder.githubDecoder
         do {
             let response = try decoder.decode(GraphQLResponse.self, from: data)
             let excludeFilter = Self.loadCIStatusExcludeFilter()
-            return response.data.search.nodes.compactMap {
+            var prs = response.data.search.nodes.compactMap {
                 Self.makeSearchPullRequest(from: $0, category: category, excludeFilter: excludeFilter)
             }
+            await enrichPullRequestLabels(&prs, nodes: response.data.search.nodes)
+            return prs
         } catch {
             throw APIError.decoding(error)
         }
@@ -4183,7 +4228,9 @@ final class GitHubAPIClient: ObservableObject {
             myThreadsAllResolved: false,
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
-            ciExtendedInfo: derivedCI.extendedInfo
+            ciExtendedInfo: derivedCI.extendedInfo,
+            githubLabels: node.labels?.nodes.map { GitHubLabel(name: $0.name, color: $0.color) },
+            githubMilestone: node.milestone.map { GitHubMilestone(title: $0.title) }
         )
     }
 
@@ -4206,6 +4253,130 @@ final class GitHubAPIClient: ObservableObject {
         let rollupState: String
         let initialContextCount: Int  // Number of contexts already fetched in first page
     }
+    private struct LabelEnrichmentInfo {
+        let prID: Int
+        let nodeID: String
+        let startCursor: String
+    }
+
+    private static func labelEnrichmentInfo(
+        prID: Int?,
+        nodeID: String?,
+        labels: GitHubLabelConnectionResponse?
+    ) -> LabelEnrichmentInfo? {
+        guard let prID,
+              let nodeID,
+              labels?.pageInfo?.hasNextPage == true,
+              let startCursor = labels?.pageInfo?.endCursor,
+              !startCursor.isEmpty else {
+            return nil
+        }
+        return LabelEnrichmentInfo(prID: prID, nodeID: nodeID, startCursor: startCursor)
+    }
+
+    private func enrichIndexedLabels(_ prs: inout [IndexedPR]) async {
+        let infos = prs.compactMap { pr -> LabelEnrichmentInfo? in
+            guard let nodeID = pr.graphqlNodeId,
+                  let startCursor = pr.githubLabelsEndCursor,
+                  !startCursor.isEmpty else {
+                return nil
+            }
+            return LabelEnrichmentInfo(
+                prID: pr.databaseId,
+                nodeID: nodeID,
+                startCursor: startCursor
+            )
+        }
+        let additions = await fetchAdditionalLabels(infos)
+        for index in prs.indices {
+            guard let labels = additions[prs[index].databaseId] else { continue }
+            prs[index].githubLabels = (prs[index].githubLabels ?? []) + labels
+        }
+    }
+
+    private func enrichPullRequestLabels(
+        _ prs: inout [PullRequest],
+        nodes: [GraphQLResponse.PRNode]
+    ) async {
+        let infos = nodes.compactMap {
+            Self.labelEnrichmentInfo(prID: $0.databaseId, nodeID: $0.id, labels: $0.labels)
+        }
+        let additions = await fetchAdditionalLabels(infos)
+        guard !additions.isEmpty else { return }
+        var indexByID: [Int: Int] = [:]
+        for (index, pr) in prs.enumerated() {
+            indexByID[pr.id] = index
+        }
+        for (id, labels) in additions {
+            guard let index = indexByID[id] else { continue }
+            prs[index].githubLabels = (prs[index].githubLabels ?? []) + labels
+        }
+    }
+
+    private func enrichPullRequestLabels(
+        _ prs: inout [Int: PullRequest],
+        nodes: [CombinedGraphQLResponse.PRNode]
+    ) async {
+        let infos = nodes.compactMap {
+            Self.labelEnrichmentInfo(prID: $0.databaseId, nodeID: $0.id, labels: $0.labels)
+        }
+        let additions = await fetchAdditionalLabels(infos)
+        for (id, labels) in additions {
+            guard var pr = prs[id] else { continue }
+            pr.githubLabels = (pr.githubLabels ?? []) + labels
+            prs[id] = pr
+        }
+    }
+
+    private func fetchAdditionalLabels(_ infos: [LabelEnrichmentInfo]) async -> [Int: [GitHubLabel]] {
+        var additions: [Int: [GitHubLabel]] = [:]
+        for info in infos {
+            do {
+                additions[info.prID] = try await fetchRemainingLabels(
+                    nodeID: info.nodeID,
+                    startCursor: info.startCursor
+                )
+            } catch {
+                logger.warning(
+                    "Failed to paginate labels for PR id \(info.prID, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
+        return additions
+    }
+
+    private func fetchRemainingLabels(nodeID: String, startCursor: String) async throws -> [GitHubLabel] {
+        var cursor: String? = startCursor
+        var seenCursors = Set<String>()
+        var labels: [GitHubLabel] = []
+
+        while let currentCursor = cursor, seenCursors.insert(currentCursor).inserted {
+            let query = """
+            query {
+                node(id: \(Self.graphQLStringLiteral(nodeID))) {
+                    ... on PullRequest {
+                        labels(first: 100, after: \(Self.graphQLStringLiteral(currentCursor))) {
+                            nodes { name color }
+                            pageInfo { hasNextPage endCursor }
+                        }
+                    }
+                }
+            }
+            """
+            let data = try await executeGraphQL(query: query, operation: "fetchRemainingLabels")
+            let response: PullRequestLabelPageResponse
+            do {
+                response = try JSONDecoder.githubDecoder.decode(PullRequestLabelPageResponse.self, from: data)
+            } catch {
+                throw APIError.decoding(error)
+            }
+            guard let connection = response.data.node?.labels else { break }
+            labels.append(contentsOf: connection.nodes.map { GitHubLabel(name: $0.name, color: $0.color) })
+            cursor = connection.pageInfo?.hasNextPage == true ? connection.pageInfo?.endCursor : nil
+        }
+        return labels
+    }
+
 
 
     private func fetchDetailBatch(
@@ -4267,6 +4438,7 @@ final class GitHubAPIClient: ObservableObject {
                 parsed[dbId] = pr
             }
         }
+        await enrichPullRequestLabels(&parsed, nodes: response.data.nodes)
 
         if !ciEnrichment.isEmpty {
             let enriched = await fetchAllAdditionalCIContexts(enrichmentInfos: ciEnrichment)
@@ -4515,6 +4687,7 @@ final class GitHubAPIClient: ObservableObject {
         var prs = nodes.compactMap {
             Self.makeSearchPullRequest(from: $0, category: .mentioned, excludeFilter: excludeFilter)
         }
+        await enrichPullRequestLabels(&prs, nodes: nodes)
         await enrichMentionedCIContexts(&prs, from: nodes, excludeFilter: excludeFilter)
         await applyWorkflowRunCompletionGuards(to: &prs)
         return prs
@@ -5028,7 +5201,9 @@ final class GitHubAPIClient: ObservableObject {
             myThreadsAllResolved: myThreadsAllResolved,
             approvalCount: approvalCount,
             changesRequestedCount: changesRequestedCount,
-            ciExtendedInfo: ciExtendedInfo
+            ciExtendedInfo: ciExtendedInfo,
+            githubLabels: node.labels?.nodes.map { GitHubLabel(name: $0.name, color: $0.color) },
+            githubMilestone: node.milestone.map { GitHubMilestone(title: $0.title) }
         )
     }
 
@@ -5887,6 +6062,18 @@ private struct MentionedBatchResponse: Decodable {
         init?(intValue: Int) { nil }
     }
 }
+private struct PullRequestLabelPageResponse: Decodable {
+    let data: DataContainer
+
+    struct DataContainer: Decodable {
+        let node: Node?
+    }
+
+    struct Node: Decodable {
+        let labels: GitHubLabelConnectionResponse?
+    }
+}
+
 
 struct IndexSearchResponse: Decodable {
     let data: DataContainer
@@ -5947,6 +6134,8 @@ struct IndexSearchResponse: Decodable {
         let mergedAt: Date?
         let mergeable: String?
         let mergeStateStatus: String?
+        let labels: GitHubLabelConnectionResponse?
+        let milestone: GitHubMilestoneResponse?
         let author: Author?
         let repository: Repository
         let reviewThreads: ReviewThreadsSummary?
@@ -6038,6 +6227,8 @@ private struct GraphQLResponse: Decodable {
         let mergedAt: Date?
         let mergeable: String?
         let mergeStateStatus: String?
+        let labels: GitHubLabelConnectionResponse?
+        let milestone: GitHubMilestoneResponse?
         let author: Author?
         let repository: Repository
         let comments: IssueCommentsContainer?
@@ -6045,6 +6236,7 @@ private struct GraphQLResponse: Decodable {
         let commits: CommitsContainer?
         let latestReviews: LatestReviewsContainer?
     }
+
 
     struct Author: Decodable {
         let login: String
@@ -6218,6 +6410,8 @@ private struct CombinedGraphQLResponse: Decodable {
         let mergedAt: Date?
         let mergeable: String?
         let mergeStateStatus: String?
+        let labels: GitHubLabelConnectionResponse?
+        let milestone: GitHubMilestoneResponse?
         let author: Author?
         let repository: Repository
         let comments: IssueCommentsContainer?

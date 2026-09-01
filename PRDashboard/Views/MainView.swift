@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct MainView: View {
     @ObservedObject var viewModel: PRListViewModel
@@ -8,6 +9,8 @@ struct MainView: View {
     @State private var firstVisibleApprovalPRID: Int?
     @State private var footerTimelineAnchor = Date()
     @State private var firstVisibleReviewStatusPRID: Int?
+    @State private var showSaveViewSheet = false
+    @State private var savedViewName = ""
     @State private var expandedSections: Set<PRSectionID> = Set(PRSectionID.allCases)
 
     private enum PRSectionID: Hashable, CaseIterable {
@@ -42,7 +45,9 @@ struct MainView: View {
             if viewModel.authState.isAuthenticated {
                 // Header
                 headerView
-
+                if viewModel.isFacetPanelPresented {
+                    FacetFilterPanel(viewModel: viewModel) { showSaveViewSheet = true }
+                }
                 Divider()
 
                 if viewModel.prList.isLoading && !viewModel.prList.hasUsableData {
@@ -111,27 +116,80 @@ struct MainView: View {
                 )
             }
         }
+        .sheet(isPresented: $showSaveViewSheet) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Save Current Filters").font(.headline)
+                TextField("View name", text: $savedViewName)
+                HStack {
+                    Spacer()
+                    Button("Cancel") {
+                        savedViewName = ""
+                        showSaveViewSheet = false
+                    }
+                    Button("Save") {
+                        guard viewModel.saveCurrentView(name: savedViewName) != nil else { return }
+                        savedViewName = ""
+                        showSaveViewSheet = false
+                    }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(savedViewName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }.padding(20).frame(width: 280)
+        }
         .onPreferenceChange(FirstReviewStatusBadgeIDPreferenceKey.self) { firstVisibleReviewStatusPRID = $0 }
     }
 
     // MARK: - Header
 
     private var headerView: some View {
-        HStack(alignment: .top, spacing: 8) {
+        let facetChips = viewModel.facetChips
+        let labelSuggestions = viewModel.searchLabelSuggestions
+        return HStack(alignment: .center, spacing: 6) {
             // Search field
             VStack(alignment: .leading, spacing: 4) {
-                HStack {
+                HStack(spacing: 4) {
                     Image(systemName: "magnifyingglass")
                         .foregroundColor(.secondary)
-                    TextField("Search PRs (jira:, ci:, pr:conflict, approval:>=2)", text: $viewModel.searchText)
+                    TextField("Search PRs, repos, authors, Jira keys...", text: $viewModel.searchText)
                         .textFieldStyle(.plain)
+                        .frame(maxWidth: .infinity)
                     if !viewModel.searchText.isEmpty {
                         Button(action: { viewModel.searchText = "" }) {
                             Image(systemName: "xmark.circle.fill")
                                 .foregroundColor(.secondary)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderless)
                     }
+                    Button(action: { viewModel.isFacetPanelPresented.toggle() }) {
+                        if viewModel.isFacetPanelPresented {
+                            if NSImage(
+                                systemSymbolName: "xmark",
+                                accessibilityDescription: nil
+                            ) != nil {
+                                Image(systemName: "xmark")
+                            } else {
+                                Text("×")
+                            }
+                        } else if NSImage(
+                            systemSymbolName: "line.3.horizontal.decrease",
+                            accessibilityDescription: nil
+                        ) != nil {
+                            Image(systemName: "line.3.horizontal.decrease")
+                        } else if NSImage(
+                            systemSymbolName: "slider.horizontal.3",
+                            accessibilityDescription: nil
+                        ) != nil {
+                            Image(systemName: "slider.horizontal.3")
+                        } else {
+                            Text("≡")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28)
+                    .help(viewModel.isFacetPanelPresented ? "Close Filters" : "Filter")
+                    .accessibilityLabel(viewModel.isFacetPanelPresented ? "Close Filters" : "Filter")
                 }
                 .padding(6)
                 .background(Color.primary.opacity(0.05))
@@ -152,23 +210,80 @@ struct MainView: View {
                     }
                     .font(.caption)
                 }
+                if !labelSuggestions.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(labelSuggestions) { option in
+                                Button {
+                                    viewModel.selectLabelSuggestion(option)
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Image(systemName: option.field.symbolName)
+                                        Text(option.displayName).lineLimit(1)
+                                        Text(option.field.providerTitle)
+                                            .foregroundColor(.secondary)
+                                        Text("\(option.count)")
+                                            .foregroundColor(.secondary)
+                                            .monospacedDigit()
+                                    }
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 3)
+                                    .background(Color.accentColor.opacity(0.08))
+                                    .cornerRadius(5)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Filter by \(option.field.providerTitle) label \(option.displayName)")
+                            }
+                        }
+                    }
+                    .font(.caption)
+                }
+                if !facetChips.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 4) {
+                            ForEach(facetChips.prefix(3)) { chip in
+                                HStack(spacing: 3) {
+                                    Image(systemName: chip.field.symbolName)
+                                    Text(chip.displayName).lineLimit(1)
+                                    Button {
+                                        viewModel.toggleFacet(field: chip.field, key: chip.key)
+                                    } label: {
+                                        Image(systemName: "xmark")
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .font(.caption2)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 3)
+                                .background(Color.accentColor.opacity(0.12))
+                                .cornerRadius(4)
+                            }
+                            if facetChips.count > 3 {
+                                Text("+\(facetChips.count - 3)")
+                                    .font(.caption2)
+                            }
+                        }
+                    }
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .onboardingAnchor(onboardingManager, step: .filter)
 
-            // Refresh button
             Button(action: { viewModel.refresh() }) {
                 Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 28, height: 28)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .keyboardShortcut("r", modifiers: .command)
             .disabled(viewModel.prList.isLoading)
 
-            // Settings button
             Button(action: { viewModel.showSettings() }) {
                 Image(systemName: "gear")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 28, height: 28)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderless)
             .onboardingAnchor(onboardingManager, step: .repoFilter)
         }
         .padding(10)

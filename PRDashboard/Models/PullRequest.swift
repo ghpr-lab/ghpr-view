@@ -109,6 +109,15 @@ struct DirectMentionTrackingEntry: Codable, Equatable {
 }
 
 
+struct GitHubLabel: Codable, Equatable, Hashable {
+    let name: String
+    let color: String?
+}
+
+struct GitHubMilestone: Codable, Equatable, Hashable {
+    let title: String
+}
+
 struct PullRequest: Identifiable, Codable, Equatable {
     let id: Int
     var graphqlNodeId: String? = nil
@@ -158,6 +167,10 @@ struct PullRequest: Identifiable, Codable, Equatable {
     var jiraMetadataFetchedAt: Date? = nil
     var isOpenInCmux: Bool? = nil
     var mentionCount: Int? = nil
+    var githubLabels: [GitHubLabel]? = nil
+    var githubMilestone: GitHubMilestone? = nil
+    var jiraProjectKey: String? = nil
+ 
 
     var ciIsRunning: Bool { ciExtendedInfo?.isRunning ?? false }
     var ciWorkflows: [CIWorkflowInfo] { ciExtendedInfo?.workflows ?? [] }
