@@ -23,12 +23,14 @@ class FakeGM {
     snapshot,
     discoveryV2 = true,
     latestVersion = CLIENT.version,
-    pageFailure = null
+    pageFailure = null,
+    clientScopes = CLIENT.requested_scopes
   } = {}) {
     this.snapshot = snapshot;
     this.discoveryV2 = discoveryV2;
     this.latestVersion = latestVersion;
     this.pageFailure = pageFailure;
+    this.clientScopes = clientScopes;
     this.storage = new Map([
       ["ghpr.bridge.port", 48120],
       ["ghpr.bridge.instance", "ghpr-test"],
@@ -79,7 +81,7 @@ class FakeGM {
         id: CLIENT.id,
         name: CLIENT.name,
         version: CLIENT.version,
-        scopes: CLIENT.requested_scopes,
+        scopes: this.clientScopes,
         created_at: "2026-08-24T00:00:00Z",
         last_seen_at: "2026-08-24T00:00:00Z",
         revoked_at: null
@@ -435,6 +437,80 @@ test("v2: Review PR resolves and starts the exact pull request revision", async 
   window.close();
 });
 
+test("v2: retrying an already-reviewed latest revision with no findings requires confirmation", async () => {
+  const pathname = "/acme/widgets/pull/42";
+  const latestHeadSHA = "a".repeat(40);
+  const snapshot = makeSnapshot(pathname, {
+    current_revision_subject: {
+      type: "pull_request_revision",
+      repository: "acme/widgets",
+      pr_number: 42,
+      base_sha: "b".repeat(40),
+      head_sha: latestHeadSHA
+    },
+    runs: [{
+      id: "run_review",
+      skill_id: "pr.review",
+      status: "completed",
+      completed_at: "2026-08-24T00:01:00Z",
+      subject: {
+        type: "pull_request_revision",
+        repository: "acme/widgets",
+        pr_number: 42,
+        base_sha: "b".repeat(40),
+        head_sha: latestHeadSHA
+      },
+      result: {
+        code_review: {
+          overview_markdown: "No findings.",
+          findings: []
+        }
+      }
+    }]
+  });
+  const window = await createWindow("conversation.html", pathname);
+  const confirmations = [];
+  let confirmRetry = false;
+  window.confirm = (message) => {
+    confirmations.push(message);
+    return confirmRetry;
+  };
+  const gm = new FakeGM({ snapshot });
+  const app = createGhprApp({ window, document: window.document, gm });
+  await app.start();
+  await settle();
+
+  const summary = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.conversation.review-summary']"
+  );
+  const reviewButton = [...summary.querySelectorAll("button")]
+    .find((button) => button.textContent === "Review latest");
+  assert.ok(reviewButton, "a completed review must still expose the retry action");
+
+  reviewButton.click();
+  await settle();
+  assert.deepEqual(confirmations, [
+    "Revision aaaaaaa has already been reviewed. Review it again?"
+  ]);
+  assert.equal(
+    gm.requests.some((request) => new URL(request.url).pathname === "/api/v1/actions"),
+    false,
+    "cancelling must not start another review"
+  );
+
+  confirmRetry = true;
+  reviewButton.click();
+  await settle();
+  assert.equal(
+    gm.requests.filter((request) => new URL(request.url).pathname === "/api/v1/actions").length,
+    1,
+    "confirming must start exactly one retry"
+  );
+
+  app.stop();
+  window.close();
+});
+
 test("v2: Review Summary preserves userscript update detection", async () => {
   const pathname = "/acme/widgets/pull/42";
   const window = await createWindow("conversation.html", pathname);
@@ -625,6 +701,13 @@ test("v2: compact operation card keeps primary PR actions available without rest
     has_browser_companion: false,
     is_runnable: true
   }];
+  snapshot.pull_request = {
+    ...snapshot.pull_request,
+    ci_status: "PENDING",
+    check_failure_count: 1,
+    check_pending_count: 2,
+    ci_is_running: true
+  };
   const gm = new FakeGM({ snapshot });
   const app = createGhprApp({ window, document: window.document, gm });
   await app.start();
@@ -644,7 +727,9 @@ test("v2: compact operation card keeps primary PR actions available without rest
   );
   assert.equal(actions.get("review-pr")?.textContent, "Review latest");
   assert.equal(actions.get("view-findings")?.textContent, "View findings");
-  assert.equal(actions.get("view-failed-checks")?.textContent, "Failed checks");
+  assert.equal(actions.get("view-failed-checks")?.textContent, "Failed checks (1)");
+  assert.equal(actions.get("explain-ci-failure")?.textContent, "Explain CI Failure");
+  assert.equal(actions.get("rerun-failed-ci")?.textContent, "Rerun failed CI");
   assert.equal(actions.has("open-app"), false, "the compact card must not keep an Open ghpr-view action");
   assert.equal(cardHost.querySelector(".ghpr-operation-skill-menu > summary")?.textContent, "Run Skill");
   assert.equal(
@@ -661,6 +746,33 @@ test("v2: compact operation card keeps primary PR actions available without rest
       .some((body) => body.action?.kind === "open_app"),
     false
   );
+  actions.get("explain-ci-failure").click();
+  const explaining = cardHost.querySelector("[data-action-id='explain-ci-failure']");
+  assert.equal(explaining?.textContent, "Explaining…");
+  assert.equal(explaining?.disabled, true);
+  await settle();
+  const explainRequest = gm.requests
+    .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+    .map((request) => JSON.parse(request.data))
+    .find((body) => body.action?.skill_id === "ci.failure.explain");
+  assert.equal(explainRequest?.action?.kind, "run_skill");
+  assert.equal(explainRequest?.page?.key, snapshot.page.key);
+  const confirmations = [];
+  window.confirm = (message) => {
+    confirmations.push(message);
+    return true;
+  };
+  cardHost.querySelector("[data-action-id='rerun-failed-ci']").click();
+  const rerunning = cardHost.querySelector("[data-action-id='rerun-failed-ci']");
+  assert.equal(rerunning?.textContent, "Rerunning…");
+  assert.equal(rerunning?.disabled, true);
+  await settle();
+  const rerunRequest = gm.requests
+    .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+    .map((request) => JSON.parse(request.data))
+    .find((body) => body.action?.kind === "rerun_failed_jobs");
+  assert.equal(rerunRequest?.page?.key, snapshot.page.key);
+  assert.deepEqual(confirmations, ["Rerun failed GitHub jobs?"]);
 
   actions.get("view-failed-checks").click();
   assert.equal(new URLSearchParams(window.location.search).get("ghpr_check"), "first");
@@ -677,6 +789,130 @@ test("v2: compact operation card keeps primary PR actions available without rest
 
   app.stop();
   window.close();
+});
+
+test("v2: failed-check actions require an actual failed check result", async () => {
+  const pathname = "/acme/widgets/pull/42";
+  const window = await createWindow("conversation.html", pathname);
+  const snapshot = makeSnapshot(pathname, {
+    pull_request: {
+      id: 42,
+      repository: "acme/widgets",
+      number: 42,
+      title: "Fixture PR",
+      ci_status: "FAILURE",
+      check_failure_count: 0
+    }
+  });
+  const app = createGhprApp({
+    window,
+    document: window.document,
+    gm: new FakeGM({ snapshot })
+  });
+  await app.start();
+  await settle();
+
+  const card = window.document.querySelector("#ghpr-operation-card");
+  assert.ok(card);
+  assert.equal(card.querySelector("[data-action-id='view-failed-checks']"), null);
+  assert.equal(card.querySelector("[data-action-id='explain-ci-failure']"), null);
+  assert.equal(card.querySelector("[data-action-id='rerun-failed-ci']"), null);
+
+  app.stop();
+  window.close();
+});
+
+
+test("v2: failed-check actions reflect backend run and permission state", async () => {
+  const pathname = "/acme/widgets/pull/42";
+  const window = await createWindow("conversation.html", pathname);
+  const snapshot = makeSnapshot(pathname, {
+    pull_request: {
+      id: 42,
+      repository: "acme/widgets",
+      number: 42,
+      title: "Fixture PR",
+      ci_status: "PENDING",
+      check_failure_count: 2
+    },
+    runs: [{
+      id: "run-explain-active",
+      skill_id: "ci.failure.explain",
+      status: "running",
+      started_at: "2026-08-24T00:01:00Z"
+    }]
+  });
+  const gm = new FakeGM({ snapshot });
+  const app = createGhprApp({ window, document: window.document, gm });
+  await app.start();
+  await settle();
+
+  const card = window.document.querySelector("#ghpr-operation-card");
+  assert.equal(
+    card.querySelector("[data-action-id='view-failed-checks']")?.textContent,
+    "Failed checks (2)"
+  );
+  assert.equal(
+    card.querySelector("[data-action-id='explain-ci-failure']")?.textContent,
+    "Explaining…"
+  );
+  assert.equal(card.querySelector("[data-action-id='explain-ci-failure']")?.disabled, true);
+
+  gm.snapshot = {
+    ...snapshot,
+    runs: [{
+      id: "run-explain-completed",
+      skill_id: "ci.failure.explain",
+      status: "completed",
+      started_at: "2026-08-24T00:01:00Z",
+      completed_at: "2026-08-24T00:02:00Z"
+    }]
+  };
+  await app.refresh();
+  assert.equal(
+    card.querySelector("[data-action-id='explain-ci-failure']")?.textContent,
+    "Explain again"
+  );
+
+  gm.snapshot = {
+    ...snapshot,
+    runs: [{
+      id: "run-explain-failed",
+      skill_id: "ci.failure.explain",
+      status: "failed",
+      started_at: "2026-08-24T00:03:00Z",
+      completed_at: "2026-08-24T00:04:00Z"
+    }]
+  };
+  await app.refresh();
+  assert.equal(
+    card.querySelector("[data-action-id='explain-ci-failure']")?.textContent,
+    "Retry explain"
+  );
+
+  app.stop();
+  window.close();
+
+  const restrictedWindow = await createWindow("conversation.html", pathname);
+  const restrictedApp = createGhprApp({
+    window: restrictedWindow,
+    document: restrictedWindow.document,
+    gm: new FakeGM({
+      snapshot,
+      clientScopes: CLIENT.requested_scopes.filter((scope) => scope !== "skill:run")
+    })
+  });
+  await restrictedApp.start();
+  await settle();
+  const restrictedCard = restrictedWindow.document.querySelector("#ghpr-operation-card");
+  assert.equal(restrictedCard.querySelector("[data-action-id='explain-ci-failure']"), null);
+  assert.equal(restrictedCard.querySelector("[data-action-id='rerun-failed-ci']"), null);
+  assert.equal(
+    restrictedCard.querySelector("[data-action-id='view-failed-checks']")?.textContent,
+    "Failed checks (2)"
+  );
+  restrictedApp.stop();
+  restrictedWindow.close();
 });
 
 test("v2: compact operation card exposes review progress without a duplicate run action", async () => {
@@ -917,12 +1153,15 @@ test("v2: Files changed (unified) marks the exact added line and not the deleted
   await settle();
 
   const toolbar = window.document.querySelector("[data-testid='files-toolbar']");
-  const reviewMenu = toolbar.querySelector(":scope > [data-ghpr-files-review-menu]");
-  assert.ok(reviewMenu, "Files changed must expose Review with ghpr through its secondary menu");
-  assert.equal(toolbar.querySelector(":scope > button"), null, "Review with ghpr must not become a primary toolbar button");
-  const reviewButton = [...reviewMenu.querySelectorAll("button")]
-    .find((button) => button.textContent === "Review with ghpr");
-  assert.ok(reviewButton);
+  assert.equal(
+    toolbar.querySelector("[data-ghpr-files-review-menu]"),
+    null,
+    "ghpr must not insert controls into the native Files toolbar"
+  );
+  const operationCard = window.document.querySelector("#ghpr-operation-card");
+  operationCard.querySelector("[data-action-id='toggle-operation-card']").click();
+  const reviewButton = operationCard.querySelector("[data-action-id='review-pr']");
+  assert.equal(reviewButton?.textContent, "Review latest");
   reviewButton.click();
   await settle();
   const reviewAction = gm.requests
@@ -984,7 +1223,7 @@ test("v2: Files changed (split) marks the correct side's cell for the same line 
   window.close();
 });
 
-test("v2: GitHub changes route opens the first finding and navigates between findings in-page", async () => {
+test("v2: GitHub changes route opens the first finding and navigates between findings in-page", async (t) => {
   const pathname = "/acme/widgets/pull/42/changes?ghpr_finding=finding_1";
   const window = await createWindow("files-changes-react.html", pathname);
   const snapshot = await findingsFixtureSnapshot(pathname);
@@ -997,8 +1236,43 @@ test("v2: GitHub changes route opens the first finding and navigates between fin
   }));
   const gm = new FakeGM({ snapshot });
   const app = createGhprApp({ window, document: window.document, gm });
+  t.after(() => {
+    app.stop();
+    window.close();
+  });
   await app.start();
   await settle();
+  const operationCardHost = window.document.querySelector("#ghpr-operation-card");
+  const operationCard = operationCardHost?.querySelector(".ghpr-operation-card");
+  const submitReview = [...window.document.querySelectorAll("button")]
+    .find((button) => button.textContent.includes("Submit review"));
+  const submitReviewContainer = submitReview?.parentElement;
+  assert.ok(operationCardHost?.classList.contains("ghpr-operation-card-floating"));
+  assert.ok(operationCardHost?.classList.contains("ghpr-operation-card-collapsed"));
+  assert.equal(operationCardHost?.parentElement, window.document.body);
+  assert.equal(operationCard?.dataset.collapsed, "true");
+  assert.equal(operationCard?.querySelector(".ghpr-operation-card-body")?.hidden, true);
+  assert.equal(
+    operationCard?.querySelector("[data-action-id='toggle-operation-card']")?.getAttribute("aria-label"),
+    "Expand ghpr card"
+  );
+  const submitReviewControlCount = submitReviewContainer?.children.length;
+  assert.equal(submitReviewControlCount, 2, "the native Files toolbar must keep only its two controls");
+  assert.equal(submitReviewContainer?.contains(operationCardHost), false);
+
+  operationCard.querySelector("[data-action-id='toggle-operation-card']").click();
+  assert.equal(operationCardHost.querySelector(".ghpr-operation-card")?.dataset.collapsed, "false");
+  assert.equal(
+    operationCardHost.querySelector(".ghpr-operation-card-body")?.hidden,
+    false
+  );
+  assert.equal(submitReviewContainer?.children.length, 2);
+  await app.refresh();
+  assert.equal(
+    operationCardHost.querySelector(".ghpr-operation-card")?.dataset.collapsed,
+    "false",
+    "the user's expanded state must survive snapshot refreshes"
+  );
   const fileTreeBadge = window.document.querySelector(
     "#src\\/index\\.ts [data-ghpr-file-tree-badge]"
   );
@@ -1045,8 +1319,6 @@ test("v2: GitHub changes route opens the first finding and navigates between fin
   panel = window.document.querySelector("[data-testid='ghpr-inline-finding-panel']");
   assert.match(panel?.querySelector(".ghpr-item-navigator-count")?.textContent || "", /1 of 2 findings/);
 
-  app.stop();
-  window.close();
 });
 
 test("v2: finding drawer never calls GM.openInTab", async () => {

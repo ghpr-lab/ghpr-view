@@ -232,38 +232,6 @@
       flex-wrap: wrap;
       padding: 8px 12px;
     }
-    .ghpr-files-review-menu {
-      display: inline-block;
-      margin-left: auto;
-      position: relative;
-    }
-    .ghpr-files-review-menu > summary {
-      border-radius: 6px;
-      color: var(--fgColor-muted, #656d76);
-      cursor: pointer;
-      font-size: 12px;
-      list-style: none;
-      padding: 4px 8px;
-    }
-    .ghpr-files-review-menu > summary::-webkit-details-marker { display: none; }
-    .ghpr-files-review-menu > summary::after { content: " ▾"; }
-    .ghpr-files-review-menu[open] > summary {
-      background: var(--bgColor-muted, #f6f8fa);
-      color: var(--fgColor-default, #1f2328);
-    }
-    .ghpr-files-review-menu-popover {
-      background: var(--overlay-bgColor, var(--bgColor-default, #fff));
-      border: 1px solid var(--borderColor-default, #d1d9e0);
-      border-radius: 6px;
-      box-shadow: var(--shadow-floating-small, 0 4px 12px rgba(31, 35, 40, 0.15));
-      min-width: 156px;
-      padding: 6px;
-      position: absolute;
-      right: 0;
-      top: calc(100% + 4px);
-      z-index: 30;
-    }
-    .ghpr-files-review-menu-popover .ghpr-button { width: 100%; }
     .ghpr-review-summary {
       background: var(--bgColor-default, #fff);
       border: 1px solid var(--borderColor-default, #d1d9e0);
@@ -539,6 +507,11 @@
       width: min(280px, calc(100vw - 32px));
       z-index: 30;
     }
+    .ghpr-operation-card-host.ghpr-operation-card-floating.ghpr-operation-card-collapsed {
+      max-width: calc(100vw - 32px);
+      min-width: 156px;
+      width: auto;
+    }
     .ghpr-operation-card {
       background: var(--bgColor-default, #fff);
       border: 1px solid var(--borderColor-default, #d1d9e0);
@@ -596,6 +569,28 @@
       cursor: pointer;
       font: inherit;
       padding: 2px;
+    }
+    .ghpr-operation-card-toggle {
+      align-items: center;
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-radius: 4px;
+      color: var(--fgColor-muted, #656d76);
+      cursor: pointer;
+      display: inline-flex;
+      font-size: 14px;
+      height: 24px;
+      justify-content: center;
+      padding: 0;
+      width: 24px;
+    }
+    .ghpr-operation-card-toggle:hover {
+      background: var(--button-default-bgColor-hover, var(--bgColor-neutral-muted, #eaeef2));
+      color: var(--fgColor-default, #1f2328);
+    }
+    .ghpr-operation-card[data-collapsed="true"] .ghpr-operation-card-body {
+      display: none;
     }
     .ghpr-operation-card-body {
       border-top: 1px solid var(--borderColor-muted, #d8dee4);
@@ -1111,9 +1106,9 @@
     return details;
   }
 
-  // --- operation card -----------------------------------------------------
   // model: { state, statusLabel, summary, signals:[{label,tone}], progressLog,
-  //          updateAction, primaryAction, skillActions:[], actions:[] }
+  //          updateAction, primaryAction, skillActions:[], actions:[],
+  //          collapsible, collapsed, onToggle }
   function renderOperationCard(document, model = {}) {
     const head = [
       h(document, "span", {
@@ -1138,6 +1133,20 @@
         update.addEventListener("click", model.updateAction.onSelect);
       }
       head.push(update);
+    }
+    if (model.collapsible) {
+      const collapsed = Boolean(model.collapsed);
+      head.push(h(document, "button", {
+        className: "ghpr-operation-card-toggle",
+        text: collapsed ? "▴" : "▾",
+        attrs: {
+          type: "button",
+          "data-action-id": "toggle-operation-card",
+          "aria-label": collapsed ? "Expand ghpr card" : "Collapse ghpr card",
+          "aria-expanded": collapsed ? "false" : "true"
+        },
+        onClick: () => model.onToggle?.(!collapsed)
+      }));
     }
 
     const body = [];
@@ -1181,11 +1190,15 @@
       className: "ghpr-surface ghpr-operation-card",
       attrs: {
         "aria-label": "ghpr operations",
-        "data-state": model.state || "ready"
+        "data-state": model.state || "ready",
+        "data-collapsed": model.collapsible ? String(Boolean(model.collapsed)) : undefined
       }
     }, [
       h(document, "div", { className: "ghpr-operation-card-head" }, head),
-      h(document, "div", { className: "ghpr-operation-card-body" }, body)
+      h(document, "div", {
+        className: "ghpr-operation-card-body",
+        attrs: { hidden: model.collapsible && model.collapsed }
+      }, body)
     ]);
   }
 

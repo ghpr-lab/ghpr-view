@@ -311,9 +311,9 @@ test("compares server userscript versions without false update prompts", () => {
   assert.equal(isVersionNewer("1.1.0", "1.1.1"), false);
   assert.equal(isVersionNewer("not-a-version", "1.1.1"), false);
 });
-test("publishes the client and update metadata as userscript v2.0.10", () => {
+test("publishes the client and update metadata as userscript v2.0.13", () => {
   const metadataVersion = userscriptSource.match(/^\/\/ @version\s+(\S+)$/m)?.[1];
-  assert.equal(metadataVersion, "2.0.10");
+  assert.equal(metadataVersion, "2.0.13");
   assert.equal(CLIENT.version, metadataVersion);
   assert.equal(CLIENT.requested_scopes.includes("tag:read"), true);
   assert.equal(CLIENT.requested_scopes.includes("tag:write"), true);
@@ -411,7 +411,7 @@ test("prompts for a userscript update reported by the Browser Bridge", async () 
   assert.equal(card.querySelector(".ghpr-badge")?.textContent, "Update");
   card.querySelector("[aria-label='Expand ghpr card']").click();
   const notice = card.querySelector(".ghpr-update-notice");
-  assert.match(notice?.textContent || "", /Userscript update available.*2\.0\.10 → 2\.1\.0/s);
+  assert.match(notice?.textContent || "", /Userscript update available.*2\.0\.13 → 2\.1\.0/s);
   notice.querySelector("button").click();
   assert.deepEqual(gm.opened, ["http://127.0.0.1:48120/install/ghpr.user.js"]);
 

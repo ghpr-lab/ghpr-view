@@ -220,6 +220,8 @@ async function installApp(page, fixtureName, pathname, pageSnapshot) {
           };
         } else if (requestPath === "/api/v1/page") {
           value = snapshotValue;
+        } else if (requestPath === "/api/v1/subjects/resolve") {
+          value = snapshotValue.current_revision_subject;
         } else {
           value = { ok: true };
         }
@@ -268,6 +270,42 @@ async function installApp(page, fixtureName, pathname, pageSnapshot) {
     snapshotValue: pageSnapshot
   });
 }
+
+
+test("Completed latest review asks before running again", async ({ page }) => {
+  const pathname = "/acme/widgets/pull/42";
+  await installApp(page, "conversation.html", pathname, snapshot(pathname, {
+    runs: [reviewRun([])]
+  }));
+
+  const reviewButton = page.getByRole("button", { name: "Review latest" }).first();
+  await expect(reviewButton).toBeVisible();
+
+  const dismissDialogPromise = page.waitForEvent("dialog");
+  const dismissClickPromise = reviewButton.click();
+  const dismissDialog = await dismissDialogPromise;
+  expect(dismissDialog.message()).toBe(
+    "Revision bbbbbbb has already been reviewed. Review it again?"
+  );
+  await dismissDialog.dismiss();
+  await dismissClickPromise;
+  expect(await page.evaluate(() =>
+    window.__ghprFixtureGM.requests.filter((request) =>
+      new URL(request.url).pathname === "/api/v1/actions"
+    ).length
+  )).toBe(0);
+
+  const acceptDialogPromise = page.waitForEvent("dialog");
+  const acceptClickPromise = reviewButton.click();
+  const acceptDialog = await acceptDialogPromise;
+  await acceptDialog.accept();
+  await acceptClickPromise;
+  await expect.poll(() => page.evaluate(() =>
+    window.__ghprFixtureGM.requests.filter((request) =>
+      new URL(request.url).pathname === "/api/v1/actions"
+    ).length
+  )).toBe(1);
+});
 
 
 test("Active review keeps a collapsed, scrollable execution terminal in the page", async ({ page }) => {
@@ -440,6 +478,37 @@ test("Failed checks opens the first failed row and navigates only between failur
   await expect(insight.getByRole("button", { name: "Next" })).toBeDisabled();
 });
 
+test("PR operation card reruns failed CI only when failed checks exist", async ({ page }) => {
+  const pathname = "/acme/widgets/pull/42";
+  const pageSnapshot = snapshot(pathname);
+  pageSnapshot.pull_request = {
+    ...pageSnapshot.pull_request,
+    ci_status: "PENDING",
+    check_failure_count: 1,
+    check_pending_count: 2,
+    ci_is_running: true
+  };
+  await installApp(page, "conversation.html", pathname, pageSnapshot);
+
+  const operationCard = page.locator("#ghpr-operation-card");
+  await expect(operationCard.getByRole("button", { name: "Failed checks (1)" })).toBeVisible();
+  await expect(operationCard.getByRole("button", { name: "Explain CI Failure" })).toBeVisible();
+  const rerun = operationCard.getByRole("button", { name: "Rerun failed CI" });
+  await expect(rerun).toBeVisible();
+
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toBe("Rerun failed GitHub jobs?");
+    await dialog.accept();
+  });
+  await rerun.click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__ghprFixtureGM.requests
+      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+      .map((request) => JSON.parse(request.data))
+      .some((body) => body.action?.kind === "rerun_failed_jobs")
+  )).toBe(true);
+});
+
 test("Actions Job inserts the tabbed CI Insight immediately below the failure summary", async ({ page }) => {
   const pathname = "/acme/widgets/actions/runs/1001/job/2001";
   const runs = [
@@ -522,6 +591,13 @@ test("Conversation finding navigates to and expands the exact Files changed line
       is_runnable: true
     }]
   });
+  reviewSnapshot.pull_request = {
+    ...reviewSnapshot.pull_request,
+    ci_status: "PENDING",
+    check_failure_count: 1,
+    check_pending_count: 2,
+    ci_is_running: true
+  };
   await installApp(page, "conversation.html", conversationPath, reviewSnapshot);
 
   const summary = page.locator("[data-ghpr-surface='github.pr.conversation.review-summary']");
@@ -546,19 +622,41 @@ test("Conversation finding navigates to and expands the exact Files changed line
   await expect(operationCard).toContainText("Checks failing");
   await expect(operationCard.getByRole("button", { name: "Review latest" })).toBeVisible();
   await expect(operationCard.getByRole("button", { name: "View findings" })).toBeVisible();
-  await expect(operationCard.getByRole("button", { name: "Failed checks" })).toBeVisible();
+  await expect(operationCard.getByRole("button", { name: "Failed checks (1)" })).toBeVisible();
+  await expect(operationCard.getByRole("button", { name: "Explain CI Failure" })).toBeVisible();
+  await expect(operationCard.getByRole("button", { name: "Rerun failed CI" })).toBeVisible();
   await expect(operationCard.getByRole("button", { name: "Open ghpr-view" })).toHaveCount(0);
   await expect(operationCard).toHaveScreenshot("conversation-operation-card.png", {
     animations: "disabled"
   });
-  await operationCard.getByText("Run Skill", { exact: true }).click();
-  await expect(operationCard.getByRole("button", { name: "Check release risk" })).toBeVisible();
+  await expect(
+    operationCard.locator("[data-action-id='run-skill-team.review.release-risk']")
+  ).toHaveCount(1);
   await expect(page.locator("#ghpr-github-root")).toHaveCount(0);
+
+  await operationCard.getByRole("button", { name: "Explain CI Failure" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__ghprFixtureGM.requests
+      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+      .map((request) => JSON.parse(request.data))
+      .some((body) => body.action?.skill_id === "ci.failure.explain")
+  )).toBe(true);
 
   await operationCard.getByRole("button", { name: "View findings" }).click();
   await expect.poll(() => page.evaluate(() => window.__ghprFixtureLocation.href))
     .toBe("https://github.com/acme/widgets/pull/42/changes?ghpr_finding=finding-1&path=src%2Findex.ts&line=10#L10");
-  await operationCard.getByRole("button", { name: "Failed checks" }).click();
+  page.once("dialog", async (dialog) => {
+    expect(dialog.message()).toBe("Rerun failed GitHub jobs?");
+    await dialog.accept();
+  });
+  await operationCard.getByRole("button", { name: "Rerun failed CI" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__ghprFixtureGM.requests
+      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+      .map((request) => JSON.parse(request.data))
+      .some((body) => body.action?.kind === "rerun_failed_jobs")
+  )).toBe(true);
+  await operationCard.getByRole("button", { name: "Failed checks (1)" }).click();
   await expect.poll(() => page.evaluate(() => window.__ghprFixtureLocation.href))
     .toBe("https://github.com/acme/widgets/pull/42/checks?ghpr_check=first");
   await summary.getByRole("button", { name: "View in Files changed" }).click();
@@ -714,8 +812,7 @@ test("GitHub React changes DOM anchors an inline finding to the exact side", asy
   await expect(page.getByTestId("ghpr-inline-finding-panel")).toContainText(
     "Possible lost update in cache write"
   );
-  await expect(page.locator("section[data-file-tree-expanded] [data-ghpr-files-review-menu]"))
-    .toBeVisible();
+  await expect(page.locator("[data-ghpr-files-review-menu]")).toHaveCount(0);
 });
 
 test("Files changed split view anchors the finding to the added side", async ({ page }) => {
@@ -747,8 +844,47 @@ test("Files changed split view anchors the finding to the added side", async ({ 
   await expect(inlineFinding).toBeVisible();
   await expect(page.locator(".ghpr-surface-drawer")).toHaveCount(0);
   await expect(page.locator(".diff-table")).toHaveScreenshot("files-inline-finding-split.png", {
+    animations: "disabled",
+    maxDiffPixels: 20
+  });
+});
+
+test("Files changed operation card defaults collapsed without moving Submit review", async ({ page }) => {
+  const pathname = "/acme/widgets/pull/42/changes";
+  await installApp(page, "files-changes-react.html", pathname, snapshot(pathname));
+
+  const submitReview = page.getByRole("button", { name: /Submit review/ });
+  const filesToolbar = page.locator("section[data-file-tree-expanded]");
+  const operationCardHost = page.locator("#ghpr-operation-card");
+  const operationCard = operationCardHost.locator(".ghpr-operation-card");
+  const body = operationCard.locator(".ghpr-operation-card-body");
+  const toggle = operationCard.getByRole("button", { name: "Expand ghpr card" });
+
+  await expect(submitReview).toBeVisible();
+  await expect(filesToolbar.locator(":scope > *")).toHaveCount(2);
+  await expect(filesToolbar.locator("[data-ghpr-files-review-menu]")).toHaveCount(0);
+  await expect(operationCard).toHaveAttribute("data-collapsed", "true");
+  await expect(body).toBeHidden();
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await expect(operationCard).toHaveScreenshot("files-operation-card-collapsed.png", {
     animations: "disabled"
   });
+  expect(await operationCardHost.evaluate((node) => ({
+    parent: node.parentElement?.tagName,
+    position: getComputedStyle(node).position
+  }))).toEqual({ parent: "BODY", position: "fixed" });
+
+  const collapsedSubmitBox = await submitReview.boundingBox();
+  await toggle.click();
+  await expect(operationCard).toHaveAttribute("data-collapsed", "false");
+  await expect(body).toBeVisible();
+  await expect(operationCard.getByRole("button", { name: "Collapse ghpr card" }))
+    .toHaveAttribute("aria-expanded", "true");
+  expect(await submitReview.boundingBox()).toEqual(collapsedSubmitBox);
+  await operationCard.getByRole("button", { name: "Collapse ghpr card" }).click();
+  await expect(operationCard).toHaveAttribute("data-collapsed", "true");
+  await expect(body).toBeHidden();
+  expect(await submitReview.boundingBox()).toEqual(collapsedSubmitBox);
 });
 
 test("Reviewed revision diff anchors an outdated finding and flags the revision", async ({ page }) => {
@@ -793,10 +929,14 @@ test("Reviewed revision diff anchors an outdated finding and flags the revision"
   await expect(page.getByTestId("ghpr-inline-finding-panel")).toBeVisible();
 
   const operationCard = page.locator("#ghpr-operation-card .ghpr-operation-card");
+  await expect(operationCard).toHaveAttribute("data-collapsed", "true");
+  await operationCard.getByRole("button", { name: "Expand ghpr card" }).click();
   await expect(operationCard).toContainText("Outdated revision");
   await expect(operationCard).toContainText("Findings from the reviewed revision bbbbbbb");
   await expect(operationCard.getByRole("button", { name: "Back to latest revision" }))
     .toBeVisible();
+  await operationCard.getByRole("button", { name: "Collapse ghpr card" }).click();
+  await expect(operationCard).toHaveAttribute("data-collapsed", "true");
   await expect(page.locator(".diff-table")).toHaveScreenshot("files-outdated-revision.png", {
     animations: "disabled"
   });

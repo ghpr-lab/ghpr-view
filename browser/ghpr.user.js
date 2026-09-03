@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ghpr for GitHub
 // @namespace    https://github.com/xiaocang/ghpr-view
-// @version      2.0.10
+// @version      2.0.13
 // @description  Run local ghpr Skills and render their results on GitHub pull requests.
 // @match        https://github.com/*/*/pull/*
 // @match        https://github.com/*/*/actions/runs/*
@@ -251,38 +251,6 @@
       flex-wrap: wrap;
       padding: 8px 12px;
     }
-    .ghpr-files-review-menu {
-      display: inline-block;
-      margin-left: auto;
-      position: relative;
-    }
-    .ghpr-files-review-menu > summary {
-      border-radius: 6px;
-      color: var(--fgColor-muted, #656d76);
-      cursor: pointer;
-      font-size: 12px;
-      list-style: none;
-      padding: 4px 8px;
-    }
-    .ghpr-files-review-menu > summary::-webkit-details-marker { display: none; }
-    .ghpr-files-review-menu > summary::after { content: " ▾"; }
-    .ghpr-files-review-menu[open] > summary {
-      background: var(--bgColor-muted, #f6f8fa);
-      color: var(--fgColor-default, #1f2328);
-    }
-    .ghpr-files-review-menu-popover {
-      background: var(--overlay-bgColor, var(--bgColor-default, #fff));
-      border: 1px solid var(--borderColor-default, #d1d9e0);
-      border-radius: 6px;
-      box-shadow: var(--shadow-floating-small, 0 4px 12px rgba(31, 35, 40, 0.15));
-      min-width: 156px;
-      padding: 6px;
-      position: absolute;
-      right: 0;
-      top: calc(100% + 4px);
-      z-index: 30;
-    }
-    .ghpr-files-review-menu-popover .ghpr-button { width: 100%; }
     .ghpr-review-summary {
       background: var(--bgColor-default, #fff);
       border: 1px solid var(--borderColor-default, #d1d9e0);
@@ -558,6 +526,11 @@
       width: min(280px, calc(100vw - 32px));
       z-index: 30;
     }
+    .ghpr-operation-card-host.ghpr-operation-card-floating.ghpr-operation-card-collapsed {
+      max-width: calc(100vw - 32px);
+      min-width: 156px;
+      width: auto;
+    }
     .ghpr-operation-card {
       background: var(--bgColor-default, #fff);
       border: 1px solid var(--borderColor-default, #d1d9e0);
@@ -615,6 +588,28 @@
       cursor: pointer;
       font: inherit;
       padding: 2px;
+    }
+    .ghpr-operation-card-toggle {
+      align-items: center;
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-radius: 4px;
+      color: var(--fgColor-muted, #656d76);
+      cursor: pointer;
+      display: inline-flex;
+      font-size: 14px;
+      height: 24px;
+      justify-content: center;
+      padding: 0;
+      width: 24px;
+    }
+    .ghpr-operation-card-toggle:hover {
+      background: var(--button-default-bgColor-hover, var(--bgColor-neutral-muted, #eaeef2));
+      color: var(--fgColor-default, #1f2328);
+    }
+    .ghpr-operation-card[data-collapsed="true"] .ghpr-operation-card-body {
+      display: none;
     }
     .ghpr-operation-card-body {
       border-top: 1px solid var(--borderColor-muted, #d8dee4);
@@ -1130,9 +1125,9 @@
     return details;
   }
 
-  // --- operation card -----------------------------------------------------
   // model: { state, statusLabel, summary, signals:[{label,tone}], progressLog,
-  //          updateAction, primaryAction, skillActions:[], actions:[] }
+  //          updateAction, primaryAction, skillActions:[], actions:[],
+  //          collapsible, collapsed, onToggle }
   function renderOperationCard(document, model = {}) {
     const head = [
       h(document, "span", {
@@ -1157,6 +1152,20 @@
         update.addEventListener("click", model.updateAction.onSelect);
       }
       head.push(update);
+    }
+    if (model.collapsible) {
+      const collapsed = Boolean(model.collapsed);
+      head.push(h(document, "button", {
+        className: "ghpr-operation-card-toggle",
+        text: collapsed ? "▴" : "▾",
+        attrs: {
+          type: "button",
+          "data-action-id": "toggle-operation-card",
+          "aria-label": collapsed ? "Expand ghpr card" : "Collapse ghpr card",
+          "aria-expanded": collapsed ? "false" : "true"
+        },
+        onClick: () => model.onToggle?.(!collapsed)
+      }));
     }
 
     const body = [];
@@ -1200,11 +1209,15 @@
       className: "ghpr-surface ghpr-operation-card",
       attrs: {
         "aria-label": "ghpr operations",
-        "data-state": model.state || "ready"
+        "data-state": model.state || "ready",
+        "data-collapsed": model.collapsible ? String(Boolean(model.collapsed)) : undefined
       }
     }, [
       h(document, "div", { className: "ghpr-operation-card-head" }, head),
-      h(document, "div", { className: "ghpr-operation-card-body" }, body)
+      h(document, "div", {
+        className: "ghpr-operation-card-body",
+        attrs: { hidden: model.collapsible && model.collapsed }
+      }, body)
     ]);
   }
 
@@ -2154,7 +2167,7 @@
   const CLIENT = {
     id: "dev.ghpr.official-userscript",
     name: "ghpr for GitHub",
-    version: "2.0.10",
+    version: "2.0.13",
     requested_scopes: [
       "pr:read",
       "ci:read",
@@ -2910,6 +2923,10 @@
       this.reviewLogExpandedV2 = false;
       this.reviewStepExpandedV2 = new Map();
       this.pendingSubjectRuns = new Set();
+      this.pendingExplainCIV2 = false;
+      this.pendingRerunFailedCIV2 = false;
+      this.operationCardSurfaceV2 = null;
+      this.operationCardCollapsedV2 = false;
       this._navigatedFindingIDV2 = null;
       this._findingNavigationTimersV2 = new Map();
       this.isScrollingV2 = false;
@@ -3510,6 +3527,20 @@
         return;
       }
       const mount = this.panelMount();
+      const filesChangedCard = isFilesChangedSurface(this.window.location) && !mount.inSidebar;
+      const operationCardSurface = filesChangedCard ? "files-changed" : "pull-request";
+      if (operationCardSurface !== this.operationCardSurfaceV2) {
+        this.operationCardSurfaceV2 = operationCardSurface;
+        this.operationCardCollapsedV2 = filesChangedCard;
+      }
+      const cardFrame = {
+        collapsible: filesChangedCard,
+        collapsed: filesChangedCard && this.operationCardCollapsedV2,
+        onToggle: (collapsed) => {
+          this.operationCardCollapsedV2 = collapsed;
+          this.renderOperationCardV2(SR, { connected, unavailable });
+        }
+      };
       let host = this.document.getElementById(OPERATION_CARD_ID);
       if (!host) {
         host = createElement(this.document, "div", {
@@ -3521,8 +3552,10 @@
         "ghpr-operation-card-host",
         mount.inSidebar
           ? "discussion-sidebar-item ghpr-operation-card-sidebar"
-          : "ghpr-operation-card-floating"
-      ].join(" ");
+          : "ghpr-operation-card-floating",
+        filesChangedCard ? "ghpr-operation-card-files" : "",
+        cardFrame.collapsed ? "ghpr-operation-card-collapsed" : ""
+      ].filter(Boolean).join(" ");
       if (mount.before) {
         if (host.parentElement !== mount.host || host.nextElementSibling !== mount.before) {
           mount.host.insertBefore(host, mount.before);
@@ -3533,6 +3566,7 @@
 
       if (unavailable) {
         host.replaceChildren(SR.renderOperationCard(this.document, {
+          ...cardFrame,
           state: "attention",
           statusLabel: "Unavailable",
           summary: unavailable,
@@ -3547,6 +3581,7 @@
 
       if (!connected) {
         host.replaceChildren(SR.renderOperationCard(this.document, {
+          ...cardFrame,
           state: "attention",
           statusLabel: "Not connected",
           summary: "Connect the local app to review this PR.",
@@ -3607,12 +3642,30 @@
         currentHeadSHA &&
         reviewedHeadSHA.toLowerCase() === currentHeadSHA.toLowerCase()
       );
-      const checksFailing = ["FAILURE", "FAILED", "ERROR"].includes(
-        String(this.snapshot?.pull_request?.ci_status || "").toUpperCase()
-      );
+      const failedCheckCount =
+        Number(this.snapshot?.pull_request?.check_failure_count || 0);
+      const checksFailing = failedCheckCount > 0;
       const fileCount = new Set(
         findings.map((finding) => finding.file || finding.original_file).filter(Boolean)
       ).size;
+      const explainRuns = [...(this.snapshot?.runs || [])]
+        .filter((run) => run.skill_id === "ci.failure.explain")
+        .sort((left, right) =>
+          String(right.completed_at || right.started_at || right.created_at || "")
+            .localeCompare(String(left.completed_at || left.started_at || left.created_at || ""))
+        );
+      const activeExplainRun = explainRuns.find((run) =>
+        run.status === "queued" || run.status === "running"
+      );
+      const latestExplainRun = explainRuns[0] || null;
+      const explainingCI = this.pendingExplainCIV2 || Boolean(activeExplainRun);
+      const explainLabel = explainingCI
+        ? "Explaining…"
+        : latestExplainRun?.status === "completed"
+          ? "Explain again"
+          : ["failed", "cancelled"].includes(latestExplainRun?.status)
+            ? "Retry explain"
+            : "Explain CI Failure";
       const repository = this.page.repository;
       const prNumber = this.page.pr_number;
       const revisionRef = filesChangedRevisionRef(this.window.location);
@@ -3651,9 +3704,23 @@
         }
       }
       if (checksFailing) {
+        if (this.hasScope("skill:run")) {
+          actions.push({
+            id: "explain-ci-failure",
+            label: explainLabel,
+            disabled: explainingCI,
+            onSelect: () => this.explainCIFailureV2(SR)
+          });
+          actions.push({
+            id: "rerun-failed-ci",
+            label: this.pendingRerunFailedCIV2 ? "Rerunning…" : "Rerun failed CI",
+            disabled: this.pendingRerunFailedCIV2,
+            onSelect: () => this.rerunFailedCIV2(SR)
+          });
+        }
         actions.push({
           id: "view-failed-checks",
-          label: "Failed checks",
+          label: `Failed checks (${failedCheckCount})`,
           onSelect: () => {
             this.window.location.href =
               `https://github.com/${repository}/pull/${prNumber}/checks?ghpr_check=first`;
@@ -3714,6 +3781,7 @@
           : revisionRef || checksFailing
             ? "attention"
             : "ready",
+        ...cardFrame,
         statusLabel: activeReview
           ? "Reviewing…"
           : revisionRef
@@ -3745,6 +3813,34 @@
         skillActions,
         actions
       }));
+    }
+
+    async explainCIFailureV2(SR) {
+      if (this.pendingExplainCIV2 || this.activeRunForSkill("ci.failure.explain")) return;
+      this.pendingExplainCIV2 = true;
+      this.renderOperationCardV2(SR);
+      try {
+        await this.invokeAction({
+          kind: "run_skill",
+          skill_id: "ci.failure.explain"
+        });
+      } finally {
+        this.pendingExplainCIV2 = false;
+        this.renderOperationCardV2(SR);
+      }
+    }
+
+    async rerunFailedCIV2(SR) {
+      if (this.pendingRerunFailedCIV2) return;
+      if (!this.window.confirm("Rerun failed GitHub jobs?")) return;
+      this.pendingRerunFailedCIV2 = true;
+      this.renderOperationCardV2(SR);
+      try {
+        await this.invokeAction({ kind: "rerun_failed_jobs" });
+      } finally {
+        this.pendingRerunFailedCIV2 = false;
+        this.renderOperationCardV2(SR);
+      }
     }
 
     reviewProgressLogModelV2(run) {
@@ -3825,7 +3921,7 @@
       };
 
       this.renderConversationReviewSummaryV2(SR, mount);
-      this.renderFilesReviewActionV2();
+      this.document.querySelector("[data-ghpr-files-review-menu]")?.remove();
       this.renderFilesTreeBadgesV2();
       // The diff-line pass resolves ?ghpr_finding= navigation, which may select
       // a file-scoped finding, so the file-level band renders after it.
@@ -4159,56 +4255,6 @@
       );
     }
 
-    renderFilesReviewActionV2() {
-      const selector = "[data-ghpr-files-review-menu]";
-      const existing = this.document.querySelector(selector);
-      if (!isFilesChangedSurface(this.window.location)) {
-        existing?.remove();
-        return;
-      }
-      const anchors = semanticTargets(this.document, "files.toolbar.actions");
-      if (anchors.length !== 1) {
-        existing?.remove();
-        return;
-      }
-      const toolbar = anchors[0];
-      const activeReview = (this.snapshot?.runs || []).some((run) =>
-        run.skill_id === "pr.review" && (run.status === "queued" || run.status === "running")
-      );
-      if (existing?.parentElement === toolbar) {
-        const review = existing.querySelector("button");
-        if (review) {
-          review.textContent = activeReview ? "Reviewing…" : "Review with ghpr";
-          review.disabled = activeReview || !this.hasScope("skill:run");
-          review.title = this.hasScope("skill:run") ? "" : "skill:run permission is required.";
-        }
-        return;
-      }
-      existing?.remove();
-      const review = button(
-        this.document,
-        activeReview ? "Reviewing…" : "Review with ghpr",
-        () => this.startPRReviewV2(),
-        "ghpr-button"
-      );
-      review.disabled = activeReview || !this.hasScope("skill:run");
-      if (!this.hasScope("skill:run")) {
-        review.title = "skill:run permission is required.";
-      }
-      const menu = createElement(this.document, "details", {
-        className: "ghpr-files-review-menu",
-        attributes: {
-          [MANAGED_ATTRIBUTE]: "",
-          "data-ghpr-files-review-menu": ""
-        }
-      }, [
-        createElement(this.document, "summary", { text: "ghpr" }),
-        createElement(this.document, "div", {
-          className: "ghpr-files-review-menu-popover"
-        }, [review])
-      ]);
-      toolbar.append(menu);
-    }
 
     renderFilesTreeBadgesV2() {
       const selector = "[data-ghpr-file-tree-badge]";
@@ -4672,6 +4718,23 @@
           base_sha: revision.base_sha,
           head_sha: revision.head_sha
         };
+        const alreadyReviewed = skillID === "pr.review" &&
+          (this.snapshot?.runs || []).some((run) => {
+            const codeReview = run.result?.code_review;
+            if (!codeReview) return false;
+            const reviewedHeadSHA = codeReview.head_sha || run.subject?.head_sha;
+            return reviewedHeadSHA &&
+              reviewedHeadSHA.toLowerCase() === revision.head_sha.toLowerCase();
+          });
+        if (
+          alreadyReviewed &&
+          !this.window.confirm(
+            `Revision ${revision.head_sha.slice(0, 7)} has already been reviewed. Review it again?`
+          )
+        ) {
+          this.pendingSubjectRuns.delete(pendingKey);
+          return;
+        }
         const subjectKey = [
           "github:pull-request-revision:",
           revision.repository.toLowerCase(),
