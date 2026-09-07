@@ -586,6 +586,8 @@
         border-radius: 999px;
         color: #fff;
         display: inline-flex;
+        appearance: none;
+        cursor: pointer;
         flex: 0 0 auto;
         font-size: 10px;
         font-weight: 700;
@@ -595,6 +597,11 @@
         margin-inline-start: 4px;
         min-width: 16px;
         padding: 0 4px;
+        font-family: inherit;
+      }
+      .ghpr-file-tree-badge:focus-visible {
+        outline: 2px solid var(--focus-outlineColor, #0969da);
+        outline-offset: 2px;
       }
       .ghpr-header-entry {
         align-items: center; display: inline-flex; flex: 0 0 auto;
@@ -768,8 +775,10 @@
       this.dismissedFindingIDs = new Set();
       this.surfaceRegistry = null;
       this.drawerHost = null;
+      this.modalHost = null;
       this.checksInsightHost = null;
       this.selectedChecksJobKey = null;
+      this.pendingChecksExpansionV2 = false;
       this.filesFindingPanelMount = null;
       this.selectedFilesFindingID = null;
       this.selectedFileFindingID = null;
@@ -779,7 +788,6 @@
       this.reviewStepExpandedV2 = new Map();
       this.pendingSubjectRuns = new Set();
       this.pendingExplainCIV2 = false;
-      this.pendingRerunFailedCIV2 = false;
       this.operationCardSurfaceV2 = null;
       this.operationCardCollapsedV2 = false;
       this._navigatedFindingIDV2 = null;
@@ -998,6 +1006,7 @@
 
     cleanupSurfaceV2() {
       this.drawerHost?.close();
+      this.modalHost?.close();
       this.checksInsightHost?.close();
       this.filesFindingPanelMount?.destroy();
       this.filesFindingPanelMount = null;
@@ -1500,27 +1509,10 @@
       const failedCheckCount =
         Number(this.snapshot?.pull_request?.check_failure_count || 0);
       const checksFailing = failedCheckCount > 0;
+      const ciExplanationReasons = this.ciExplanationReasonsV2();
       const fileCount = new Set(
         findings.map((finding) => finding.file || finding.original_file).filter(Boolean)
       ).size;
-      const explainRuns = [...(this.snapshot?.runs || [])]
-        .filter((run) => run.skill_id === "ci.failure.explain")
-        .sort((left, right) =>
-          String(right.completed_at || right.started_at || right.created_at || "")
-            .localeCompare(String(left.completed_at || left.started_at || left.created_at || ""))
-        );
-      const activeExplainRun = explainRuns.find((run) =>
-        run.status === "queued" || run.status === "running"
-      );
-      const latestExplainRun = explainRuns[0] || null;
-      const explainingCI = this.pendingExplainCIV2 || Boolean(activeExplainRun);
-      const explainLabel = explainingCI
-        ? "Explaining…"
-        : latestExplainRun?.status === "completed"
-          ? "Explain again"
-          : ["failed", "cancelled"].includes(latestExplainRun?.status)
-            ? "Retry explain"
-            : "Explain CI Failure";
       const repository = this.page.repository;
       const prNumber = this.page.pr_number;
       const revisionRef = filesChangedRevisionRef(this.window.location);
@@ -1559,23 +1551,11 @@
         }
       }
       if (checksFailing) {
-        if (this.hasScope("skill:run")) {
-          actions.push({
-            id: "explain-ci-failure",
-            label: explainLabel,
-            disabled: explainingCI,
-            onSelect: () => this.explainCIFailureV2(SR)
-          });
-          actions.push({
-            id: "rerun-failed-ci",
-            label: this.pendingRerunFailedCIV2 ? "Rerunning…" : "Rerun failed CI",
-            disabled: this.pendingRerunFailedCIV2,
-            onSelect: () => this.rerunFailedCIV2(SR)
-          });
-        }
+        const explanationHint = this.ciExplanationHintV2(ciExplanationReasons);
         actions.push({
           id: "view-failed-checks",
           label: `Failed checks (${failedCheckCount})`,
+          title: explanationHint || undefined,
           onSelect: () => {
             this.window.location.href =
               `https://github.com/${repository}/pull/${prNumber}/checks?ghpr_check=first`;
@@ -1670,33 +1650,118 @@
       }));
     }
 
-    async explainCIFailureV2(SR) {
+    explainCIFailureV2(SR, exactSubject = null, exactSubjectKey = null) {
       if (this.pendingExplainCIV2 || this.activeRunForSkill("ci.failure.explain")) return;
+      const subject = this.snapshot?.current_revision_subject;
+      if (!this.modalHost || subject?.type !== "pull_request_revision") {
+        this.renderTransientError("The latest pull request revision is not available yet.");
+        return;
+      }
+      const skill = (this.snapshot?.skills || []).find(
+        (candidate) => candidate.id === "ci.failure.explain"
+      );
+      const latestRun = [...(this.snapshot?.runs || [])]
+        .filter((run) => run.skill_id === "ci.failure.explain" && run.agent)
+        .sort((left, right) =>
+          String(right.completed_at || right.started_at || right.created_at || "")
+            .localeCompare(String(left.completed_at || left.started_at || left.created_at || ""))
+        )[0];
+      const runtimes = this.runtimeOptionsV2(skill);
+      const selectedRuntime = runtimes.some((runtime) => runtime.id === latestRun?.agent)
+        ? latestRun.agent
+        : skill?.default_agent || runtimes[0]?.id;
+      const content = SR.renderSurface(this.document, "review_launch_dialog", {
+        title: "Explain failed checks",
+        subtitle: "Choose the coding agent runtime and model before ghpr analyzes the current failures.",
+        repository: subject.repository,
+        number: subject.pr_number,
+        baseSHA: subject.base_sha,
+        headSHA: subject.head_sha,
+        runtimes,
+        selectedRuntime,
+        sectionTitle: "Run failure explanation with ghpr",
+        sectionCopy: "ghpr gathers the failed-check evidence and runs the selected coding agent locally.",
+        startLabel: "Explain failure",
+        startActionID: "start-explain-failure",
+        showImport: false,
+        onStart: async (selection) => {
+          const started = exactSubject && exactSubjectKey
+            ? await this.runSkillForSubjectV2(
+                "ci.failure.explain",
+                exactSubject,
+                exactSubjectKey,
+                selection
+              )
+            : await this.runCIFailureExplanationV2(SR, selection);
+          if (started) this.modalHost?.close();
+          return started;
+        }
+      });
+      this.modalHost.open(content, {
+        triggerEl: this.document.activeElement,
+        ariaLabel: "Explain failed checks"
+      });
+    }
+    rerunFailedChecksV2(SR, exactSubject = null, exactSubjectKey = null) {
+      if (!SR) {
+        this.renderTransientError("The failed-check action dialog is unavailable.");
+        return;
+      }
+      if (!this.modalHost) this.modalHost = new SR.ModalHost({ document: this.document });
+      const canExplain = this.hasScope("skill:run") &&
+        !this.pendingExplainCIV2 &&
+        !this.activeRunForSkill("ci.failure.explain");
+      const content = SR.renderFailedChecksRerunDialog(this.document, {
+        canExplain,
+        onExplain: canExplain
+          ? () => {
+              this.modalHost?.close();
+              this.explainCIFailureV2(SR, exactSubject, exactSubjectKey);
+            }
+          : undefined,
+        onRerun: () => {
+          this.modalHost?.close();
+          this.invokeConfirmedAction({ kind: "rerun_failed_jobs" });
+        }
+      });
+      this.modalHost.open(content, {
+        triggerEl: this.document.activeElement,
+        ariaLabel: "Re-run failed jobs"
+      });
+    }
+
+
+    async runCIFailureExplanationV2(SR, runtimeSelection) {
+      if (this.pendingExplainCIV2 || this.activeRunForSkill("ci.failure.explain")) return false;
       this.pendingExplainCIV2 = true;
       this.renderOperationCardV2(SR);
       try {
-        await this.invokeAction({
+        const action = {
           kind: "run_skill",
           skill_id: "ci.failure.explain"
+        };
+        if (runtimeSelection?.agent) action.agent = runtimeSelection.agent;
+        if (runtimeSelection?.model) action.model = runtimeSelection.model;
+        if (runtimeSelection?.reasoningEffort) {
+          action.reasoning_effort = runtimeSelection.reasoningEffort;
+        }
+        const response = await this.bridge.request("POST", "/api/v1/actions", {
+          action,
+          page: this.page,
+          confirmed: false
         });
+        this.openResponseURL(response);
+        await this.refresh();
+        return true;
+      } catch (error) {
+        this.renderTransientError(error.message);
+        return false;
       } finally {
         this.pendingExplainCIV2 = false;
         this.renderOperationCardV2(SR);
       }
     }
 
-    async rerunFailedCIV2(SR) {
-      if (this.pendingRerunFailedCIV2) return;
-      if (!this.window.confirm("Rerun failed GitHub jobs?")) return;
-      this.pendingRerunFailedCIV2 = true;
-      this.renderOperationCardV2(SR);
-      try {
-        await this.invokeAction({ kind: "rerun_failed_jobs" });
-      } finally {
-        this.pendingRerunFailedCIV2 = false;
-        this.renderOperationCardV2(SR);
-      }
-    }
 
     reviewProgressLogModelV2(run) {
       const supplied = Array.isArray(run.log_entries) ? run.log_entries : [];
@@ -1759,6 +1824,7 @@
       this.renderOperationCardV2(SR);
       if (!this.surfaceRegistry) this.surfaceRegistry = new SR.SurfaceRegistry({ document: this.document });
       if (!this.drawerHost) this.drawerHost = new SR.DrawerHost({ document: this.document });
+      if (!this.modalHost) this.modalHost = new SR.ModalHost({ document: this.document });
       if (!this.checksInsightHost) {
         this.checksInsightHost = new SR.InlinePanelHost({
           document: this.document,
@@ -2053,6 +2119,26 @@
       const anchor = anchors[0];
       const review = this.latestCodeReview();
       const findings = this.findingsForSurfaceV2();
+      const failedCheckCount =
+        Number(this.snapshot?.pull_request?.check_failure_count || 0);
+      const explainRuns = [...(this.snapshot?.runs || [])]
+        .filter((run) => run.skill_id === "ci.failure.explain")
+        .sort((left, right) =>
+          String(right.completed_at || right.started_at || right.created_at || "")
+            .localeCompare(String(left.completed_at || left.started_at || left.created_at || ""))
+        );
+      const activeExplainRun = explainRuns.find((run) =>
+        run.status === "queued" || run.status === "running"
+      );
+      const latestExplainRun = explainRuns[0] || null;
+      const explainingCI = this.pendingExplainCIV2 || Boolean(activeExplainRun);
+      const explainLabel = explainingCI
+        ? "Explaining…"
+        : latestExplainRun?.status === "completed"
+          ? "Explain again"
+          : ["failed", "cancelled"].includes(latestExplainRun?.status)
+            ? "Retry explain"
+            : "Explain CI Failure";
       const activeReview = (this.snapshot.runs || []).find((run) =>
         run.skill_id === "pr.review" &&
         (run.status === "queued" || run.status === "running")
@@ -2103,7 +2189,31 @@
             ? () => this.startPRReviewV2()
             : undefined,
           reviewLabel: review ? "Review latest" : "Review PR",
-          reviewDisabled: Boolean(activeReview)
+          reviewDisabled: Boolean(activeReview),
+          // Failed-check actions belong to the check result, above the review
+          // summary instead of in the ghpr operation card.
+          checksActions: failedCheckCount > 0
+            ? {
+                summary: `${failedCheckCount} failed ${failedCheckCount === 1 ? "check" : "checks"}`,
+                hint: this.ciExplanationHintV2(),
+                actions: [
+                  this.hasScope("skill:run")
+                    ? {
+                        id: "explain-ci-failure",
+                        label: explainLabel,
+                        disabled: explainingCI,
+                        onSelect: () => this.explainCIFailureV2(SR)
+                      }
+                    : null,
+                  {
+                    id: "rerun-failed-ci",
+                    label: `Re-run ${failedCheckCount} failed ${failedCheckCount === 1 ? "job" : "jobs"}`,
+                    className: "ghpr-review-summary-rerun",
+                    onSelect: () => this.rerunFailedChecksV2(SR)
+                  }
+                ].filter(Boolean)
+              }
+            : undefined
         },
         "review_summary",
         { instanceKey: "default", anchor, position: "after" }
@@ -2117,36 +2227,48 @@
         for (const badge of this.document.querySelectorAll(selector)) badge.remove();
         return;
       }
-      const countsByFile = new Map();
+      const findingsByFile = new Map();
       for (const finding of this.anchoredFindingsForSurfaceV2()) {
         const path = this.normalizeDiffPathV2(finding.file || finding.original_file);
         if (!path) continue;
-        countsByFile.set(path, (countsByFile.get(path) || 0) + 1);
+        const findings = findingsByFile.get(path) || [];
+        findings.push(finding);
+        findingsByFile.set(path, findings);
       }
       for (const item of semanticTargets(this.document, "files.tree.file")) {
         const fileLink = item.querySelector("a[href^='#diff-']");
         const content = fileLink?.parentElement?.parentElement;
         const path = this.normalizeDiffPathV2(item.id);
-        const count = countsByFile.get(path) || 0;
+        const findings = findingsByFile.get(path) || [];
         let badge = item.querySelector(selector);
-        if (!fileLink || !content || !count) {
+        if (!fileLink || !content || !findings.length) {
           badge?.remove();
           continue;
         }
-        const label = `${count} ghpr ${count === 1 ? "comment" : "comments"}`;
+        if (badge?.tagName !== "BUTTON") {
+          badge?.remove();
+          badge = null;
+        }
         if (!badge) {
-          badge = createElement(this.document, "span", {
+          badge = createElement(this.document, "button", {
             className: "ghpr-file-tree-badge",
             attributes: {
+              type: "button",
               [MANAGED_ATTRIBUTE]: "",
               "data-ghpr-file-tree-badge": ""
             }
           });
           content.append(badge);
         }
-        badge.textContent = String(count);
+        const label = `Open first of ${findings.length} ghpr ${findings.length === 1 ? "finding" : "findings"} in ${path}`;
+        badge.textContent = String(findings.length);
         badge.setAttribute("aria-label", label);
         badge.title = label;
+        badge.onclick = (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          this.selectFindingInFilesV2(global.GhprSurfaceRenderers, findings[0]);
+        };
       }
     }
 
@@ -2416,6 +2538,28 @@
         || row.querySelector(`.blob-code-${isLeft ? "deletion" : "addition"}`);
     }
 
+    collapsedDiffDisclosureV2(fileContainer) {
+      const header = fileContainer?.querySelector(
+        "[data-testid='file-header'], .file-header, [data-diff-header-wrapper]"
+      );
+      if (!header) return null;
+      for (const button of header.querySelectorAll("button")) {
+        const labelledBy = button.getAttribute("aria-labelledby");
+        const labelledText = labelledBy
+          ? labelledBy.split(/\s+/)
+              .map((id) => this.document.getElementById(id)?.textContent || "")
+              .join(" ")
+          : "";
+        const label = [
+          button.getAttribute("aria-label"),
+          button.getAttribute("title"),
+          labelledText
+        ].filter(Boolean).join(" ");
+        if (/\b(?:expand|show)\b.*\b(?:file|diff)\b/i.test(label)) return button;
+      }
+      return header.querySelector("details:not([open]) > summary");
+    }
+
     handleFindingNavigationV2(SR, findings) {
       const params = new URLSearchParams(this.window.location.search);
       const findingID = params.get("ghpr_finding");
@@ -2447,9 +2591,11 @@
         return;
       }
       const fileContainer = this.diffContainerForFindingV2(finding);
-      const disclosure = fileContainer?.querySelector("button[aria-expanded='false'], summary");
-      disclosure?.click();
-      const row = this.locateDiffRowV2(finding);
+      let row = this.locateDiffRowV2(finding);
+      if (!row) {
+        this.collapsedDiffDisclosureV2(fileContainer)?.click();
+        row = this.locateDiffRowV2(finding);
+      }
       if (!row) {
         if (!this._findingNavigationTimersV2.has(findingID)) {
           const timer = this.window.setTimeout(() => {
@@ -2510,14 +2656,84 @@
       return workflowJobSubjectKey({ repository, runId: runID, jobId: jobID });
     }
 
+    workflowJobMetadataForRunV2(run) {
+      const runSubject = run?.subject;
+      if (runSubject?.type === "workflow_job") {
+        return {
+          repository: runSubject.repository || this.page?.repository,
+          workflow_run_id: runSubject.workflow_run_id,
+          workflow_job_id: runSubject.workflow_job_id,
+          workflow_name: null
+        };
+      }
+      const metadata = run?.result?.payload?._ghpr_job;
+      if (!metadata?.workflow_run_id || !metadata?.workflow_job_id) return null;
+      return metadata;
+    }
+
+    ciExplanationReasonsV2(currentJobKeys = null) {
+      const seen = new Set();
+      const reasons = [];
+      const runs = [...(this.snapshot?.runs || [])]
+        .filter((run) =>
+          run.skill_id === "ci.failure.explain" &&
+          run.status === "completed" &&
+          run.result?.payload &&
+          typeof run.result.payload === "object"
+        )
+        .sort((left, right) =>
+          String(right.completed_at || right.started_at || "")
+            .localeCompare(String(left.completed_at || left.started_at || ""))
+        );
+      for (const run of runs) {
+        const payload = run.result.payload;
+        const reason = typeof payload.why_it_failed === "string"
+          ? payload.why_it_failed.trim()
+          : "";
+        if (!reason) continue;
+        const job = this.workflowJobMetadataForRunV2(run);
+        const key = job
+          ? `${String(job.repository || this.page?.repository).toLowerCase()}:${job.workflow_run_id}:${job.workflow_job_id}`
+          : run.id;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        reasons.push({
+          run,
+          job,
+          key,
+          label: job?.workflow_name || run.result?.analysis?.job_name || null,
+          reason,
+          evidence: Array.isArray(payload.relevant_evidence)
+            ? payload.relevant_evidence.filter((item) => typeof item === "string" && item.trim())
+            : []
+        });
+      }
+      if (currentJobKeys) {
+        return reasons.filter((item) => item.job && currentJobKeys.has(item.key));
+      }
+      const latestPageRun = reasons.find((item) =>
+        item.run.subject?.type === "legacy_page" || !item.run.subject
+      );
+      return latestPageRun ? [latestPageRun] : [];
+    }
+    ciExplanationHintV2(reasons = this.ciExplanationReasonsV2()) {
+      return reasons
+        .flatMap((item) => [
+          `• ${item.label ? `${item.label}: ` : ""}${item.reason}`,
+          ...item.evidence.map((evidence) => `  • ${evidence}`)
+        ])
+        .join("\n");
+    }
+
+
     latestRunForSubjectV2(skillID, subject) {
       return [...(this.snapshot?.runs || [])]
         .filter((run) => {
           if (run.skill_id !== skillID) return false;
-          const runSubject = run.subject;
-          if (runSubject?.type === "workflow_job") {
-            return String(runSubject.workflow_run_id) === String(subject.workflow_run_id) &&
-              String(runSubject.workflow_job_id) === String(subject.workflow_job_id);
+          const job = this.workflowJobMetadataForRunV2(run);
+          if (job) {
+            return String(job.workflow_run_id) === String(subject.workflow_run_id) &&
+              String(job.workflow_job_id) === String(subject.workflow_job_id);
           }
           return run.subject_key === this.subjectKeyForWorkflowJob(subject);
         })
@@ -2547,14 +2763,100 @@
       };
     }
 
-    async startPRReviewV2() {
-      return this.startPullRequestSkillV2("pr.review");
+    runtimeOptionsV2(skill) {
+      const allowed = new Set(skill?.agents || ["omp", "claude_code", "codex"]);
+      const preferences = new Map(
+        (this.snapshot?.agent_runtime || []).map((setting) => [setting.agent, setting.preference || {}])
+      );
+      const catalogs = new Map(
+        (this.snapshot?.agent_catalogs || []).map((catalog) => [catalog.agent, catalog])
+      );
+      return ["omp", "claude_code", "codex"]
+        .filter((agent) => allowed.has(agent))
+        .map((agent) => {
+          const preference = preferences.get(agent) || {};
+          const catalog = catalogs.get(agent) || {};
+          return {
+            id: agent,
+            label: labelForSkillAgent(agent),
+            selectedModel: preference.model || "",
+            selectedReasoningEffort: preference.reasoning_effort || "",
+            models: (catalog.models || []).map((model) => ({
+              slug: model.slug,
+              displayName: model.display_name || model.slug,
+              defaultEffort: model.default_effort || "",
+              reasoningEfforts: model.reasoning_efforts || []
+            })),
+            reasoningEfforts: catalog.reasoning_efforts || []
+          };
+        });
     }
 
-    async startPullRequestSkillV2(skillID) {
-      if (!this.page?.repository || !this.page?.pr_number) return;
+    reviewImportPromptV2(subject) {
+      return [
+        `Review ${subject.repository}#${subject.pr_number} at the exact revision below:`,
+        `base_sha: ${subject.base_sha}`,
+        `head_sha: ${subject.head_sha}`,
+        "",
+        "When the review is complete, call the configured ghpr MCP tool `import_review` with:",
+        "- repository and PR number",
+        "- the exact base_sha and head_sha above",
+        "- your review engine name and overview_markdown",
+        "- every actionable line finding with file, start_line, end_line, side, title, summary, severity, confidence, and category",
+        "",
+        "Do not submit a GitHub review or comment. Save the result only through ghpr.import_review."
+      ].join("\n");
+    }
+
+    startPRReviewV2() {
+      const SR = global.GhprSurfaceRenderers;
+      const subject = this.snapshot?.current_revision_subject;
+      if (!SR || !this.modalHost || subject?.type !== "pull_request_revision") {
+        this.renderTransientError("The latest pull request revision is not available yet.");
+        return;
+      }
+      const reviewSkill = (this.snapshot?.skills || []).find((skill) => skill.id === "pr.review");
+      const latestReviewRun = [...(this.snapshot?.runs || [])]
+        .filter((run) => run.skill_id === "pr.review" && run.agent)
+        .sort((left, right) =>
+          String(right.completed_at || right.started_at || right.created_at || "")
+            .localeCompare(String(left.completed_at || left.started_at || left.created_at || ""))
+        )[0];
+      const runtimes = this.runtimeOptionsV2(reviewSkill);
+      const selectedRuntime = runtimes.some((runtime) => runtime.id === latestReviewRun?.agent)
+        ? latestReviewRun.agent
+        : reviewSkill?.default_agent || runtimes[0]?.id;
+      const content = SR.renderSurface(this.document, "review_launch_dialog", {
+        repository: subject.repository,
+        number: subject.pr_number,
+        baseSHA: subject.base_sha,
+        headSHA: subject.head_sha,
+        runtimes,
+        selectedRuntime,
+        onStart: async (selection) => {
+          const started = await this.runPRReviewV2(selection);
+          if (started) {
+            this.modalHost?.close();
+          }
+          return started;
+        },
+        onCopyImportPrompt: () =>
+          this.copyTextV2(this.reviewImportPromptV2(subject))
+      });
+      this.modalHost.open(content, {
+        triggerEl: this.document.activeElement,
+        ariaLabel: "Review pull request"
+      });
+    }
+
+    async runPRReviewV2(runtimeSelection) {
+      return this.startPullRequestSkillV2("pr.review", runtimeSelection);
+    }
+
+    async startPullRequestSkillV2(skillID, runtimeSelection = null) {
+      if (!this.page?.repository || !this.page?.pr_number) return false;
       const pendingKey = `${skillID}::${this.page.key}`;
-      if (this.pendingSubjectRuns.has(pendingKey)) return;
+      if (this.pendingSubjectRuns.has(pendingKey)) return false;
       this.pendingSubjectRuns.add(pendingKey);
       try {
         const revision = await this.bridge.request(
@@ -2588,7 +2890,7 @@
           )
         ) {
           this.pendingSubjectRuns.delete(pendingKey);
-          return;
+          return false;
         }
         const subjectKey = [
           "github:pull-request-revision:",
@@ -2601,32 +2903,42 @@
           revision.head_sha
         ].join("");
         this.pendingSubjectRuns.delete(pendingKey);
-        this.runSkillForSubjectV2(skillID, subject, subjectKey);
+        this.runSkillForSubjectV2(skillID, subject, subjectKey, runtimeSelection);
+        return true;
       } catch (error) {
         this.renderTransientError(error.message);
         this.pendingSubjectRuns.delete(pendingKey);
+        return false;
       }
     }
 
-    async runSkillForSubjectV2(skillID, subject, subjectKey) {
+    async runSkillForSubjectV2(skillID, subject, subjectKey, runtimeSelection = null) {
       const pendingKey = `${skillID}::${subjectKey}`;
-      if (this.pendingSubjectRuns.has(pendingKey)) return;
+      if (this.pendingSubjectRuns.has(pendingKey)) return false;
       const active = this.latestRunForSubjectV2(skillID, subject);
-      if (active && (active.status === "queued" || active.status === "running")) return;
+      if (active && (active.status === "queued" || active.status === "running")) return false;
       this.pendingSubjectRuns.add(pendingKey);
       try {
         const exactSubject = subject.type === "workflow_job"
           ? await this.resolveWorkflowJobSubjectV2(subject)
           : subject;
+        const action = { kind: "run_skill", skill_id: skillID, subject: exactSubject };
+        if (runtimeSelection?.agent) action.agent = runtimeSelection.agent;
+        if (runtimeSelection?.model) action.model = runtimeSelection.model;
+        if (runtimeSelection?.reasoningEffort) {
+          action.reasoning_effort = runtimeSelection.reasoningEffort;
+        }
         const response = await this.bridge.request("POST", "/api/v1/actions", {
-          action: { kind: "run_skill", skill_id: skillID, subject: exactSubject },
+          action,
           page: this.page,
           confirmed: false
         });
         this.openResponseURL(response);
         await this.refresh();
+        return true;
       } catch (error) {
         this.renderTransientError(error.message);
+        return false;
       } finally {
         this.pendingSubjectRuns.delete(pendingKey);
       }
@@ -2707,8 +3019,8 @@
             ? [{
                 id: "explain",
                 label: model.explain?.status === "ready" ? "Explain again" : "Explain CI Failure",
-                onSelect: () => this.runSkillForSubjectV2(
-                  "ci.failure.explain",
+                onSelect: () => this.explainCIFailureV2(
+                  global.GhprSurfaceRenderers,
                   subject,
                   this.subjectKeyForWorkflowJob(subject)
                 )
@@ -2719,8 +3031,12 @@
             : []),
           {
             id: "rerun",
-            label: "Re-run failed job",
-            onSelect: () => this.invokeAction({ kind: "rerun_failed_jobs" }, true)
+            label: "Re-run failed jobs",
+            onSelect: () => this.rerunFailedChecksV2(
+              global.GhprSurfaceRenderers,
+              subject,
+              this.subjectKeyForWorkflowJob(subject)
+            )
           }
         ]
       };
@@ -2777,6 +3093,30 @@
       if (scroll) selected.row.scrollIntoView?.({ block: "center" });
     }
 
+    expandRequestedFailedSuiteV2(explanationReasons) {
+      if (this.pendingChecksExpansionV2) return;
+      if (!new URLSearchParams(this.window.location.search).has("ghpr_check")) return;
+      const labels = explanationReasons
+        .map((item) => item.label?.trim().toLowerCase())
+        .filter(Boolean);
+      if (!labels.length) return;
+      const root = this.document.querySelector("#checks_tab") || this.document;
+      const toggles = [...root.querySelectorAll(
+        "button[aria-expanded='false'], [role='button'][aria-expanded='false']"
+      )];
+      const toggle = toggles.find((candidate) => {
+        const text = (candidate.textContent || "").trim().toLowerCase();
+        return text && labels.some((label) => text.includes(label) || label.includes(text));
+      });
+      if (!toggle) return;
+      this.pendingChecksExpansionV2 = true;
+      toggle.click();
+      this.window.setTimeout(() => {
+        this.pendingChecksExpansionV2 = false;
+        if (!this.stopped) this.renderSurfaceV2();
+      }, 250);
+    }
+
     renderChecksSurfacesV2(SR, mount) {
       if (!isChecksSurface(this.window.location)) return;
       const rows = semanticTargets(this.document, "checks.run.trailing");
@@ -2803,6 +3143,35 @@
           subjectKey: this.subjectKeyForWorkflowJob(subject)
         });
       }
+      const currentJobKeys = new Set(failedJobs.map(({ subject }) =>
+        `${String(subject.repository).toLowerCase()}:${subject.workflow_run_id}:${subject.workflow_job_id}`
+      ));
+      const matchedReasons = failedJobs.length
+        ? this.ciExplanationReasonsV2(currentJobKeys)
+        : [];
+      const explanationReasons = matchedReasons.length
+        ? matchedReasons
+        : this.ciExplanationReasonsV2();
+      const summaryAnchor = semanticTargets(this.document, "checks.summary.actions")[0];
+      if (summaryAnchor && explanationReasons.length) {
+        const prepend = summaryAnchor.matches(".checks-listing");
+        mount(
+          SR.SURFACE_IDS.checksSummary,
+          prepend ? summaryAnchor : summaryAnchor.parentNode,
+          {
+            title: "Latest ghpr CI explanation",
+            reasons: explanationReasons
+          },
+          "ci_summary",
+          {
+            instanceKey: "summary",
+            anchor: prepend ? null : summaryAnchor,
+            position: prepend ? "prepend" : "after"
+          }
+        );
+      }
+      if (!failedJobs.length) this.expandRequestedFailedSuiteV2(explanationReasons);
+
 
       const requestedCheck = new URLSearchParams(this.window.location.search).get("ghpr_check");
       if (requestedCheck && failedJobs.length) {
@@ -2822,6 +3191,10 @@
         const failedRun = [classifyRun, explainRun].find((run) => run && (run.status === "failed" || run.status === "cancelled"));
         let status = "idle";
         let confidencePercent;
+        const reason = explainRun?.status === "completed" &&
+          typeof explainRun.result?.payload?.why_it_failed === "string"
+          ? explainRun.result.payload.why_it_failed
+          : null;
         const actions = [];
         if (activeRun) {
           status = "running";
@@ -2844,7 +3217,7 @@
         mount(
           SR.SURFACE_IDS.checksJobTrailing,
           row,
-          { status, confidencePercent, actions },
+          { status, confidencePercent, reason, actions },
           "job_verdict",
           { instanceKey: subjectKey, subjectKey, position: "append" }
         );
@@ -3095,9 +3468,9 @@
     }
 
     actionScope(action) {
-      if (action.kind === "run_skill" ||
-          action.kind === "retry_run" ||
-          action.kind === "rerun_failed_jobs") {
+      // rerun_failed_jobs acts on GitHub's own check result and is gated by an
+      // explicit confirmation instead of the Skill-running scope.
+      if (action.kind === "run_skill" || action.kind === "retry_run") {
         return "skill:run";
       }
       if (action.kind === "cancel_run") return "skill:cancel";
@@ -3513,11 +3886,9 @@
         text: `${labelForVerdict(analysis.verdict)} · ${analysis.confidence}`
       });
       const cardActions = [];
-      if (this.hasScope("skill:run")) {
-        cardActions.push(button(this.document, "Rerun", () =>
-          this.invokeAction({ kind: "rerun_failed_jobs" }, true)
-        ));
-      }
+      cardActions.push(button(this.document, "Rerun", () =>
+        this.rerunFailedChecksV2(global.GhprSurfaceRenderers)
+      ));
       if (this.hasScope("tag:write")) {
         cardActions.push(button(this.document, "Mark locally as flaky", () =>
           this.invokeAction({ kind: "set_tag", tag: "flaky" })
@@ -3920,14 +4291,21 @@
       }
     }
 
-    async invokeAction(action, requiresConfirmation = false) {
+    async invokeAction(action) {
       await this.withRunGuard(
         action,
-        () => this.sendAction(action, requiresConfirmation)
+        () => this.sendAction(action)
+      );
+    }
+    async invokeConfirmedAction(action) {
+      await this.withRunGuard(
+        action,
+        () => this.sendAction(action, true)
       );
     }
 
-    async sendAction(action, requiresConfirmation = false) {
+
+    async sendAction(action, confirmed = false) {
       if (!this.page || !this.bridge.client) return;
       const requiredScope = this.actionScope(action);
       if (requiredScope && !this.hasScope(requiredScope)) {
@@ -3936,12 +4314,11 @@
         );
         return;
       }
-      if (requiresConfirmation && !this.window.confirm("Rerun failed GitHub jobs?")) return;
       try {
         const response = await this.bridge.request("POST", "/api/v1/actions", {
           action,
           page: this.page,
-          confirmed: requiresConfirmation
+          confirmed
         });
         this.openResponseURL(response);
         await this.refresh();

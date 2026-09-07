@@ -75,6 +75,21 @@ enum CILogFetcher {
     /// processes while exercising resolution/validation logic.
     typealias GHCommandRunner = @Sendable (URL, [String], String, Int, Int) async throws -> CommandResult
 
+    private static let defaultRunner: GHCommandRunner = {
+        executable,
+        arguments,
+        operation,
+        timeoutSeconds,
+        maximumOutputBytes in
+        try await run(
+            executable,
+            arguments: arguments,
+            operation: operation,
+            timeoutSeconds: timeoutSeconds,
+            maximumOutputBytes: maximumOutputBytes
+        )
+    }
+
     // MARK: - Entry point
 
     static func fetchFailedJobLogs(
@@ -83,7 +98,7 @@ enum CILogFetcher {
         now: Date = Date(),
         runner: GHCommandRunner? = nil
     ) async throws -> FailedJobLogs {
-        let effectiveRunner = runner ?? run
+        let effectiveRunner = runner ?? defaultRunner
         let gh = try resolveGHExecutable()
         try await verifyAuthentication(gh, runner: effectiveRunner)
         let allowsEscapeSequences = await apiAllowsEscapeSequences(gh, runner: effectiveRunner)
@@ -141,7 +156,7 @@ enum CILogFetcher {
                 "subject repository \(subject.repository) does not match \(repository)"
             )
         }
-        let effectiveRunner = runner ?? run
+        let effectiveRunner = runner ?? defaultRunner
         let gh = try resolveGHExecutable()
         try await verifyAuthentication(gh, runner: effectiveRunner)
         let allowsEscapeSequences = await apiAllowsEscapeSequences(gh, runner: effectiveRunner)
@@ -204,7 +219,7 @@ enum CILogFetcher {
     }
 
     static func verifyAuthentication(_ gh: URL, runner: GHCommandRunner? = nil) async throws {
-        let effectiveRunner = runner ?? run
+        let effectiveRunner = runner ?? defaultRunner
         let result = try await effectiveRunner(
             gh,
             ["auth", "token"],
@@ -222,7 +237,7 @@ enum CILogFetcher {
     /// gh does not know the flag, so probe `gh api --help` once (mirrors
     /// fetch-ci-log.sh).
     static func apiAllowsEscapeSequences(_ gh: URL, runner: GHCommandRunner? = nil) async -> Bool {
-        let effectiveRunner = runner ?? run
+        let effectiveRunner = runner ?? defaultRunner
         guard let result = try? await effectiveRunner(
             gh,
             ["api", "--help"],
@@ -249,7 +264,7 @@ enum CILogFetcher {
         prNumber: Int,
         runner: GHCommandRunner? = nil
     ) async throws -> FailedCheck {
-        let effectiveRunner = runner ?? run
+        let effectiveRunner = runner ?? defaultRunner
         struct Check: Decodable {
             let name: String
             let bucket: String
@@ -330,7 +345,7 @@ enum CILogFetcher {
         allowsEscapeSequences: Bool,
         runner: GHCommandRunner? = nil
     ) async throws -> DownloadedLog {
-        let effectiveRunner = runner ?? run
+        let effectiveRunner = runner ?? defaultRunner
         let parts = repository.split(separator: "/", maxSplits: 1).map(String.init)
         guard parts.count == 2, !parts[0].isEmpty, !parts[1].isEmpty else {
             throw CILogFetcherError.resolutionFailed(

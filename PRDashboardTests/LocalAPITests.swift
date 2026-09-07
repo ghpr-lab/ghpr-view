@@ -358,6 +358,148 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(response.error?.code, LocalAPIErrorCode.invalidRequest.rawValue)
     }
 
+    func testLocalAPIImportReviewRequiresRepositoryNumberAndReview() {
+        var didInvokeImporter = false
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .importReview, repository: "  ", number: nil),
+            snapshotProvider: { fatalError("snapshot should not be built") },
+            reviewImporter: { _, _, _ in
+                didInvokeImporter = true
+                fatalError("importer should not run for an invalid request")
+            }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.invalidRequest.rawValue)
+        XCTAssertFalse(didInvokeImporter)
+    }
+
+    func testLocalAPIImportReviewReturnsInternalErrorWhenImporterUnavailable() {
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(
+                command: .importReview,
+                repository: "owner/repo",
+                number: 7,
+                review: makeReviewImportPayload()
+            ),
+            snapshotProvider: { fatalError("snapshot should not be built") }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.internalError.rawValue)
+    }
+
+    func testLocalAPIImportReviewDispatchesToInjectedClosureAndReturnsResult() {
+        var receivedRepository: String?
+        var receivedNumber: Int?
+        var receivedReview: LocalReviewImportPayload?
+        let payload = makeReviewImportPayload()
+        let expected = LocalReviewImportResult(
+            runID: "run_mcp_abc123",
+            repository: "owner/repo",
+            number: 7,
+            headSHA: payload.headSHA,
+            findingCount: 1,
+            importedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            alreadyImported: false
+        )
+
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(
+                command: .importReview,
+                repository: "owner/repo",
+                number: 7,
+                review: payload
+            ),
+            snapshotProvider: { fatalError("snapshot should not be built") },
+            reviewImporter: { repository, number, review in
+                receivedRepository = repository
+                receivedNumber = number
+                receivedReview = review
+                return expected
+            }
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertNil(response.error)
+        XCTAssertEqual(receivedRepository, "owner/repo")
+        XCTAssertEqual(receivedNumber, 7)
+        XCTAssertEqual(receivedReview, payload)
+        XCTAssertEqual(response.reviewImport, expected)
+    }
+
+    func testLocalAPIImportReviewMapsImportErrorToInvalidRequest() {
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(
+                command: .importReview,
+                repository: "owner/repo",
+                number: 7,
+                review: makeReviewImportPayload()
+            ),
+            snapshotProvider: { fatalError("snapshot should not be built") },
+            reviewImporter: { _, _, _ in
+                throw LocalReviewImportError.invalid("head_sha is invalid.")
+            }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.invalidRequest.rawValue)
+        XCTAssertEqual(response.error?.message, "head_sha is invalid.")
+    }
+
+    func testLocalAPIReadCommandsNeverInvokeReviewImporter() {
+        let snapshot = makeTwoPRSnapshot()
+        var didInvokeImporter = false
+        let importer: (String, Int, LocalReviewImportPayload) throws -> LocalReviewImportResult = { _, _, _ in
+            didInvokeImporter = true
+            fatalError("read commands must never invoke the review importer")
+        }
+
+        _ = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .ping),
+            snapshotProvider: { snapshot },
+            reviewImporter: importer
+        )
+        _ = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .snapshot),
+            snapshotProvider: { snapshot },
+            reviewImporter: importer
+        )
+        _ = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .pr, repository: "OWNER/repo", number: 202),
+            snapshotProvider: { snapshot },
+            reviewImporter: importer
+        )
+
+        XCTAssertFalse(didInvokeImporter)
+    }
+
+    private func makeReviewImportPayload() -> LocalReviewImportPayload {
+        LocalReviewImportPayload(
+            baseSHA: String(repeating: "a", count: 40),
+            headSHA: String(repeating: "b", count: 40),
+            engine: "claude-code",
+            overviewMarkdown: "## Overview\nLooks good.",
+            findings: [
+                LocalReviewImportFinding(
+                    file: "src/index.ts",
+                    startLine: 10,
+                    endLine: 12,
+                    side: .right,
+                    title: "Missing null check",
+                    summary: "This can throw if value is null.",
+                    why: nil,
+                    suggestedFix: nil,
+                    background: nil,
+                    quotedCode: nil,
+                    severity: .warning,
+                    confidence: 0.8,
+                    category: "correctness"
+                )
+            ]
+        )
+    }
+
     func testCLIParsesPrCommandWithRepoAndNumber() throws {
         let options = try GHPRCLI.parse(
             arguments: ["pr", "--repo", "owner/repo", "--number", "42", "--json"],

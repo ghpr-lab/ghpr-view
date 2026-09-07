@@ -274,7 +274,7 @@ test("v2: selecting a failed Checks row opens exactly one CI Insight panel scope
   assert.match(panels[0].textContent, /Flaky network call/);
   assert.equal(panels[0].dataset.layout, "checks");
   assert.ok(panels[0].querySelector(".ghpr-ci-result-rail"), "Checks insight must keep the result/actions rail inline");
-  assert.ok([...panels[0].querySelectorAll("button")].some((button) => button.textContent === "Re-run failed job"));
+  assert.ok([...panels[0].querySelectorAll("button")].some((button) => button.textContent === "Re-run failed jobs"));
 
   app.stop();
   window.close();
@@ -283,7 +283,54 @@ test("v2: selecting a failed Checks row opens exactly one CI Insight panel scope
 test("v2: Failed checks opens the first failure and navigates between failures in-page", async () => {
   const pathname = "/acme/widgets/pull/42/checks?ghpr_check=first";
   const window = await createWindow("checks.html", pathname);
-  const gm = new FakeGM({ snapshot: makeSnapshot(pathname) });
+  const snapshot = makeSnapshot(pathname, {
+    runs: [
+      {
+        id: "run-explain-current",
+        skill_id: "ci.failure.explain",
+        subject: { type: "legacy_page", page: basePage(pathname) },
+        status: "completed",
+        completed_at: "2026-08-24T00:03:00Z",
+        result: {
+          payload: {
+            why_it_failed: "Unit tests could not connect to Postgres.",
+            relevant_evidence: ["connection refused"],
+            _ghpr_job: {
+              repository: "acme/widgets",
+              workflow_run_id: "1001",
+              workflow_job_id: "2001",
+              workflow_name: "unit-test"
+            }
+          }
+        }
+      },
+      jobRun({
+        skillID: "ci.failure.explain",
+        runId: 1001,
+        jobId: 2002,
+        status: "completed",
+        result: {
+          payload: {
+            why_it_failed: "Lint rejected an unused import.",
+            relevant_evidence: []
+          }
+        }
+      }),
+      jobRun({
+        skillID: "ci.failure.explain",
+        runId: 9999,
+        jobId: 9999,
+        status: "completed",
+        result: {
+          payload: {
+            why_it_failed: "An old job failed for a stale reason.",
+            relevant_evidence: []
+          }
+        }
+      })
+    ]
+  });
+  const gm = new FakeGM({ snapshot });
   const app = createGhprApp({ window, document: window.document, gm });
   await app.start();
   await settle();
@@ -292,6 +339,21 @@ test("v2: Failed checks opens the first failure and navigates between failures i
   const unitTestRow = rows.find((row) => row.dataset.checkName === "unit-test");
   const lintRow = rows.find((row) => row.dataset.checkName === "lint");
   const e2eRow = rows.find((row) => row.dataset.checkName === "e2e");
+  const summary = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.checks.summary']"
+  );
+  assert.match(summary?.textContent || "", /Unit tests could not connect to Postgres/);
+  assert.match(summary?.textContent || "", /Lint rejected an unused import/);
+  assert.doesNotMatch(summary?.textContent || "", /stale reason/);
+  assert.equal(
+    unitTestRow.querySelector(".ghpr-job-reason")?.textContent,
+    "Unit tests could not connect to Postgres."
+  );
+  assert.equal(
+    lintRow.querySelector(".ghpr-job-reason")?.textContent,
+    "Lint rejected an unused import."
+  );
+  assert.equal(e2eRow.querySelector(".ghpr-job-reason"), null);
   let panel = window.document.querySelector("[data-ghpr-surface='github.pr.checks.job.insight']");
   assert.equal(unitTestRow.nextElementSibling, panel);
   assert.match(panel.querySelector(".ghpr-item-navigator-count")?.textContent || "", /1 of 3 failed checks/);
@@ -308,6 +370,66 @@ test("v2: Failed checks opens the first failure and navigates between failures i
   assert.equal(e2eRow.nextElementSibling, panel);
   assert.match(panel.querySelector(".ghpr-item-navigator-count")?.textContent || "", /3 of 3 failed checks/);
   assert.equal(panel.querySelector("[data-action-id='next-failed-check']")?.disabled, true);
+
+  app.stop();
+  window.close();
+});
+
+test("v2: Checks title expands the matching suite and shows its reason beside the job", async () => {
+  const pathname = "/acme/widgets/pull/42/checks?ghpr_check=first";
+  const window = await createWindow("checks.html", pathname);
+  const unitTestRow = window.document.querySelector("[data-check-name='unit-test']");
+  for (const row of window.document.querySelectorAll("[data-testid='check-run-row']")) {
+    row.remove();
+  }
+  const toggle = window.document.createElement("button");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.textContent = "unit-test";
+  window.document.querySelector("#checks_tab .Box-header").after(toggle);
+  toggle.addEventListener("click", () => {
+    toggle.setAttribute("aria-expanded", "true");
+    toggle.after(unitTestRow);
+  });
+  const snapshot = makeSnapshot(pathname, {
+    runs: [{
+      id: "run-explain-page",
+      skill_id: "ci.failure.explain",
+      subject: { type: "legacy_page", page: basePage(pathname) },
+      status: "completed",
+      completed_at: "2026-08-24T00:03:00Z",
+      result: {
+        payload: {
+          why_it_failed: "The latest failed job timed out waiting for its database.",
+          relevant_evidence: ["readiness probe exceeded 60 seconds"],
+          _ghpr_job: {
+            repository: "acme/widgets",
+            workflow_run_id: "1001",
+            workflow_job_id: "2001",
+            workflow_name: "unit-test"
+          }
+        }
+      }
+    }]
+  });
+  const app = createGhprApp({
+    window,
+    document: window.document,
+    gm: new FakeGM({ snapshot })
+  });
+  await app.start();
+  await settle();
+  await new Promise((resolve) => window.setTimeout(resolve, 300));
+  await settle();
+
+  const summary = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.checks.summary']"
+  );
+  assert.match(summary?.textContent || "", /timed out waiting for its database/);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(
+    unitTestRow.querySelector(".ghpr-job-reason")?.textContent,
+    "The latest failed job timed out waiting for its database."
+  );
 
   app.stop();
   window.close();
@@ -377,6 +499,16 @@ test("v2: a Checks run resolves the exact workflow job before invoking a Skill",
   [...insight.querySelectorAll("button")]
     .find((button) => button.textContent === "Explain CI Failure")
     .click();
+  const dialog = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.review-launch-dialog']"
+  );
+  assert.ok(dialog, "workflow-job explanation must reuse the coding agent selector");
+  assert.equal(
+    gm.requests.some((request) => new URL(request.url).pathname === "/api/v1/subjects/resolve"),
+    false,
+    "the exact workflow job must not resolve before runtime confirmation"
+  );
+  dialog.querySelector("[data-action-id='start-explain-failure']").click();
   await settle();
 
   const resolveRequest = gm.requests.find((request) =>
@@ -391,14 +523,60 @@ test("v2: a Checks run resolves the exact workflow job before invoking a Skill",
   assert.equal(action.subject.workflow_job_id, 2001);
   assert.equal(action.subject.head_sha, "a".repeat(40));
 
+  [...insight.querySelectorAll("button")]
+    .find((button) => button.textContent === "Explain CI Failure")
+    .click();
+  const retryDialog = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.review-launch-dialog']"
+  );
+  assert.ok(retryDialog, "a completed request must release the subject run guard");
+  retryDialog.querySelector("[data-action-id='start-explain-failure']").click();
+  await settle();
+  assert.equal(
+    gm.requests.filter((request) =>
+      new URL(request.url).pathname === "/api/v1/subjects/resolve"
+    ).length,
+    2,
+    "the exact workflow job can be explained again without reloading the page"
+  );
+
   app.stop();
   window.close();
 });
 
-test("v2: Review PR resolves and starts the exact pull request revision", async () => {
+test("v2: Review PR confirms runtime and model before starting the exact revision", async () => {
   const pathname = "/acme/widgets/pull/42";
   const window = await createWindow("conversation.html", pathname);
-  const gm = new FakeGM({ snapshot: makeSnapshot(pathname) });
+  const snapshot = makeSnapshot(pathname, {
+    skills: [{
+      id: "pr.review",
+      display_name: "Review PR",
+      agents: ["omp", "claude_code", "codex"],
+      default_agent: "omp",
+      is_runnable: true
+    }],
+    agent_runtime: [{
+      agent: "codex",
+      preference: { model: "gpt-5.6", reasoning_effort: "high" }
+    }],
+    agent_catalogs: [{
+      agent: "codex",
+      models: [{
+        slug: "gpt-5.6",
+        display_name: "GPT-5.6",
+        default_effort: "medium",
+        reasoning_efforts: [
+          { effort: "medium", detail: "Balanced" },
+          { effort: "high", detail: "Thorough" }
+        ]
+      }],
+      reasoning_efforts: [
+        { effort: "medium", detail: "Balanced" },
+        { effort: "high", detail: "Thorough" }
+      ]
+    }]
+  });
+  const gm = new FakeGM({ snapshot });
   const app = createGhprApp({ window, document: window.document, gm });
   await app.start();
   await settle();
@@ -414,7 +592,6 @@ test("v2: Review PR resolves and starts the exact pull request revision", async 
     "Conversation must not report the separate Checks-tab surface as missing"
   );
 
-
   const summary = window.document.querySelector(
     "[data-ghpr-surface='github.pr.conversation.review-summary']"
   );
@@ -422,6 +599,41 @@ test("v2: Review PR resolves and starts the exact pull request revision", async 
     .find((button) => button.textContent === "Review PR");
   assert.ok(reviewButton, "Conversation must expose Review PR before the first review");
   reviewButton.click();
+
+  const dialog = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.review-launch-dialog']"
+  );
+  assert.ok(dialog, "Review PR must open a confirmation dialog");
+  assert.match(dialog.textContent, /Run review with ghpr/);
+  assert.match(dialog.textContent, /Import an existing review/);
+  assert.match(dialog.textContent, /aaaaaaa/);
+  assert.match(dialog.textContent, /bbbbbbb/);
+
+  const copyPrompt = dialog.querySelector("[data-action-id='copy-import-prompt']");
+  copyPrompt.click();
+  await settle();
+  assert.match(gm.clipboard[0], /ghpr MCP tool `import_review`/);
+  assert.match(gm.clipboard[0], new RegExp(`base_sha: ${"a".repeat(40)}`));
+  assert.match(gm.clipboard[0], new RegExp(`head_sha: ${"b".repeat(40)}`));
+  assert.match(gm.clipboard[0], /Do not submit a GitHub review or comment/);
+
+  const runtime = dialog.querySelector("#ghpr-review-runtime");
+  assert.equal(
+    dialog.querySelector("#ghpr-review-model").tagName,
+    "INPUT",
+    "a runtime with no catalog must stay free-form"
+  );
+  runtime.value = "codex";
+  runtime.dispatchEvent(new window.Event("change"));
+  const codexModel = dialog.querySelector("#ghpr-review-model");
+  assert.equal(codexModel.tagName, "SELECT", "a catalog-backed runtime must offer model selection");
+  assert.deepEqual(
+    [...codexModel.options].map((option) => option.value),
+    ["", "gpt-5.6"]
+  );
+  assert.equal(codexModel.value, "gpt-5.6");
+  assert.equal(dialog.querySelector("#ghpr-review-reasoning").value, "high");
+  dialog.querySelector("[data-action-id='start-review']").click();
   await settle();
 
   const actionRequest = gm.requests.find((request) =>
@@ -429,9 +641,17 @@ test("v2: Review PR resolves and starts the exact pull request revision", async 
   );
   const action = JSON.parse(actionRequest.data).action;
   assert.equal(action.skill_id, "pr.review");
+  assert.equal(action.agent, "codex");
+  assert.equal(action.model, "gpt-5.6");
+  assert.equal(action.reasoning_effort, "high");
   assert.equal(action.subject.type, "pull_request_revision");
   assert.equal(action.subject.base_sha, "b".repeat(40));
   assert.equal(action.subject.head_sha, "a".repeat(40));
+  assert.equal(
+    window.document.querySelector("[data-ghpr-surface='github.pr.review-launch-dialog']"),
+    null,
+    "The dialog must close after the run is accepted"
+  );
 
   app.stop();
   window.close();
@@ -488,6 +708,9 @@ test("v2: retrying an already-reviewed latest revision with no findings requires
   assert.ok(reviewButton, "a completed review must still expose the retry action");
 
   reviewButton.click();
+  window.document
+    .querySelector("[data-ghpr-surface='github.pr.review-launch-dialog'] [data-action-id='start-review']")
+    .click();
   await settle();
   assert.deepEqual(confirmations, [
     "Revision aaaaaaa has already been reviewed. Review it again?"
@@ -500,6 +723,9 @@ test("v2: retrying an already-reviewed latest revision with no findings requires
 
   confirmRetry = true;
   reviewButton.click();
+  window.document
+    .querySelector("[data-ghpr-surface='github.pr.review-launch-dialog'] [data-action-id='start-review']")
+    .click();
   await settle();
   assert.equal(
     gm.requests.filter((request) => new URL(request.url).pathname === "/api/v1/actions").length,
@@ -700,6 +926,32 @@ test("v2: compact operation card keeps primary PR actions available without rest
     is_built_in: false,
     has_browser_companion: false,
     is_runnable: true
+  }, {
+    id: "ci.failure.explain",
+    display_name: "Explain CI Failure",
+    agents: ["codex"],
+    default_agent: "codex",
+    is_runnable: true
+  }];
+  snapshot.agent_runtime = [{
+    agent: "codex",
+    preference: { model: "gpt-5.6", reasoning_effort: "high" }
+  }];
+  snapshot.agent_catalogs = [{
+    agent: "codex",
+    models: [{
+      slug: "gpt-5.6",
+      display_name: "GPT-5.6",
+      default_effort: "medium",
+      reasoning_efforts: [
+        { effort: "medium", detail: "Balanced" },
+        { effort: "high", detail: "Thorough" }
+      ]
+    }],
+    reasoning_efforts: [
+      { effort: "medium", detail: "Balanced" },
+      { effort: "high", detail: "Thorough" }
+    ]
   }];
   snapshot.pull_request = {
     ...snapshot.pull_request,
@@ -708,7 +960,45 @@ test("v2: compact operation card keeps primary PR actions available without rest
     check_pending_count: 2,
     ci_is_running: true
   };
+  snapshot.runs = [
+    ...(snapshot.runs || []),
+    {
+      id: "run-explain-old",
+      skill_id: "ci.failure.explain",
+      subject: { type: "legacy_page", page: snapshot.page },
+      status: "completed",
+      completed_at: "2026-08-24T00:01:00Z",
+      result: {
+        payload: {
+          why_it_failed: "An obsolete packaging failure.",
+          relevant_evidence: []
+        }
+      }
+    },
+    {
+      id: "run-explain-current",
+      skill_id: "ci.failure.explain",
+      subject: { type: "legacy_page", page: snapshot.page },
+      status: "completed",
+      completed_at: "2026-08-24T00:03:00Z",
+      result: {
+        payload: {
+          why_it_failed: "The lint step rejected an invalid import.",
+          relevant_evidence: ["eslint exited with code 1"],
+          _ghpr_job: {
+            repository: "acme/widgets",
+            workflow_run_id: "1001",
+            workflow_job_id: "2002",
+            workflow_name: "lint"
+          }
+        }
+      }
+    }
+  ];
   const gm = new FakeGM({ snapshot });
+  window.confirm = () => {
+    throw new Error("Failed-check actions must not use browser confirm dialogs.");
+  };
   const app = createGhprApp({ window, document: window.document, gm });
   await app.start();
   await settle();
@@ -728,8 +1018,16 @@ test("v2: compact operation card keeps primary PR actions available without rest
   assert.equal(actions.get("review-pr")?.textContent, "Review latest");
   assert.equal(actions.get("view-findings")?.textContent, "View findings");
   assert.equal(actions.get("view-failed-checks")?.textContent, "Failed checks (1)");
-  assert.equal(actions.get("explain-ci-failure")?.textContent, "Explain CI Failure");
-  assert.equal(actions.get("rerun-failed-ci")?.textContent, "Rerun failed CI");
+  assert.match(
+    actions.get("view-failed-checks")?.title || "",
+    /• lint: The lint step rejected an invalid import\.\n  • eslint exited with code 1/
+  );
+  assert.doesNotMatch(
+    actions.get("view-failed-checks")?.title || "",
+    /obsolete packaging failure/
+  );
+  assert.equal(actions.has("explain-ci-failure"), false, "failed-check actions belong under the check result");
+  assert.equal(actions.has("rerun-failed-ci"), false, "failed-check actions belong under the check result");
   assert.equal(actions.has("open-app"), false, "the compact card must not keep an Open ghpr-view action");
   assert.equal(cardHost.querySelector(".ghpr-operation-skill-menu > summary")?.textContent, "Run Skill");
   assert.equal(
@@ -746,33 +1044,76 @@ test("v2: compact operation card keeps primary PR actions available without rest
       .some((body) => body.action?.kind === "open_app"),
     false
   );
-  actions.get("explain-ci-failure").click();
-  const explaining = cardHost.querySelector("[data-action-id='explain-ci-failure']");
-  assert.equal(explaining?.textContent, "Explaining…");
-  assert.equal(explaining?.disabled, true);
+  const reviewSummary = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.conversation.review-summary']"
+  );
+  const explain = reviewSummary.querySelector("[data-action-id='explain-ci-failure']");
+  const rerun = reviewSummary.querySelector("[data-action-id='rerun-failed-ci']");
+  assert.equal(explain?.textContent, "Explain again");
+  assert.equal(rerun?.textContent, "Re-run 1 failed job");
+  const checksCopy = reviewSummary.querySelector(".ghpr-review-summary-checks-copy");
+  assert.equal(checksCopy?.getAttribute("tabindex"), "0");
+  assert.match(
+    checksCopy?.dataset.hint || "",
+    /• lint: The lint step rejected an invalid import\.\n  • eslint exited with code 1/
+  );
+  assert.doesNotMatch(checksCopy?.dataset.hint || "", /obsolete packaging failure/);
+  explain.click();
+  assert.equal(
+    gm.requests.some((request) =>
+      new URL(request.url).pathname === "/api/v1/actions" &&
+      JSON.parse(request.data).action?.skill_id === "ci.failure.explain"
+    ),
+    false,
+    "opening the runtime picker must not start the explanation"
+  );
+  const explainDialog = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.review-launch-dialog']"
+  );
+  assert.match(explainDialog.textContent, /Explain failed checks/);
+  assert.equal(explainDialog.querySelector("#ghpr-review-runtime").value, "codex");
+  assert.equal(explainDialog.querySelector("#ghpr-review-model").value, "gpt-5.6");
+  assert.equal(explainDialog.querySelector("#ghpr-review-reasoning").value, "high");
+  assert.equal(
+    explainDialog.querySelector("[data-action-id='copy-import-prompt']"),
+    null,
+    "failure explanation does not expose the external review import workflow"
+  );
+  explainDialog.querySelector("[data-action-id='start-explain-failure']").click();
   await settle();
   const explainRequest = gm.requests
     .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
     .map((request) => JSON.parse(request.data))
     .find((body) => body.action?.skill_id === "ci.failure.explain");
   assert.equal(explainRequest?.action?.kind, "run_skill");
+  assert.equal(explainRequest?.action?.agent, "codex");
+  assert.equal(explainRequest?.action?.model, "gpt-5.6");
+  assert.equal(explainRequest?.action?.reasoning_effort, "high");
   assert.equal(explainRequest?.page?.key, snapshot.page.key);
-  const confirmations = [];
-  window.confirm = (message) => {
-    confirmations.push(message);
-    return true;
-  };
-  cardHost.querySelector("[data-action-id='rerun-failed-ci']").click();
-  const rerunning = cardHost.querySelector("[data-action-id='rerun-failed-ci']");
-  assert.equal(rerunning?.textContent, "Rerunning…");
-  assert.equal(rerunning?.disabled, true);
+  window.document
+    .querySelector("[data-action-id='rerun-failed-ci']")
+    .click();
+  const rerunDialog = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.review-launch-dialog']"
+  );
+  assert.match(rerunDialog.textContent, /Re-run failed jobs/);
+  assert.equal(
+    rerunDialog.querySelector("[data-action-id='explain-before-rerun']")?.textContent,
+    "Explain CI Failure"
+  );
+  assert.equal(
+    rerunDialog.querySelector("[data-action-id='rerun-anyway']")?.textContent,
+    "Re-run anyway"
+  );
+  rerunDialog.querySelector("[data-action-id='rerun-anyway']").click();
   await settle();
-  const rerunRequest = gm.requests
-    .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
-    .map((request) => JSON.parse(request.data))
-    .find((body) => body.action?.kind === "rerun_failed_jobs");
-  assert.equal(rerunRequest?.page?.key, snapshot.page.key);
-  assert.deepEqual(confirmations, ["Rerun failed GitHub jobs?"]);
+  assert.equal(
+    gm.requests
+      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+      .map((request) => JSON.parse(request.data))
+      .some((body) => body.action?.kind === "rerun_failed_jobs"),
+    true
+  );
 
   actions.get("view-failed-checks").click();
   assert.equal(new URLSearchParams(window.location.search).get("ghpr_check"), "first");
@@ -786,6 +1127,103 @@ test("v2: compact operation card keeps primary PR actions available without rest
   assert.equal(customSkillRequest?.action?.subject?.type, "pull_request_revision");
   assert.equal(customSkillRequest?.action?.subject?.head_sha, "a".repeat(40));
   assert.equal(window.location.pathname, "/acme/widgets/pull/42/checks");
+
+  app.stop();
+  window.close();
+});
+
+test("v2: the review summary card carries the failed-CI rerun above its own header", async () => {
+  const pathname = "/acme/widgets/pull/42";
+  const window = await createWindow("conversation.html", pathname);
+  const snapshot = makeSnapshot(pathname, {
+    pull_request: {
+      id: 42,
+      repository: "acme/widgets",
+      number: 42,
+      title: "Fixture PR",
+      ci_status: "FAILURE",
+      check_failure_count: 2
+    }
+  });
+  window.confirm = () => {
+    throw new Error("The rerun modal must replace browser confirm dialogs.");
+  };
+  // The rerun reports GitHub's own check result, so it must not depend on the
+  // Skill-running scope the ghpr review actions need.
+  const gm = new FakeGM({
+    snapshot,
+    clientScopes: CLIENT.requested_scopes.filter((scope) => scope !== "skill:run")
+  });
+  const app = createGhprApp({ window, document: window.document, gm });
+  await app.start();
+  await settle();
+
+  const card = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.conversation.review-summary']"
+  );
+  const checksRow = card.querySelector(".ghpr-review-summary-checks");
+  assert.ok(checksRow, "a failing PR must expose its rerun inside the review card");
+  assert.equal(
+    checksRow,
+    card.firstElementChild,
+    "the rerun row leads the card, above the ghpr identity"
+  );
+  assert.equal(
+    checksRow.nextElementSibling?.className,
+    "ghpr-review-summary-identity",
+    "a divider row separates the rerun from the review summary"
+  );
+  assert.match(checksRow.textContent, /2 failed checks/);
+  const rerun = checksRow.querySelector("[data-action-id='rerun-failed-ci']");
+  assert.equal(rerun.textContent, "Re-run 2 failed jobs");
+  assert.equal(
+    rerun.className,
+    "ghpr-action-button ghpr-review-summary-check-action ghpr-review-summary-rerun",
+    "the rerun uses the compact review-card action treatment"
+  );
+  assert.equal(
+    window.document.querySelector("[data-ghpr-surface='github.pr.conversation.checks.actions']"),
+    null,
+    "the rerun no longer mounts as its own surface"
+  );
+
+  rerun.click();
+  await settle();
+  const rerunDialog = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.review-launch-dialog']"
+  );
+  assert.ok(rerunDialog);
+  assert.equal(
+    rerunDialog.querySelector("[data-action-id='explain-before-rerun']"),
+    null,
+    "Explain is unavailable without skill:run"
+  );
+  rerunDialog.querySelector("[data-action-id='rerun-anyway']").click();
+  await settle();
+  const rerunRequest = gm.requests
+    .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+    .map((request) => JSON.parse(request.data))
+    .find((body) => body.action?.kind === "rerun_failed_jobs");
+  assert.equal(rerunRequest?.page?.key, snapshot.page.key);
+  assert.equal(rerunRequest?.confirmed, true);
+
+  app.stop();
+  window.close();
+});
+
+test("v2: a passing PR keeps the review summary card free of a rerun row", async () => {
+  const pathname = "/acme/widgets/pull/42";
+  const window = await createWindow("conversation.html", pathname);
+  const gm = new FakeGM({ snapshot: makeSnapshot(pathname) });
+  const app = createGhprApp({ window, document: window.document, gm });
+  await app.start();
+  await settle();
+
+  const card = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.conversation.review-summary']"
+  );
+  assert.ok(card);
+  assert.equal(card.querySelector(".ghpr-review-summary-checks"), null);
 
   app.stop();
   window.close();
@@ -848,15 +1286,18 @@ test("v2: failed-check actions reflect backend run and permission state", async 
   await settle();
 
   const card = window.document.querySelector("#ghpr-operation-card");
+  const explainAction = () => window.document.querySelector(
+    "[data-ghpr-surface='github.pr.conversation.review-summary'] [data-action-id='explain-ci-failure']"
+  );
   assert.equal(
     card.querySelector("[data-action-id='view-failed-checks']")?.textContent,
     "Failed checks (2)"
   );
   assert.equal(
-    card.querySelector("[data-action-id='explain-ci-failure']")?.textContent,
+    explainAction()?.textContent,
     "Explaining…"
   );
-  assert.equal(card.querySelector("[data-action-id='explain-ci-failure']")?.disabled, true);
+  assert.equal(explainAction()?.disabled, true);
 
   gm.snapshot = {
     ...snapshot,
@@ -870,7 +1311,7 @@ test("v2: failed-check actions reflect backend run and permission state", async 
   };
   await app.refresh();
   assert.equal(
-    card.querySelector("[data-action-id='explain-ci-failure']")?.textContent,
+    explainAction()?.textContent,
     "Explain again"
   );
 
@@ -886,7 +1327,7 @@ test("v2: failed-check actions reflect backend run and permission state", async 
   };
   await app.refresh();
   assert.equal(
-    card.querySelector("[data-action-id='explain-ci-failure']")?.textContent,
+    explainAction()?.textContent,
     "Retry explain"
   );
 
@@ -905,8 +1346,11 @@ test("v2: failed-check actions reflect backend run and permission state", async 
   await restrictedApp.start();
   await settle();
   const restrictedCard = restrictedWindow.document.querySelector("#ghpr-operation-card");
-  assert.equal(restrictedCard.querySelector("[data-action-id='explain-ci-failure']"), null);
-  assert.equal(restrictedCard.querySelector("[data-action-id='rerun-failed-ci']"), null);
+  const restrictedSummary = restrictedWindow.document.querySelector(
+    "[data-ghpr-surface='github.pr.conversation.review-summary']"
+  );
+  assert.equal(restrictedSummary.querySelector("[data-action-id='explain-ci-failure']"), null);
+  assert.ok(restrictedSummary.querySelector("[data-action-id='rerun-failed-ci']"));
   assert.equal(
     restrictedCard.querySelector("[data-action-id='view-failed-checks']")?.textContent,
     "Failed checks (2)"
@@ -1163,6 +1607,9 @@ test("v2: Files changed (unified) marks the exact added line and not the deleted
   const reviewButton = operationCard.querySelector("[data-action-id='review-pr']");
   assert.equal(reviewButton?.textContent, "Review latest");
   reviewButton.click();
+  window.document
+    .querySelector("[data-ghpr-surface='github.pr.review-launch-dialog'] [data-action-id='start-review']")
+    .click();
   await settle();
   const reviewAction = gm.requests
     .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
@@ -1234,6 +1681,16 @@ test("v2: GitHub changes route opens the first finding and navigates between fin
     summary: "Preserve the current cache key",
     fingerprint: "finding-fingerprint-2"
   }));
+  const commentButton = window.document.createElement("button");
+  commentButton.setAttribute("aria-expanded", "false");
+  commentButton.setAttribute("aria-label", "Add comment on file");
+  let commentPopupCount = 0;
+  commentButton.addEventListener("click", () => {
+    commentPopupCount += 1;
+  });
+  window.document
+    .querySelector("#diff-reactfixture [data-diff-header-wrapper]")
+    .append(commentButton);
   const gm = new FakeGM({ snapshot });
   const app = createGhprApp({ window, document: window.document, gm });
   t.after(() => {
@@ -1277,7 +1734,11 @@ test("v2: GitHub changes route opens the first finding and navigates between fin
     "#src\\/index\\.ts [data-ghpr-file-tree-badge]"
   );
   assert.equal(fileTreeBadge?.textContent, "2");
-  assert.equal(fileTreeBadge?.getAttribute("aria-label"), "2 ghpr comments");
+  assert.equal(fileTreeBadge?.tagName, "BUTTON");
+  assert.equal(
+    fileTreeBadge?.getAttribute("aria-label"),
+    "Open first of 2 ghpr findings in src/index.ts"
+  );
   assert.equal(
     window.document.querySelector("#src\\/index\\.ts [data-testid='native-comments-count']")?.textContent,
     "3"
@@ -1307,17 +1768,23 @@ test("v2: GitHub changes route opens the first finding and navigates between fin
   assert.match(panel?.querySelector(".ghpr-item-navigator-count")?.textContent || "", /1 of 2 findings/);
   panel.querySelector("[data-action-id='next-finding']").click();
   await settle();
+  assert.equal(commentPopupCount, 0, "finding navigation must not activate the file comment button");
 
   panel = window.document.querySelector("[data-testid='ghpr-inline-finding-panel']");
   assert.match(panel?.textContent || "", /Preserve the current cache key/);
   assert.match(panel?.querySelector(".ghpr-item-navigator-count")?.textContent || "", /2 of 2 findings/);
   assert.equal(new URLSearchParams(window.location.search).get("ghpr_finding"), "finding_2");
   assert.equal(panel.querySelector("[data-action-id='next-finding']")?.disabled, true);
-
-  panel.querySelector("[data-action-id='previous-finding']").click();
+  fileTreeBadge.click();
   await settle();
   panel = window.document.querySelector("[data-testid='ghpr-inline-finding-panel']");
-  assert.match(panel?.querySelector(".ghpr-item-navigator-count")?.textContent || "", /1 of 2 findings/);
+  assert.match(panel?.textContent || "", /Prefer next\(\) over legacy\(\)/);
+  assert.equal(new URLSearchParams(window.location.search).get("ghpr_finding"), "finding_1");
+
+  assert.match(
+    panel?.querySelector(".ghpr-item-navigator-count")?.textContent || "",
+    /1 of 2 findings/
+  );
 
 });
 
@@ -1462,6 +1929,9 @@ test("v2: a finding for a file outside this diff still falls back to the drawer"
     .find((button) => button.textContent === "Review latest revision");
   assert.ok(reviewLatest);
   reviewLatest.click();
+  window.document
+    .querySelector("[data-ghpr-surface='github.pr.review-launch-dialog'] [data-action-id='start-review']")
+    .click();
   await settle();
   const action = gm.requests
     .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
@@ -1558,10 +2028,28 @@ test("v2: the reviewed revision's Files changed page anchors outdated findings i
 });
 
 test("v1: with github_surface_v2 false, legacy #ghpr-github-root and header entry remain", async () => {
-  const pathname = "/acme/widgets/pull/42/checks";
-  const window = await createWindow("checks.html", pathname);
-  const snapshot = makeSnapshot(pathname, { github_surface_v2: false });
-  const gm = new FakeGM({ snapshot, discoveryV2: false });
+  const pathname = "/acme/widgets/pull/42";
+  const window = await createWindow("conversation.html", pathname);
+  const snapshot = makeSnapshot(pathname, {
+    github_surface_v2: false,
+    analyses: [{
+      id: "analysis-1",
+      verdict: "likely_flaky",
+      confidence: "high",
+      summary: "The failed job matches prior flaky runs.",
+      history_matches: [],
+      history_checked: 12,
+      relatedness_score: 0.1
+    }]
+  });
+  window.confirm = () => {
+    throw new Error("Legacy failed-check actions must not use browser confirm dialogs.");
+  };
+  const gm = new FakeGM({
+    snapshot,
+    discoveryV2: false,
+    clientScopes: CLIENT.requested_scopes.filter((scope) => scope !== "skill:run")
+  });
   const app = createGhprApp({ window, document: window.document, gm });
   await app.start();
   await settle();
@@ -1569,6 +2057,27 @@ test("v1: with github_surface_v2 false, legacy #ghpr-github-root and header entr
   assert.ok(window.document.getElementById("ghpr-github-root"), "v1 floating/sidebar card must still render");
   assert.ok(window.document.getElementById("ghpr-header-entry"), "v1 header entry must still render");
   assert.equal(window.document.querySelector("[data-ghpr-surface]"), null, "no v2 surfaces should mount when the flag is false");
+
+  const rerun = [...window.document.querySelectorAll("button")]
+    .find((button) => button.textContent === "Rerun");
+  assert.ok(rerun, "legacy rerun must not require the unrelated skill:run scope");
+  rerun.click();
+  const rerunDialog = window.document.querySelector(
+    "[data-ghpr-surface='github.pr.review-launch-dialog']"
+  );
+  assert.ok(rerunDialog, "legacy rerun must use the ghpr modal");
+  assert.equal(
+    rerunDialog.querySelector("[data-action-id='explain-before-rerun']"),
+    null,
+    "legacy rerun hides Explain without skill:run"
+  );
+  rerunDialog.querySelector("[data-action-id='rerun-anyway']").click();
+  await settle();
+  const rerunRequest = gm.requests
+    .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+    .map((request) => JSON.parse(request.data))
+    .find((body) => body.action?.kind === "rerun_failed_jobs");
+  assert.equal(rerunRequest?.confirmed, true);
 
   app.stop();
   window.close();

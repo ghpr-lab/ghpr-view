@@ -37,6 +37,8 @@ final class ExtensionPlatformController: ObservableObject {
     private let menuTracker: MenuTracker
     private let subjectResolver: GitHubSubjectResolver
     private var revisionUpdateBuffer = MenuTrackingUpdateBuffer<UInt64>()
+    private var didWarmAgentCapabilityCatalogs = false
+    private let agentCapabilityProbe: (SkillAgent) async throws -> AgentCapabilityCatalog
 
     init(
         snapshotProvider: @escaping BrowserBridgeRouter.SnapshotProvider,
@@ -49,7 +51,10 @@ final class ExtensionPlatformController: ObservableObject {
         installedSkillsRootURL: URL = SkillPackageManager.defaultInstalledSkillsURL(),
         bundledSkillsRootURL: URL? = nil,
         menuTracker: MenuTracker = .shared,
-        subjectResolver: GitHubSubjectResolver = GitHubSubjectResolver()
+        subjectResolver: GitHubSubjectResolver = GitHubSubjectResolver(),
+        agentCapabilityProbe: @escaping (SkillAgent) async throws -> AgentCapabilityCatalog = {
+            try await AgentCapabilityProbe.catalog(for: $0)
+        }
     ) {
         let store = ExtensionPlatformStore(storageURL: storageURL)
         let runtime = SkillRuntime(
@@ -70,6 +75,7 @@ final class ExtensionPlatformController: ObservableObject {
         self.snapshotProvider = snapshotProvider
         self.menuTracker = menuTracker
         self.subjectResolver = subjectResolver
+        self.agentCapabilityProbe = agentCapabilityProbe
         self.store = store
         self.runtime = runtime
         self.router = router
@@ -149,6 +155,28 @@ final class ExtensionPlatformController: ObservableObject {
 
     func start() {
         server.start()
+        Task { [weak self] in
+            await self?.warmAgentCapabilityCatalogs()
+        }
+    }
+
+    /// Probe-capable agents only publish their model catalog after their CLI has
+    /// been asked for it. The browser review dialog reads the cached catalogs, so
+    /// warm them once per launch instead of shelling out inside the polled
+    /// `/api/v1/page` handler.
+    func warmAgentCapabilityCatalogs() async {
+        guard !didWarmAgentCapabilityCatalogs else { return }
+        didWarmAgentCapabilityCatalogs = true
+        for agent in SkillAgent.allCases where AgentCapabilityProbe.probeArguments(for: agent) != nil {
+            guard store.agentCapabilityCatalog(for: agent) == nil else { continue }
+            do {
+                _ = try await loadAgentCapabilityCatalog(for: agent, forceRefresh: false)
+            } catch {
+                extensionPlatformLogger.info(
+                    "Agent capability catalog unavailable for \(agent.rawValue, privacy: .public): \(error.localizedDescription, privacy: .public)"
+                )
+            }
+        }
     }
 
     func stop() {
@@ -194,7 +222,7 @@ final class ExtensionPlatformController: ObservableObject {
         if !forceRefresh, let cached = store.agentCapabilityCatalog(for: agent) {
             return cached
         }
-        let catalog = try await AgentCapabilityProbe.catalog(for: agent)
+        let catalog = try await agentCapabilityProbe(agent)
         store.save(agentCapabilityCatalog: catalog)
         return catalog
     }
@@ -286,6 +314,20 @@ final class ExtensionPlatformController: ObservableObject {
             prNumber: number
         )
         return try runSkill(id: id, subject: .pullRequestRevision(revision))
+    }
+
+    func importReview(
+        repository: String,
+        number: Int,
+        payload: LocalReviewImportPayload,
+        now: Date = Date()
+    ) throws -> LocalReviewImportResult {
+        try runtime.importReview(
+            repository: repository,
+            number: number,
+            payload: payload,
+            now: now
+        )
     }
 
     func latestAnalysis(repository: String, number: Int) -> CIAnalysis? {

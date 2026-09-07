@@ -281,14 +281,20 @@ test("Completed latest review asks before running again", async ({ page }) => {
   const reviewButton = page.getByRole("button", { name: "Review latest" }).first();
   await expect(reviewButton).toBeVisible();
 
+  await reviewButton.click();
+  const dialog = page.locator("[data-ghpr-surface='github.pr.review-launch-dialog']");
+  await expect(dialog).toBeVisible();
+  const startReview = dialog.locator("[data-action-id='start-review']");
+
   const dismissDialogPromise = page.waitForEvent("dialog");
-  const dismissClickPromise = reviewButton.click();
+  const dismissClickPromise = startReview.click();
   const dismissDialog = await dismissDialogPromise;
   expect(dismissDialog.message()).toBe(
     "Revision bbbbbbb has already been reviewed. Review it again?"
   );
   await dismissDialog.dismiss();
   await dismissClickPromise;
+  await expect(startReview).toBeEnabled();
   expect(await page.evaluate(() =>
     window.__ghprFixtureGM.requests.filter((request) =>
       new URL(request.url).pathname === "/api/v1/actions"
@@ -296,7 +302,7 @@ test("Completed latest review asks before running again", async ({ page }) => {
   )).toBe(0);
 
   const acceptDialogPromise = page.waitForEvent("dialog");
-  const acceptClickPromise = reviewButton.click();
+  const acceptClickPromise = startReview.click();
   const acceptDialog = await acceptDialogPromise;
   await acceptDialog.accept();
   await acceptClickPromise;
@@ -433,6 +439,12 @@ test("Checks keeps independent verdicts and expands one inline CI Insight", asyn
   await expect(rows.filter({ hasText: "lint" })).toContainText("Likely related · 91%");
   await expect(rows.filter({ hasText: "build" }).locator("[data-ghpr-surface]")).toHaveCount(0);
   await expect(rows.filter({ hasText: "e2e" })).toContainText("Investigating…");
+  await expect(
+    page.locator("[data-ghpr-surface='github.pr.checks.summary']")
+  ).toContainText("A timeout occurred while waiting for the database");
+  await expect(rows.filter({ hasText: "unit-test" })).toContainText(
+    "A timeout occurred while waiting for the database to become ready."
+  );
   await expect(page.locator("#checks_tab")).toHaveScreenshot("checks-row-verdict-light.png", {
     animations: "disabled"
   });
@@ -447,10 +459,22 @@ test("Checks keeps independent verdicts and expands one inline CI Insight", asyn
   await expect(insight).toHaveCount(1);
   await expect(insight).toContainText("A timeout occurred while waiting for the database");
   await expect(insight).toContainText("Failed 2/12 runs (17%) in the last 30 days.");
-  await expect(insight.getByRole("button", { name: "Re-run failed job" })).toBeVisible();
+  const rerunFailedJobs = insight.getByRole("button", { name: "Re-run failed jobs" });
+  await expect(rerunFailedJobs).toBeVisible();
   await expect(insight).toHaveScreenshot("checks-inline-insight.png", {
     animations: "disabled"
   });
+  await rerunFailedJobs.click();
+  const rerunDialog = page.getByRole("dialog", { name: "Re-run failed jobs" });
+  await expect(rerunDialog.getByRole("button", { name: "Explain CI Failure" })).toBeVisible();
+  await expect(rerunDialog.getByRole("button", { name: "Re-run anyway" })).toBeVisible();
+  await rerunDialog.getByRole("button", { name: "Re-run anyway" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__ghprFixtureGM.requests
+      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+      .map((request) => JSON.parse(request.data))
+      .some((body) => body.action?.kind === "rerun_failed_jobs")
+  )).toBe(true);
 });
 
 test("Failed checks opens the first failed row and navigates only between failures", async ({ page }) => {
@@ -478,7 +502,7 @@ test("Failed checks opens the first failed row and navigates only between failur
   await expect(insight.getByRole("button", { name: "Next" })).toBeDisabled();
 });
 
-test("PR operation card reruns failed CI only when failed checks exist", async ({ page }) => {
+test("Review Summary card carries the failed-CI rerun instead of the operation card", async ({ page }) => {
   const pathname = "/acme/widgets/pull/42";
   const pageSnapshot = snapshot(pathname);
   pageSnapshot.pull_request = {
@@ -488,25 +512,174 @@ test("PR operation card reruns failed CI only when failed checks exist", async (
     check_pending_count: 2,
     ci_is_running: true
   };
+  pageSnapshot.skills = [{
+    id: "ci.failure.explain",
+    display_name: "Explain CI Failure",
+    agents: ["codex"],
+    default_agent: "codex",
+    is_runnable: true
+  }];
+  pageSnapshot.agent_runtime = [{
+    agent: "codex",
+    preference: { model: "gpt-5.6", reasoning_effort: "high" }
+  }];
+  pageSnapshot.agent_catalogs = [{
+    agent: "codex",
+    models: [{
+      slug: "gpt-5.6",
+      display_name: "GPT-5.6",
+      default_effort: "high",
+      reasoning_efforts: [{ effort: "high", detail: "Thorough" }]
+    }],
+    reasoning_efforts: [{ effort: "high", detail: "Thorough" }]
+  }];
+  pageSnapshot.runs = [{
+    id: "run-explain-completed",
+    skill_id: "ci.failure.explain",
+    subject: { type: "legacy_page", page: pageSnapshot.page },
+    status: "completed",
+    completed_at: "2026-08-24T00:03:00Z",
+    result: {
+      payload: {
+        why_it_failed: "The lint job rejected an unused import.",
+        relevant_evidence: ["eslint exited with code 1"],
+        _ghpr_job: {
+          repository: "acme/widgets",
+          workflow_run_id: "1001",
+          workflow_job_id: "2002",
+          workflow_name: "lint"
+        }
+      }
+    }
+  }];
   await installApp(page, "conversation.html", pathname, pageSnapshot);
 
   const operationCard = page.locator("#ghpr-operation-card");
   await expect(operationCard.getByRole("button", { name: "Failed checks (1)" })).toBeVisible();
-  await expect(operationCard.getByRole("button", { name: "Explain CI Failure" })).toBeVisible();
-  const rerun = operationCard.getByRole("button", { name: "Rerun failed CI" });
-  await expect(rerun).toBeVisible();
+  await expect(operationCard.getByRole("button", { name: "Explain CI Failure" })).toHaveCount(0);
+  await expect(operationCard.getByRole("button", { name: /Re-run failed/ })).toHaveCount(0);
 
-  page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toBe("Rerun failed GitHub jobs?");
-    await dialog.accept();
+  const summary = page.locator("[data-ghpr-surface='github.pr.conversation.review-summary']");
+  const checksRow = summary.locator(".ghpr-review-summary-checks");
+  const rerun = checksRow.getByRole("button", { name: "Re-run 1 failed job" });
+  const explain = checksRow.getByRole("button", { name: "Explain again" });
+  await expect(checksRow).toContainText("1 failed check");
+  await expect(rerun).toBeVisible();
+  await expect(explain).toBeVisible();
+  const failureResult = checksRow.locator(".ghpr-review-summary-checks-copy");
+  await expect(failureResult).toHaveAttribute(
+    "data-hint",
+    "• lint: The lint job rejected an unused import.\n  • eslint exited with code 1"
+  );
+  await failureResult.hover();
+  expect(await failureResult.evaluate((node) =>
+    getComputedStyle(node, "::after").display
+  )).toBe("block");
+  expect(await summary.evaluate((node) => {
+    const card = node.querySelector(".ghpr-review-summary") ?? node;
+    return card.firstElementChild?.classList.contains("ghpr-review-summary-checks") &&
+      card.firstElementChild.nextElementSibling
+        ?.classList.contains("ghpr-review-summary-identity");
+  })).toBe(true);
+  await expect(summary).toHaveScreenshot("conversation-checks-rerun.png", {
+    animations: "disabled"
   });
   await rerun.click();
+  const rerunDialog = page.getByRole("dialog", { name: "Re-run failed jobs" });
+  await expect(rerunDialog).toBeVisible();
+  await expect(rerunDialog.getByRole("button", { name: "Explain CI Failure" })).toBeVisible();
+  await expect(rerunDialog.getByRole("button", { name: "Re-run anyway" })).toBeVisible();
+  await expect(rerunDialog).toHaveScreenshot("rerun-failed-jobs-dialog.png", {
+    animations: "disabled"
+  });
+  await rerunDialog.getByRole("button", { name: "Explain CI Failure" }).click();
+  const explainDialog = page.getByRole("dialog", { name: "Explain failed checks" });
+  await expect(explainDialog).toBeVisible();
+  await expect(explainDialog.getByLabel("Review runtime")).toHaveValue("codex");
+  await expect(explainDialog.getByLabel("Review model")).toHaveValue("gpt-5.6");
+  await expect(explainDialog.getByLabel("Reasoning effort")).toHaveValue("high");
+  await expect(explainDialog.getByRole("button", { name: "Copy import prompt" })).toHaveCount(0);
+  await expect(explainDialog).toHaveScreenshot("explain-failure-launch-dialog.png", {
+    animations: "disabled"
+  });
+  await explainDialog.getByRole("button", { name: "Explain failure" }).click();
+  await expect.poll(() => page.evaluate(() =>
+    window.__ghprFixtureGM.requests
+      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+      .map((request) => JSON.parse(request.data).action)
+      .find((action) => action.skill_id === "ci.failure.explain")
+  )).toMatchObject({
+    agent: "codex",
+    model: "gpt-5.6",
+    reasoning_effort: "high"
+  });
+
+  await rerun.click();
+  const rerunAnywayDialog = page.getByRole("dialog", { name: "Re-run failed jobs" });
+  await expect(rerunAnywayDialog).toBeVisible();
+  await rerunAnywayDialog.getByRole("button", { name: "Re-run anyway" }).click();
   await expect.poll(() => page.evaluate(() =>
     window.__ghprFixtureGM.requests
       .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
       .map((request) => JSON.parse(request.data))
       .some((body) => body.action?.kind === "rerun_failed_jobs")
   )).toBe(true);
+});
+
+test("Review Summary opens runtime confirmation and starts the selected model", async ({ page }) => {
+  const pathname = "/acme/widgets/pull/42";
+  await installApp(page, "conversation.html", pathname, snapshot(pathname, {
+    skills: [{
+      id: "pr.review",
+      display_name: "Review PR",
+      agents: ["omp", "claude_code", "codex"],
+      default_agent: "omp",
+      is_runnable: true
+    }],
+    agent_runtime: [{
+      agent: "codex",
+      preference: { model: "gpt-5.6", reasoning_effort: "high" }
+    }],
+    agent_catalogs: [{
+      agent: "codex",
+      models: [{
+        slug: "gpt-5.6",
+        display_name: "GPT-5.6",
+        default_effort: "high",
+        reasoning_efforts: [{ effort: "high", detail: "Thorough" }]
+      }],
+      reasoning_efforts: [{ effort: "high", detail: "Thorough" }]
+    }]
+  }));
+
+  const summary = page.locator("[data-ghpr-surface='github.pr.conversation.review-summary']");
+  await summary.getByRole("button", { name: "Review PR" }).click();
+  const dialog = page.getByRole("dialog", { name: "Review pull request" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Run review with ghpr");
+  await expect(dialog).toContainText("Import an existing review");
+  await expect(dialog).toContainText("aaaaaaa");
+  await expect(dialog).toContainText("bbbbbbb");
+
+  await dialog.getByLabel("Review runtime").selectOption("codex");
+  await expect(dialog.getByLabel("Review model")).toHaveValue("gpt-5.6");
+  await expect(dialog.getByLabel("Reasoning effort")).toHaveValue("high");
+  await expect(dialog).toHaveScreenshot("review-launch-dialog.png", {
+    animations: "disabled"
+  });
+  await dialog.getByRole("button", { name: "Start review" }).click();
+
+  await expect.poll(() => page.evaluate(() =>
+    window.__ghprFixtureGM.requests
+      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
+      .map((request) => JSON.parse(request.data).action)
+      .find((action) => action.skill_id === "pr.review")
+  )).toMatchObject({
+    agent: "codex",
+    model: "gpt-5.6",
+    reasoning_effort: "high"
+  });
+  await expect(dialog).toHaveCount(0);
 });
 
 test("Actions Job inserts the tabbed CI Insight immediately below the failure summary", async ({ page }) => {
@@ -623,8 +796,8 @@ test("Conversation finding navigates to and expands the exact Files changed line
   await expect(operationCard.getByRole("button", { name: "Review latest" })).toBeVisible();
   await expect(operationCard.getByRole("button", { name: "View findings" })).toBeVisible();
   await expect(operationCard.getByRole("button", { name: "Failed checks (1)" })).toBeVisible();
-  await expect(operationCard.getByRole("button", { name: "Explain CI Failure" })).toBeVisible();
-  await expect(operationCard.getByRole("button", { name: "Rerun failed CI" })).toBeVisible();
+  await expect(operationCard.getByRole("button", { name: "Explain CI Failure" })).toHaveCount(0);
+  await expect(operationCard.getByRole("button", { name: /Re-run failed/ })).toHaveCount(0);
   await expect(operationCard.getByRole("button", { name: "Open ghpr-view" })).toHaveCount(0);
   await expect(operationCard).toHaveScreenshot("conversation-operation-card.png", {
     animations: "disabled"
@@ -634,28 +807,12 @@ test("Conversation finding navigates to and expands the exact Files changed line
   ).toHaveCount(1);
   await expect(page.locator("#ghpr-github-root")).toHaveCount(0);
 
-  await operationCard.getByRole("button", { name: "Explain CI Failure" }).click();
-  await expect.poll(() => page.evaluate(() =>
-    window.__ghprFixtureGM.requests
-      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
-      .map((request) => JSON.parse(request.data))
-      .some((body) => body.action?.skill_id === "ci.failure.explain")
-  )).toBe(true);
+  await expect(summary.getByRole("button", { name: "Explain CI Failure" })).toBeVisible();
+  await expect(summary.getByRole("button", { name: "Re-run 1 failed job" })).toBeVisible();
 
   await operationCard.getByRole("button", { name: "View findings" }).click();
   await expect.poll(() => page.evaluate(() => window.__ghprFixtureLocation.href))
     .toBe("https://github.com/acme/widgets/pull/42/changes?ghpr_finding=finding-1&path=src%2Findex.ts&line=10#L10");
-  page.once("dialog", async (dialog) => {
-    expect(dialog.message()).toBe("Rerun failed GitHub jobs?");
-    await dialog.accept();
-  });
-  await operationCard.getByRole("button", { name: "Rerun failed CI" }).click();
-  await expect.poll(() => page.evaluate(() =>
-    window.__ghprFixtureGM.requests
-      .filter((request) => new URL(request.url).pathname === "/api/v1/actions")
-      .map((request) => JSON.parse(request.data))
-      .some((body) => body.action?.kind === "rerun_failed_jobs")
-  )).toBe(true);
   await operationCard.getByRole("button", { name: "Failed checks (1)" }).click();
   await expect.poll(() => page.evaluate(() => window.__ghprFixtureLocation.href))
     .toBe("https://github.com/acme/widgets/pull/42/checks?ghpr_check=first");
@@ -781,7 +938,10 @@ test("GitHub React changes DOM anchors an inline finding to the exact side", asy
   }));
   const fileTreeBadge = page.locator("#src\\/index\\.ts [data-ghpr-file-tree-badge]");
   await expect(fileTreeBadge).toHaveText("1");
-  await expect(fileTreeBadge).toHaveAttribute("aria-label", "1 ghpr comment");
+  await expect(fileTreeBadge).toHaveAttribute(
+    "aria-label",
+    "Open first of 1 ghpr finding in src/index.ts"
+  );
   await expect(page.locator("#src\\/index\\.ts [data-testid='native-comments-count']"))
     .toHaveText("3");
   await expect(page.locator("#src\\/other\\.ts [data-ghpr-file-tree-badge]"))
@@ -813,6 +973,61 @@ test("GitHub React changes DOM anchors an inline finding to the exact side", asy
     "Possible lost update in cache write"
   );
   await expect(page.locator("[data-ghpr-files-review-menu]")).toHaveCount(0);
+});
+
+test("Finding navigation changes files without opening the native comment composer", async ({ page }) => {
+  const findings = [
+    {
+      id: "finding-index",
+      file: "src/index.ts",
+      line: 10,
+      side: "addition",
+      severity: "warning",
+      confidence: 0.92,
+      body: "Index finding"
+    },
+    {
+      id: "finding-other",
+      file: "src/other.ts",
+      line: 10,
+      side: "addition",
+      severity: "warning",
+      confidence: 0.88,
+      body: "Other file finding"
+    }
+  ];
+  const pathname = "/acme/widgets/pull/42/changes?ghpr_finding=finding-index";
+  await installApp(page, "files-changes-react.html", pathname, snapshot(pathname, {
+    runs: [reviewRun(findings)],
+    findings: persistedReviewFindings(findings)
+  }));
+  await page.evaluate(() => {
+    window.__nativeCommentClicks = 0;
+    const button = document.createElement("button");
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-label", "Add comment on file");
+    button.textContent = "Add comment";
+    button.addEventListener("click", () => {
+      window.__nativeCommentClicks += 1;
+    });
+    document.querySelector("#diff-reactother [data-diff-header-wrapper]").append(button);
+  });
+
+  let panel = page.getByTestId("ghpr-inline-finding-panel");
+  await panel.getByRole("button", { name: "Next" }).click();
+  await expect(panel).toContainText("Other file finding");
+  expect(await page.evaluate(() => window.__nativeCommentClicks)).toBe(0);
+  expect(await page.evaluate(() => window.__ghprFixtureLocation.search))
+    .toBe("?ghpr_finding=finding-other");
+
+  const firstFindingBadge = page.getByRole("button", {
+    name: "Open first of 1 ghpr finding in src/index.ts"
+  });
+  await firstFindingBadge.click();
+  panel = page.getByTestId("ghpr-inline-finding-panel");
+  await expect(panel).toContainText("Index finding");
+  expect(await page.evaluate(() => window.__ghprFixtureLocation.search))
+    .toBe("?ghpr_finding=finding-index");
 });
 
 test("Files changed split view anchors the finding to the added side", async ({ page }) => {

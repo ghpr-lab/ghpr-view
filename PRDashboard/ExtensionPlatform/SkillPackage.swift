@@ -1943,53 +1943,281 @@ enum SkillAgentDiscovery {
 }
 
 
-struct SkillBuilderInstallStatus: Equatable, Identifiable {
+struct CodingAgentIntegrationInstallStatus: Equatable, Identifiable {
     let agent: SkillAgent
-    let destination: URL
-    let installed: Bool
+    let skillDestination: URL
+    let mcpConfigDestination: URL
+    let skillInstalled: Bool
+    let mcpInstalled: Bool
+
     var id: String { agent.rawValue }
+    var installed: Bool { skillInstalled && mcpInstalled }
 }
 
-enum SkillBuilderInstaller {
-    static func destinations(homeURL: URL = FileManager.default.homeDirectoryForCurrentUser) -> [SkillAgent: URL] {
+enum CodingAgentIntegrationError: LocalizedError {
+    case missingMCPServer(String)
+    case invalidJSONConfig(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingMCPServer(let path):
+            return "The bundled ghpr MCP server is missing at \(path)."
+        case .invalidJSONConfig(let path):
+            return "The coding agent configuration at \(path) is not a valid JSON object."
+        }
+    }
+}
+
+enum CodingAgentIntegrationInstaller {
+    private static let managedCodexComment = "# Managed by PRDashboard Coding Agent Integration."
+
+    static func bundledMCPServerURL(bundle: Bundle = .main) -> URL? {
+        guard let resourceURL = bundle.resourceURL else { return nil }
+        let url = resourceURL.appendingPathComponent("mcp-ghpr-bundle/index.mjs")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+    static func managedMCPServerURL(
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> URL {
+        homeURL
+            .appendingPathComponent("Library/Application Support", isDirectory: true)
+            .appendingPathComponent("com.xiaocang.PRDashboard", isDirectory: true)
+            .appendingPathComponent("CodingAgentIntegration", isDirectory: true)
+            .appendingPathComponent("mcp-ghpr", isDirectory: true)
+            .appendingPathComponent("index.mjs")
+    }
+
+
+    static func skillDestinations(
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [SkillAgent: URL] {
         SkillAgentDiscovery.roots(homeURL: homeURL).mapValues {
             $0.appendingPathComponent("ghpr-skill-builder", isDirectory: true)
         }
     }
 
-    static func statuses(homeURL: URL = FileManager.default.homeDirectoryForCurrentUser) -> [SkillBuilderInstallStatus] {
-        destinations(homeURL: homeURL)
-            .map { agent, destination in
-                SkillBuilderInstallStatus(
-                    agent: agent,
-                    destination: destination,
-                    installed: FileManager.default.fileExists(
-                        atPath: destination.appendingPathComponent("SKILL.md").path
-                    )
-                )
-            }
-            .sorted { $0.agent.rawValue < $1.agent.rawValue }
+    static func mcpConfigDestinations(
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [SkillAgent: URL] {
+        [
+            .claudeCode: homeURL.appendingPathComponent(".claude.json"),
+            .codex: homeURL.appendingPathComponent(".codex/config.toml"),
+            .omp: homeURL.appendingPathComponent(".omp/agent/mcp.json")
+        ]
+    }
+
+    static func statuses(
+        sourceMCPServerURL: URL?,
+        homeURL: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [CodingAgentIntegrationInstallStatus] {
+        let skillDestinations = skillDestinations(homeURL: homeURL)
+        let configDestinations = mcpConfigDestinations(homeURL: homeURL)
+        let managedServerURL = managedMCPServerURL(homeURL: homeURL)
+        let managedServerIsCurrent: Bool
+        if let sourceMCPServerURL,
+           let sourceData = try? Data(contentsOf: sourceMCPServerURL),
+           let managedData = try? Data(contentsOf: managedServerURL) {
+            managedServerIsCurrent = sourceData == managedData
+        } else {
+            managedServerIsCurrent = false
+        }
+        return skillDestinations.compactMap { agent, skillDestination in
+            guard let configDestination = configDestinations[agent] else { return nil }
+            let skillInstalled = FileManager.default.fileExists(
+                atPath: skillDestination.appendingPathComponent("SKILL.md").path
+            )
+            let mcpInstalled = managedServerIsCurrent && isMCPInstalled(
+                agent: agent,
+                configURL: configDestination,
+                serverURL: managedServerURL
+            )
+            return CodingAgentIntegrationInstallStatus(
+                agent: agent,
+                skillDestination: skillDestination,
+                mcpConfigDestination: configDestination,
+                skillInstalled: skillInstalled,
+                mcpInstalled: mcpInstalled
+            )
+        }
+        .sorted { $0.agent.rawValue < $1.agent.rawValue }
     }
 
     static func install(
         sourceSkillURL: URL,
+        sourceMCPServerURL: URL,
         agents: Set<SkillAgent>,
         homeURL: URL = FileManager.default.homeDirectoryForCurrentUser
-    ) throws -> [SkillBuilderInstallStatus] {
+    ) throws -> [CodingAgentIntegrationInstallStatus] {
+        guard FileManager.default.fileExists(atPath: sourceMCPServerURL.path) else {
+            throw CodingAgentIntegrationError.missingMCPServer(sourceMCPServerURL.path)
+        }
         let sourceText = try String(contentsOf: sourceSkillURL, encoding: .utf8)
         let managedText = SkillPackageManager.generatedMarker + "\n" + sourceText
-        let destinations = destinations(homeURL: homeURL)
+        let skillDestinations = skillDestinations(homeURL: homeURL)
+        let configDestinations = mcpConfigDestinations(homeURL: homeURL)
+
         for agent in agents {
-            guard let destination = destinations[agent] else { continue }
-            let skillFile = destination.appendingPathComponent("SKILL.md")
+            guard let skillDestination = skillDestinations[agent],
+                  let configDestination = configDestinations[agent] else {
+                continue
+            }
+            let skillFile = skillDestination.appendingPathComponent("SKILL.md")
             if let existing = try? String(contentsOf: skillFile, encoding: .utf8),
                !existing.contains(SkillPackageManager.generatedMarker) {
                 throw SkillPackageError.existingUserSkill(skillFile.path)
             }
-            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-            try managedText.write(to: skillFile, atomically: true, encoding: .utf8)
+            if agent != .codex {
+                _ = try readJSONConfig(at: configDestination)
+            }
         }
-        return statuses(homeURL: homeURL)
+        let managedServerURL = managedMCPServerURL(homeURL: homeURL)
+        try writeConfig(Data(contentsOf: sourceMCPServerURL), to: managedServerURL)
+
+
+        for agent in agents {
+            guard let skillDestination = skillDestinations[agent],
+                  let configDestination = configDestinations[agent] else {
+                continue
+            }
+            try FileManager.default.createDirectory(
+                at: skillDestination,
+                withIntermediateDirectories: true
+            )
+            try managedText.write(
+                to: skillDestination.appendingPathComponent("SKILL.md"),
+                atomically: true,
+                encoding: .utf8
+            )
+            switch agent {
+            case .codex:
+                try installCodexMCP(configURL: configDestination, serverURL: managedServerURL)
+            case .claudeCode, .omp:
+                try installJSONMCP(configURL: configDestination, serverURL: managedServerURL)
+            case .external:
+                continue
+            }
+        }
+
+        return statuses(sourceMCPServerURL: sourceMCPServerURL, homeURL: homeURL)
+            .filter { agents.contains($0.agent) }
+    }
+
+    private static func isMCPInstalled(
+        agent: SkillAgent,
+        configURL: URL,
+        serverURL: URL
+    ) -> Bool {
+        switch agent {
+        case .codex:
+            guard let text = try? String(contentsOf: configURL, encoding: .utf8) else {
+                return false
+            }
+            return text.contains(codexMCPBlock(serverURL: serverURL))
+        case .claudeCode, .omp:
+            guard let root = try? readJSONConfig(at: configURL),
+                  let servers = root["mcpServers"] as? [String: Any],
+                  let server = servers["ghpr"] as? [String: Any],
+                  server["command"] as? String == "node",
+                  let args = server["args"] as? [String] else {
+                return false
+            }
+            return args == [serverURL.path]
+        case .external:
+            return false
+        }
+    }
+
+    private static func installJSONMCP(configURL: URL, serverURL: URL) throws {
+        var root = try readJSONConfig(at: configURL)
+        var servers = root["mcpServers"] as? [String: Any] ?? [:]
+        servers["ghpr"] = [
+            "command": "node",
+            "args": [serverURL.path]
+        ]
+        root["mcpServers"] = servers
+        let data = try JSONSerialization.data(
+            withJSONObject: root,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+        try writeConfig(data + Data([0x0A]), to: configURL)
+    }
+
+    private static func readJSONConfig(at url: URL) throws -> [String: Any] {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        let data = try Data(contentsOf: url)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CodingAgentIntegrationError.invalidJSONConfig(url.path)
+        }
+        return root
+    }
+
+    private static func installCodexMCP(configURL: URL, serverURL: URL) throws {
+        let existing = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+        let lines = existing.components(separatedBy: .newlines)
+        var output: [String] = []
+        var skippingGhprSection = false
+        for line in lines {
+            if line == managedCodexComment {
+                continue
+            }
+            if let tableName = tomlTableName(line) {
+                let normalized = tableName.replacingOccurrences(of: "\"", with: "")
+                skippingGhprSection = normalized == "mcp_servers.ghpr"
+                    || normalized.hasPrefix("mcp_servers.ghpr.")
+            }
+            if !skippingGhprSection {
+                output.append(line)
+            }
+        }
+        let retained = output.joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let updated = [retained, codexMCPBlock(serverURL: serverURL)]
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n") + "\n"
+        try writeConfig(Data(updated.utf8), to: configURL)
+    }
+
+    private static func tomlTableName(_ line: String) -> String? {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard trimmed.hasPrefix("["),
+              let closingBracket = trimmed.firstIndex(of: "]") else {
+            return nil
+        }
+        return String(trimmed[trimmed.index(after: trimmed.startIndex)..<closingBracket])
+    }
+
+    private static func codexMCPBlock(serverURL: URL) -> String {
+        """
+        \(managedCodexComment)
+        [mcp_servers.ghpr]
+        command = "node"
+        args = ["\(tomlEscaped(serverURL.path))"]
+        startup_timeout_sec = 5.0
+        """
+    }
+
+    private static func tomlEscaped(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+    }
+
+    private static func writeConfig(_ data: Data, to url: URL) throws {
+        let existingPermissions = (try? FileManager.default.attributesOfItem(atPath: url.path))?[
+            .posixPermissions
+        ]
+        try FileManager.default.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: existingPermissions ?? 0o600],
+            ofItemAtPath: url.path
+        )
     }
 }
 

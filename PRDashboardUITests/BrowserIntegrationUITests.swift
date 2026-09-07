@@ -5,7 +5,7 @@ final class BrowserIntegrationUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testSettingsKeepsBrowserAndSkillDetailsCollapsedUntilRequested() {
+    func testSettingsKeepsBrowserAndCodingAgentIntegrationDetailsCollapsedUntilRequested() {
         let app = launch(with: "--ui-testing-browser-settings")
         let settings = app.windows["Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 8), "Settings window should open in UI test mode")
@@ -59,78 +59,50 @@ final class BrowserIntegrationUITests: XCTestCase {
             "Revocation must update the settings UI immediately"
         )
 
-        let builderDetails = app.buttons["skill-builder-details-toggle"]
-        XCTAssertTrue(builderDetails.waitForExistence(timeout: 3))
-        XCTAssertEqual(builderDetails.value as? String, "Collapsed")
+        let integrationSection = app.buttons["browser-integration-coding-agent-toggle"]
+        XCTAssertTrue(integrationSection.waitForExistence(timeout: 3))
+        XCTAssertEqual(
+            integrationSection.value as? String,
+            "Collapsed",
+            "Coding Agent Integration is folded into Browser Integration"
+        )
+        XCTAssertFalse(
+            app.buttons["Open Workbench in Browser"].exists,
+            "The folded coding agent integration must stay hidden until it is opened"
+        )
+
+        integrationSection.click()
+        let integrationDetails = app.buttons["coding-agent-integration-details-toggle"]
+        XCTAssertTrue(integrationDetails.waitForExistence(timeout: 3))
+        XCTAssertEqual(integrationDetails.value as? String, "Collapsed")
         XCTAssertTrue(
             app.buttons["Open Workbench in Browser"].exists,
-            "Skill Builder should set a browser handoff expectation"
+            "Coding Agent Integration should expose the Skill Workbench handoff"
+        )
+        XCTAssertFalse(
+            app.buttons["browser-integration-agent-runtime-toggle"].exists,
+            "Coding Agent Runtime must not appear on the Settings page"
         )
     }
 
-    func testCodingAgentRuntimeSelectsAgentBeforeModelConfiguration() {
+    func testSettingsDoesNotExposeCodingAgentRuntime() {
         let app = launch(with: "--ui-testing-browser-settings")
         let settings = app.windows["Settings"]
         XCTAssertTrue(settings.waitForExistence(timeout: 8), "Settings window should open in UI test mode")
         XCTAssertTrue(
-            app.staticTexts["Coding Agent Runtime"].waitForExistence(timeout: 3),
-            "Settings must expose the coding agent runtime section"
+            app.buttons["browser-integration-coding-agent-toggle"].waitForExistence(timeout: 3),
+            "Settings must expose Coding Agent Integration"
         )
-
-        let runtimeToggle = app.buttons["agent-runtime-toggle"]
-        XCTAssertTrue(runtimeToggle.waitForExistence(timeout: 3))
-        XCTAssertEqual(runtimeToggle.value as? String, "Collapsed")
+        XCTAssertFalse(
+            app.buttons["browser-integration-agent-runtime-toggle"].exists,
+            "Runtime selection belongs to the review flow, not Settings"
+        )
         XCTAssertFalse(
             app.descendants(matching: .any)
-                .matching(identifier: "agent-runtime-agent-picker")
+                .matching(identifier: "agent-runtime-settings")
                 .firstMatch
                 .exists,
-            "Model configuration stays behind the compact summary"
-        )
-
-        runtimeToggle.click()
-        XCTAssertEqual(runtimeToggle.value as? String, "Expanded")
-        let agentPicker = app.descendants(matching: .any)
-            .matching(identifier: "agent-runtime-agent-picker")
-            .firstMatch
-        XCTAssertTrue(
-            agentPicker.waitForExistence(timeout: 3),
-            "The coding agent is chosen before its model"
-        )
-        XCTAssertEqual(agentPicker.value as? String, "Claude Code")
-        XCTAssertTrue(
-            app.buttons["agent-runtime-refresh"].waitForExistence(timeout: 10),
-            "Claude Code offers a CLI-backed model list action"
-        )
-        XCTAssertFalse(
-            app.textFields["agent-model-field"].exists,
-            "A listed agent configures its model through a picker"
-        )
-
-        settings.radioButtons["OMP"].click()
-        XCTAssertEqual(agentPicker.value as? String, "OMP")
-        let ompModel = app.textFields["agent-model-field"]
-        XCTAssertTrue(
-            ompModel.waitForExistence(timeout: 3),
-            "OMP configures its model through a free-form field"
-        )
-        XCTAssertFalse(
-            app.buttons["agent-runtime-refresh"].exists,
-            "OMP exposes no CLI model listing"
-        )
-
-        ompModel.click()
-        ompModel.typeText("opus")
-        app.buttons["Apply Model"].click()
-        XCTAssertTrue(
-            app.descendants(matching: .any)
-                .matching(identifier: "agent-runtime-status")
-                .matching(
-                    NSPredicate(format: "label CONTAINS 'OMP · opus' OR value CONTAINS 'OMP · opus'")
-                )
-                .firstMatch
-                .waitForExistence(timeout: 3),
-            "The compact summary reports the selected agent and its pinned model"
+            "The retired Coding Agent Runtime settings view must not be mounted"
         )
     }
 

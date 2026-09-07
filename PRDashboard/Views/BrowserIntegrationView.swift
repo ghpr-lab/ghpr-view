@@ -4,6 +4,7 @@ import SwiftUI
 struct BrowserIntegrationView: View {
     @ObservedObject var controller: ExtensionPlatformController
     @State private var showingDetails = false
+    @State private var showingCodingAgentIntegration = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -70,22 +71,13 @@ struct BrowserIntegrationView: View {
                     .foregroundColor(.secondary)
             }
 
-            Button {
+            disclosureRow(
+                title: "Connection details",
+                identifier: "browser-integration-details-toggle",
+                isExpanded: showingDetails
+            ) {
                 showingDetails.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: showingDetails ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                    Text("Connection details")
-                    Spacer()
-                }
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .accessibilityIdentifier("browser-integration-details-toggle")
-            .accessibilityValue(showingDetails ? "Expanded" : "Collapsed")
 
             if showingDetails {
                 VStack(alignment: .leading, spacing: 8) {
@@ -140,8 +132,6 @@ struct BrowserIntegrationView: View {
 
                     Divider()
 
-                    Divider()
-
                     Text("Paired clients")
                         .font(.caption)
                         .fontWeight(.medium)
@@ -182,9 +172,46 @@ struct BrowserIntegrationView: View {
                 }
                 .padding(.top, 2)
             }
+
+            Divider()
+
+            disclosureRow(
+                title: "Coding Agent Integration",
+                identifier: "browser-integration-coding-agent-toggle",
+                isExpanded: showingCodingAgentIntegration
+            ) {
+                showingCodingAgentIntegration.toggle()
+            }
+
+            if showingCodingAgentIntegration {
+                CodingAgentIntegrationSettingsView(controller: controller)
+                    .padding(.top, 2)
+            }
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("browser-integration-settings")
+    }
+
+    private func disclosureRow(
+        title: LocalizedStringKey,
+        identifier: String,
+        isExpanded: Bool,
+        toggle: @escaping () -> Void
+    ) -> some View {
+        Button(action: toggle) {
+            HStack(spacing: 6) {
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .font(.caption)
+                Text(title)
+                Spacer()
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .font(.caption)
+        .foregroundColor(.secondary)
+        .accessibilityIdentifier(identifier)
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
     }
 
     private func clientRow(_ client: BrowserClient) -> some View {
@@ -368,9 +395,11 @@ struct BrowserIntegrationView: View {
     }
 }
 
-struct SkillBuilderSettingsView: View {
+struct CodingAgentIntegrationSettingsView: View {
     @ObservedObject var controller: ExtensionPlatformController
-    @State private var statuses = SkillBuilderInstaller.statuses()
+    @State private var statuses = CodingAgentIntegrationInstaller.statuses(
+        sourceMCPServerURL: CodingAgentIntegrationInstaller.bundledMCPServerURL()
+    )
     @State private var errorMessage: String?
     @State private var showingDetails = false
 
@@ -378,14 +407,14 @@ struct SkillBuilderSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: skillBuilderSummarySymbol)
-                    .foregroundColor(skillBuilderSummaryColor)
+                Image(systemName: integrationSummarySymbol)
+                    .foregroundColor(integrationSummaryColor)
                     .frame(width: 18)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(skillBuilderSummaryTitle)
+                    Text(integrationSummaryTitle)
                         .font(.system(size: 13, weight: .medium))
-                    Text("Create and extend ghpr Skills with Claude Code, Codex, or OMP.")
+                    Text("Install the Skill Builder and review-import MCP for Claude Code, Codex, and OMP.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -393,13 +422,13 @@ struct SkillBuilderSettingsView: View {
                 Spacer()
             }
             .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("skill-builder-status")
+            .accessibilityIdentifier("coding-agent-integration-status")
 
             if let errorMessage {
                 Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
                     .font(.caption)
                     .foregroundColor(.red)
-                    .accessibilityIdentifier("skill-builder-install-error")
+                    .accessibilityIdentifier("coding-agent-integration-install-error")
             }
 
             HStack(spacing: 8) {
@@ -417,7 +446,7 @@ struct SkillBuilderSettingsView: View {
                     Button("Install for All Agents") {
                         install()
                     }
-                    .accessibilityIdentifier("install-skill-builder")
+                    .accessibilityIdentifier("install-coding-agent-integration")
                 }
             }
 
@@ -439,7 +468,7 @@ struct SkillBuilderSettingsView: View {
             .buttonStyle(.plain)
             .font(.caption)
             .foregroundColor(.secondary)
-            .accessibilityIdentifier("skill-builder-details-toggle")
+            .accessibilityIdentifier("coding-agent-integration-details-toggle")
             .accessibilityValue(showingDetails ? "Expanded" : "Collapsed")
 
             if showingDetails {
@@ -462,7 +491,7 @@ struct SkillBuilderSettingsView: View {
                             Button("Reinstall for All Agents") {
                                 install()
                             }
-                            .accessibilityIdentifier("install-skill-builder")
+                            .accessibilityIdentifier("install-coding-agent-integration")
                         }
 
                         Button {
@@ -479,7 +508,7 @@ struct SkillBuilderSettingsView: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("skill-builder-settings")
+        .accessibilityIdentifier("coding-agent-integration-settings")
     }
 
     private var installedAgentCount: Int {
@@ -490,34 +519,36 @@ struct SkillBuilderSettingsView: View {
         !statuses.isEmpty && installedAgentCount == statuses.count
     }
 
-    private var skillBuilderSummaryTitle: String {
+    private var integrationSummaryTitle: String {
         if allAgentsInstalled {
             return "Ready for all coding agents"
         }
         if installedAgentCount == 0 {
-            return "Skill Builder is not installed"
+            return "Coding Agent Integration is not installed"
         }
         return "Installed for \(installedAgentCount) of \(statuses.count) agents"
     }
 
-    private var skillBuilderSummarySymbol: String {
-        allAgentsInstalled ? "checkmark.circle.fill" : "hammer.circle"
+    private var integrationSummarySymbol: String {
+        allAgentsInstalled ? "checkmark.circle.fill" : "terminal"
     }
 
-    private var skillBuilderSummaryColor: Color {
+    private var integrationSummaryColor: Color {
         allAgentsInstalled ? .green : .secondary
     }
 
     private func install() {
-        guard let source = Bundle.main.resourceURL?
+        guard let sourceSkillURL = Bundle.main.resourceURL?
             .appendingPathComponent("ghpr-skill-builder/SKILL.md"),
-              FileManager.default.fileExists(atPath: source.path) else {
-            errorMessage = "The bundled Skill Builder is missing."
+              FileManager.default.fileExists(atPath: sourceSkillURL.path),
+              let sourceMCPServerURL = CodingAgentIntegrationInstaller.bundledMCPServerURL() else {
+            errorMessage = "The bundled Coding Agent Integration is incomplete."
             return
         }
         do {
-            statuses = try SkillBuilderInstaller.install(
-                sourceSkillURL: source,
+            statuses = try CodingAgentIntegrationInstaller.install(
+                sourceSkillURL: sourceSkillURL,
+                sourceMCPServerURL: sourceMCPServerURL,
                 agents: [.claudeCode, .codex, .omp]
             )
             errorMessage = nil
@@ -528,251 +559,6 @@ struct SkillBuilderSettingsView: View {
 
 }
 
-struct AgentRuntimeSettingsView: View {
-    @ObservedObject var controller: ExtensionPlatformController
-
-    @State private var expanded = false
-    @State private var selectedAgent: SkillAgent = .claudeCode
-    @State private var loadingAgents: Set<SkillAgent> = []
-    @State private var errors: [SkillAgent: String] = [:]
-    @State private var freeformModel: String?
-
-    private let agents: [SkillAgent] = [.claudeCode, .codex, .omp]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 10) {
-                Image(systemName: "cpu")
-                    .foregroundColor(.secondary)
-                    .frame(width: 18)
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(summaryTitle)
-                        .font(.system(size: 13, weight: .medium))
-                    Text("Pick a coding agent, then choose the model and reasoning effort ghpr passes to it.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("agent-runtime-status")
-
-            Button {
-                expanded.toggle()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.caption)
-                    Text("Model and reasoning effort")
-                    Spacer()
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .font(.caption)
-            .foregroundColor(.secondary)
-            .accessibilityIdentifier("agent-runtime-toggle")
-            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
-
-            if expanded {
-                VStack(alignment: .leading, spacing: 10) {
-                    Picker("Coding agent", selection: $selectedAgent) {
-                        ForEach(agents, id: \.self) { agent in
-                            Text(agent.displayName).tag(agent)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityIdentifier("agent-runtime-agent-picker")
-                    .accessibilityValue(selectedAgent.displayName)
-
-                    agentConfiguration(selectedAgent)
-                }
-                .padding(.top, 2)
-            }
-        }
-        .task(id: TaskKey(expanded: expanded, agent: selectedAgent)) {
-            guard expanded else { return }
-            freeformModel = nil
-            guard AgentCapabilityProbe.probeArguments(for: selectedAgent) != nil,
-                  controller.cachedAgentCapabilityCatalog(for: selectedAgent) == nil else {
-                return
-            }
-            await load(selectedAgent, forceRefresh: false)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("agent-runtime-settings")
-    }
-
-    private struct TaskKey: Equatable {
-        let expanded: Bool
-        let agent: SkillAgent
-    }
-
-    @ViewBuilder
-    private func agentConfiguration(_ agent: SkillAgent) -> some View {
-        let catalog = controller.cachedAgentCapabilityCatalog(for: agent)
-        VStack(alignment: .leading, spacing: 6) {
-            if let catalog, catalog.listsModels {
-                Picker("Model", selection: modelBinding(for: agent)) {
-                    Text("Agent default").tag("")
-                    ForEach(catalog.models) { model in
-                        Text(model.displayName).tag(model.slug)
-                    }
-                }
-                .accessibilityIdentifier("agent-model-picker")
-
-                let efforts = catalog.reasoningEfforts(
-                    forModel: controller.agentRuntimePreference(for: agent).model
-                )
-                if efforts.isEmpty {
-                    Text("\(agent.displayName) exposes no reasoning effort levels.")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                } else {
-                    Picker("Reasoning effort", selection: effortBinding(for: agent)) {
-                        Text("Agent default").tag("")
-                        ForEach(efforts) { effort in
-                            Text(effort.effort).tag(effort.effort)
-                        }
-                    }
-                    .accessibilityIdentifier("agent-effort-picker")
-                }
-            } else {
-                TextField(
-                    "Model name",
-                    text: Binding(
-                        get: {
-                            freeformModel
-                                ?? controller.agentRuntimePreference(for: agent).model
-                                ?? ""
-                        },
-                        set: { freeformModel = $0 }
-                    )
-                )
-                .textFieldStyle(.roundedBorder)
-                .onSubmit { commitFreeformModel(agent) }
-                .accessibilityIdentifier("agent-model-field")
-
-                Button("Apply Model") { commitFreeformModel(agent) }
-                    .font(.caption)
-                    .accessibilityIdentifier("agent-model-apply")
-            }
-
-            HStack(spacing: 8) {
-                if loadingAgents.contains(agent) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Reading the \(agent.displayName) CLI…")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                } else if AgentCapabilityProbe.probeArguments(for: agent) != nil {
-                    Button(catalog == nil ? "Load Models" : "Refresh Models") {
-                        Task { await load(agent, forceRefresh: true) }
-                    }
-                    .font(.caption)
-                    .accessibilityIdentifier("agent-runtime-refresh")
-                }
-
-                Text(sourceCaption(agent, catalog: catalog))
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            if agent == .codex {
-                Text("Codex runs read-only inside the private Skill run directory, with tools, shell, checkout, and network denied by the strict contract.")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            if let message = errors[agent] {
-                Label(message, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundColor(.red)
-                    .accessibilityIdentifier("agent-runtime-error")
-            }
-        }
-    }
-
-    private var summaryTitle: String {
-        let preference = controller.agentRuntimePreference(for: selectedAgent)
-        guard let model = preference.model else {
-            return "\(selectedAgent.displayName) uses its own default model"
-        }
-        guard let effort = preference.reasoningEffort else {
-            return "\(selectedAgent.displayName) · \(model)"
-        }
-        return "\(selectedAgent.displayName) · \(model) · \(effort)"
-    }
-
-    private func sourceCaption(
-        _ agent: SkillAgent,
-        catalog: AgentCapabilityCatalog?
-    ) -> String {
-        if agent == .omp {
-            return "OMP resolves fuzzy names such as opus or openai/gpt-5.2."
-        }
-        guard let catalog else {
-            return "Model and effort lists come from the \(agent.displayName) CLI."
-        }
-        let updated = catalog.refreshedAt.formatted(date: .abbreviated, time: .shortened)
-        return "From `\(catalog.source)` · updated \(updated)"
-    }
-
-    private func modelBinding(for agent: SkillAgent) -> Binding<String> {
-        Binding(
-            get: { controller.agentRuntimePreference(for: agent).model ?? "" },
-            set: { value in
-                var preference = controller.agentRuntimePreference(for: agent)
-                preference.model = value.isEmpty ? nil : value
-                if let effort = preference.reasoningEffort,
-                   let catalog = controller.cachedAgentCapabilityCatalog(for: agent),
-                   !catalog.reasoningEfforts(forModel: preference.model)
-                       .contains(where: { $0.effort == effort }) {
-                    preference.reasoningEffort = nil
-                }
-                controller.setAgentRuntimePreference(preference, for: agent)
-            }
-        )
-    }
-
-    private func effortBinding(for agent: SkillAgent) -> Binding<String> {
-        Binding(
-            get: { controller.agentRuntimePreference(for: agent).reasoningEffort ?? "" },
-            set: { value in
-                var preference = controller.agentRuntimePreference(for: agent)
-                preference.reasoningEffort = value.isEmpty ? nil : value
-                controller.setAgentRuntimePreference(preference, for: agent)
-            }
-        )
-    }
-
-    private func commitFreeformModel(_ agent: SkillAgent) {
-        guard let entered = freeformModel?.trimmingCharacters(in: .whitespacesAndNewlines) else {
-            return
-        }
-        var preference = controller.agentRuntimePreference(for: agent)
-        preference.model = entered.isEmpty ? nil : entered
-        controller.setAgentRuntimePreference(preference, for: agent)
-        freeformModel = nil
-    }
-
-    private func load(_ agent: SkillAgent, forceRefresh: Bool) async {
-        guard !loadingAgents.contains(agent) else { return }
-        loadingAgents.insert(agent)
-        errors[agent] = nil
-        do {
-            _ = try await controller.loadAgentCapabilityCatalog(
-                for: agent,
-                forceRefresh: forceRefresh
-            )
-        } catch {
-            errors[agent] = error.localizedDescription
-        }
-        loadingAgents.remove(agent)
-    }
-}
 
 struct BrowserPairingApprovalView: View {
     @ObservedObject var controller: ExtensionPlatformController

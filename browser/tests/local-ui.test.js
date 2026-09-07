@@ -129,7 +129,7 @@ test("Workbench missing capability gives exact Settings recovery", async () => {
   const window = createWindow("http://127.0.0.1:48120/ui/workbench", "workbench");
   const app = createLocalApp({ window, document: window.document, fetch: async () => response({ error: { code: "unauthorized", message: "missing" } }, 401) });
   await app.start();
-  assert.match(window.document.body.textContent, /Open ghpr → Settings → Skill Builder → Open Skill Workbench/);
+  assert.match(window.document.body.textContent, /Open ghpr → Settings → Coding Agent Integration → Open Skill Workbench/);
   assert.equal(window.document.querySelector(".workbench"), null);
   window.close();
 });

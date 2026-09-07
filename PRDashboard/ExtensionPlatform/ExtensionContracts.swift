@@ -865,6 +865,8 @@ struct SkillRun: Codable, Equatable, Identifiable {
     let id: String
     let skillID: String
     let agent: SkillAgent?
+    let model: String?
+    let reasoningEffort: String?
     let subject: GitHubSubject
     var subjectKey: String { subject.subjectKey }
     let page: GitHubPageContext
@@ -884,6 +886,8 @@ struct SkillRun: Codable, Equatable, Identifiable {
         id: String,
         skillID: String,
         agent: SkillAgent? = nil,
+        model: String? = nil,
+        reasoningEffort: String? = nil,
         page: GitHubPageContext,
         requestedByClientID: String?,
         createdAt: Date,
@@ -902,6 +906,8 @@ struct SkillRun: Codable, Equatable, Identifiable {
         self.id = id
         self.skillID = skillID
         self.agent = agent
+        self.model = model
+        self.reasoningEffort = reasoningEffort
         let effectiveSubject = subject ?? .legacyPage(page)
         self.subject = effectiveSubject
         self.page = effectiveSubject.page ?? page
@@ -920,7 +926,7 @@ struct SkillRun: Codable, Equatable, Identifiable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, skillID, agent, subject, subjectKey, page, requestedByClientID, createdAt, startedAt, completedAt
+        case id, skillID, agent, model, reasoningEffort, subject, subjectKey, page, requestedByClientID, createdAt, startedAt, completedAt
         case status, progressMessage, progressCurrent, progressTotal, logEntries
         case result, error, retryOfRunID
     }
@@ -930,6 +936,8 @@ struct SkillRun: Codable, Equatable, Identifiable {
         id = try container.decode(String.self, forKey: .id)
         skillID = try container.decode(String.self, forKey: .skillID)
         agent = try container.decodeIfPresent(SkillAgent.self, forKey: .agent)
+        model = try container.decodeIfPresent(String.self, forKey: .model)
+        reasoningEffort = try container.decodeIfPresent(String.self, forKey: .reasoningEffort)
         let decodedPage = try container.decode(GitHubPageContext.self, forKey: .page)
         subject = try container.decodeIfPresent(GitHubSubject.self, forKey: .subject) ?? .legacyPage(decodedPage)
         page = subject.page ?? decodedPage
@@ -958,6 +966,8 @@ extension SkillRun {
         try container.encode(id, forKey: .id)
         try container.encode(skillID, forKey: .skillID)
         try container.encodeIfPresent(agent, forKey: .agent)
+        try container.encodeIfPresent(model, forKey: .model)
+        try container.encodeIfPresent(reasoningEffort, forKey: .reasoningEffort)
         try container.encode(subject, forKey: .subject)
         try container.encode(subjectKey, forKey: .subjectKey)
         try container.encode(page, forKey: .page)
@@ -1034,6 +1044,9 @@ struct BrowserAction: Codable, Equatable {
     let tag: PRTag?
     let event: String?
     var subject: GitHubSubject? = nil
+    var agent: SkillAgent? = nil
+    var model: String? = nil
+    var reasoningEffort: String? = nil
 }
 
 struct BrowserContribution: Codable, Equatable, Identifiable {
@@ -1101,6 +1114,8 @@ struct PageExtensionSnapshot: Codable, Equatable {
     var currentRevisionSubject: GitHubSubject? = nil
     var githubSurfaceV2: Bool = true
     var surfaceHealth: [SurfaceHealthReport] = []
+    var agentRuntime: [AgentRuntimeSetting] = []
+    var agentCatalogs: [AgentCapabilityCatalog] = []
 }
 
 enum PresentationSectionType: String, Codable, CaseIterable {

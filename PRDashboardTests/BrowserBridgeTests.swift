@@ -179,6 +179,24 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(protected.status, 401)
     }
 
+    func testExplainFailureUsesReviewCodingAgentChoices() throws {
+        let root = temporaryDirectory()
+        let runtime = SkillRuntime(
+            store: ExtensionPlatformStore(storageURL: nil),
+            installedSkillsRootURL: root.appendingPathComponent("installed"),
+            bundledSkillsRootURL: nil
+        )
+        let explain = try XCTUnwrap(
+            runtime.skills.first { $0.id == SkillRuntime.explainFailureSkillID }
+        )
+        let review = try XCTUnwrap(
+            runtime.skills.first { $0.id == SkillRuntime.reviewPRSkillID }
+        )
+
+        XCTAssertEqual(explain.agents, review.agents)
+        XCTAssertTrue(explain.agents.contains(.codex))
+    }
+
     func testSkillRunPersistsQueuedRunningAndFailureLogEntries() async throws {
         let root = temporaryDirectory()
         let store = ExtensionPlatformStore(storageURL: nil)
@@ -1010,15 +1028,49 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertNotNil(nativePreview["preview"])
     }
 
-    func testSkillBuilderInstallerInstallsManagedCopyForEveryAgent() throws {
+    func testCodingAgentIntegrationInstallsSkillAndManagedMCPForEveryAgent() throws {
         let homeURL = temporaryDirectory()
-        let sourceURL = homeURL.appendingPathComponent("source-SKILL.md")
+        let sourceSkillURL = homeURL.appendingPathComponent("source-SKILL.md")
         try "# ghpr Skill Builder\n\nRead contracts from the installed ghpr CLI."
-            .write(to: sourceURL, atomically: true, encoding: .utf8)
+            .write(to: sourceSkillURL, atomically: true, encoding: .utf8)
+        let sourceMCPServerURL = homeURL.appendingPathComponent("bundled-mcp-ghpr.js")
+        try "#!/usr/bin/env node\nconsole.log('standalone ghpr MCP');\n"
+            .write(to: sourceMCPServerURL, atomically: true, encoding: .utf8)
+
+        let configDestinations = CodingAgentIntegrationInstaller.mcpConfigDestinations(
+            homeURL: homeURL
+        )
+        let existingJSON: [String: Any] = [
+            "mcpServers": ["existing": ["command": "keep-me"]]
+        ]
+        let existingJSONData = try JSONSerialization.data(withJSONObject: existingJSON)
+        for agent in [SkillAgent.claudeCode, .omp] {
+            let configURL = try XCTUnwrap(configDestinations[agent])
+            try FileManager.default.createDirectory(
+                at: configURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try existingJSONData.write(to: configURL)
+        }
+        let codexConfigURL = try XCTUnwrap(configDestinations[.codex])
+        try FileManager.default.createDirectory(
+            at: codexConfigURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try """
+        model = "gpt-5.6"
+
+        [mcp_servers.ghpr]
+        command = "legacy-ghpr"
+
+        [mcp_servers.existing]
+        command = "keep-me"
+        """.write(to: codexConfigURL, atomically: true, encoding: .utf8)
 
         let installableAgents: Set<SkillAgent> = [.claudeCode, .codex, .omp]
-        let statuses = try SkillBuilderInstaller.install(
-            sourceSkillURL: sourceURL,
+        let statuses = try CodingAgentIntegrationInstaller.install(
+            sourceSkillURL: sourceSkillURL,
+            sourceMCPServerURL: sourceMCPServerURL,
             agents: installableAgents,
             homeURL: homeURL
         )
@@ -1026,23 +1078,152 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(
             Set(statuses.filter(\.installed).map(\.agent)),
             installableAgents,
-            "Install for All Agents must place a managed Skill Builder in every supported user scope"
+            "Install for All Agents must install both the Skill Builder and review-import MCP"
+        )
+        let managedMCPURL = CodingAgentIntegrationInstaller.managedMCPServerURL(
+            homeURL: homeURL
+        )
+        XCTAssertEqual(
+            try Data(contentsOf: managedMCPURL),
+            try Data(contentsOf: sourceMCPServerURL),
+            "Agent configurations must use a stable managed copy, not the movable app bundle"
         )
         for status in statuses {
             let installedText = try String(
-                contentsOf: status.destination.appendingPathComponent("SKILL.md"),
+                contentsOf: status.skillDestination.appendingPathComponent("SKILL.md"),
                 encoding: .utf8
             )
             XCTAssertTrue(
                 installedText.contains(SkillPackageManager.generatedMarker),
-                "\(status.agent.rawValue) must receive a ghpr-managed copy"
+                "\(status.agent.rawValue) must receive a ghpr-managed Skill Builder"
             )
             XCTAssertTrue(
                 installedText.contains("Read contracts from the installed ghpr CLI."),
                 "\(status.agent.rawValue) must receive the complete builder workflow"
             )
+            XCTAssertTrue(status.skillInstalled)
+            XCTAssertTrue(status.mcpInstalled)
         }
+
+        for agent in [SkillAgent.claudeCode, .omp] {
+            let configURL = try XCTUnwrap(configDestinations[agent])
+            let root = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: configURL))
+                    as? [String: Any]
+            )
+            let servers = try XCTUnwrap(root["mcpServers"] as? [String: Any])
+            XCTAssertNotNil(servers["existing"], "\(agent.rawValue) config must preserve other MCPs")
+            let ghpr = try XCTUnwrap(servers["ghpr"] as? [String: Any])
+            XCTAssertEqual(ghpr["command"] as? String, "node")
+            XCTAssertEqual(ghpr["args"] as? [String], [managedMCPURL.path])
+        }
+
+        let codexConfig = try String(contentsOf: codexConfigURL, encoding: .utf8)
+        XCTAssertTrue(codexConfig.contains("[mcp_servers.existing]"))
+        XCTAssertTrue(codexConfig.contains("command = \"keep-me\""))
+        XCTAssertTrue(codexConfig.contains("args = [\"\(managedMCPURL.path)\"]"))
+        XCTAssertFalse(codexConfig.contains("legacy-ghpr"))
+
+        try "// updated bundle\n".write(
+            to: sourceMCPServerURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        XCTAssertTrue(
+            CodingAgentIntegrationInstaller.statuses(
+                sourceMCPServerURL: sourceMCPServerURL,
+                homeURL: homeURL
+            ).allSatisfy { !$0.mcpInstalled },
+            "A newer bundled MCP must make every stale managed copy reinstallable"
+        )
     }
+    func testWorkbenchInstallBuilderInstallsCodingAgentIntegrationInInjectedHome() async throws {
+        let root = temporaryDirectory()
+        let assetsURL = root.appendingPathComponent("assets", isDirectory: true)
+        let skillURL = assetsURL.appendingPathComponent(
+            "ghpr-skill-builder/SKILL.md"
+        )
+        let mcpURL = assetsURL.appendingPathComponent(
+            "mcp-ghpr-bundle/index.mjs"
+        )
+        for url in [skillURL, mcpURL] {
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+        }
+        try "# ghpr Skill Builder".write(
+            to: skillURL,
+            atomically: true,
+            encoding: .utf8
+        )
+        try "#!/usr/bin/env node\n".write(
+            to: mcpURL,
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let homeURL = root.appendingPathComponent("home", isDirectory: true)
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let runtime = SkillRuntime(
+            store: store,
+            installedSkillsRootURL: root.appendingPathComponent("installed"),
+            bundledSkillsRootURL: nil
+        )
+        let router = BrowserBridgeRouter(
+            store: store,
+            runtime: runtime,
+            snapshotProvider: Self.emptySnapshot,
+            assetProvider: BrowserAssetProvider(roots: [assetsURL]),
+            appVersion: "1.0",
+            draftsRootURL: root.appendingPathComponent("drafts"),
+            agentSkillsHomeURL: homeURL
+        )
+        let response = await router.response(
+            for: BrowserHTTPRequest(
+                method: "POST",
+                target: "/api/v1/workbench",
+                headers: [
+                    "Authorization": "Bearer \(store.issueWorkbenchGrant())",
+                    "Content-Type": "application/json"
+                ],
+                body: try JSONSerialization.data(withJSONObject: [
+                    "operation": "install_builder",
+                    "agents": ["codex"]
+                ])
+            ),
+            baseURL: URL(string: "http://127.0.0.1:48120")!
+        )
+
+        XCTAssertEqual(response.status, 200)
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: response.body) as? [String: Any]
+        )
+        let statuses = try XCTUnwrap(payload["install_statuses"] as? [[String: Any]])
+        XCTAssertEqual(statuses.count, 1)
+        XCTAssertEqual(statuses[0]["agent"] as? String, "codex")
+        XCTAssertEqual(statuses[0]["installed"] as? Bool, true)
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: homeURL.appendingPathComponent(
+                    ".codex/skills/ghpr-skill-builder/SKILL.md"
+                ).path
+            )
+        )
+        let managedMCPURL = CodingAgentIntegrationInstaller.managedMCPServerURL(
+            homeURL: homeURL
+        )
+        XCTAssertEqual(
+            try String(contentsOf: managedMCPURL, encoding: .utf8),
+            "#!/usr/bin/env node\n"
+        )
+        let codexConfig = try String(
+            contentsOf: homeURL.appendingPathComponent(".codex/config.toml"),
+            encoding: .utf8
+        )
+        XCTAssertTrue(codexConfig.contains(managedMCPURL.path))
+    }
+
 
     func testAgentSkillDiscoveryScansClaudeCodeCodexAndOMPUserScopes() throws {
         let homeURL = temporaryDirectory()
@@ -1500,10 +1681,40 @@ final class BrowserBridgeTests: XCTestCase {
                 retryOfRunID: nil
             )
         )
+        store.save(
+            agentRuntimePreference: AgentRuntimePreference(
+                model: "gpt-5.6",
+                reasoningEffort: "high"
+            ),
+            for: .codex
+        )
+        store.save(
+            agentCapabilityCatalog: AgentCapabilityCatalog(
+                agent: .codex,
+                models: [
+                    AgentModelOption(
+                        slug: "gpt-5.6",
+                        displayName: "GPT-5.6",
+                        detail: nil,
+                        defaultEffort: "high",
+                        reasoningEfforts: [
+                            AgentReasoningEffortOption(effort: "high", detail: "Thorough")
+                        ]
+                    )
+                ],
+                reasoningEfforts: [
+                    AgentReasoningEffortOption(effort: "high", detail: "Thorough")
+                ],
+                listsModels: true,
+                listsReasoningEfforts: true,
+                source: "test",
+                refreshedAt: Date(timeIntervalSince1970: 1_700_000_000)
+            )
+        )
         let officialToken = try approveClient(
             store: store,
             id: "dev.ghpr.official-test",
-            scopes: [.prRead, .analysisRead, .uiContribute, .detailOpen]
+            scopes: [.prRead, .analysisRead, .uiContribute, .detailOpen, .skillList]
         )
         let baseURL = URL(string: "http://127.0.0.1:48120")!
         let pageResponse = await router.response(
@@ -1516,6 +1727,8 @@ final class BrowserBridgeTests: XCTestCase {
         )
         XCTAssertEqual(pageResponse.status, 200)
         let snapshot = try decodeValue(PageExtensionSnapshot.self, from: pageResponse.body)
+        XCTAssertEqual(snapshot.agentRuntime.first { $0.agent == .codex }?.preference.model, "gpt-5.6")
+        XCTAssertEqual(snapshot.agentCatalogs.first { $0.agent == .codex }?.models.first?.slug, "gpt-5.6")
         let card = try XCTUnwrap(
             snapshot.contributions.first { $0.component.type == .resultCard }
         )
@@ -2767,6 +2980,15 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(analysis.verdict, .likelyRelated)
         XCTAssertEqual(analysis.jobName, "Package & Release")
         XCTAssertEqual(analysis.summary, "The log attributes the failure to a packaging step.")
+        guard case .object(let payload) = completed.result?.payload,
+              case .object(let jobMetadata) = payload["_ghpr_job"] else {
+            return XCTFail("The normalized result must retain its resolved workflow job.")
+        }
+        XCTAssertEqual(jobMetadata["repository"], .string("owner/repo"))
+        XCTAssertEqual(jobMetadata["workflow_name"], .string("Package & Release"))
+        XCTAssertEqual(jobMetadata["workflow_run_id"], .string("123456789"))
+        XCTAssertEqual(jobMetadata["workflow_job_id"], .string("987654321"))
+
 
         let recorded = await recorder.request
         let request = try XCTUnwrap(recorded)
@@ -2844,7 +3066,10 @@ final class BrowserBridgeTests: XCTestCase {
             page: page,
             pullRequest: nil,
             requestedByClientID: "dev.ghpr.test",
-            subject: .workflowJob(subject)
+            subject: .workflowJob(subject),
+            agent: .codex,
+            model: "gpt-5.6",
+            reasoningEffort: "high"
         )
         XCTAssertThrowsError(
             try runtime.start(
@@ -2865,6 +3090,11 @@ final class BrowserBridgeTests: XCTestCase {
         XCTAssertEqual(completed.subject, .workflowJob(subject))
         let recordedSubject = await recorder.exactSubject
         XCTAssertEqual(recordedSubject, subject)
+        let recordedRequest = await recorder.request
+        let executionRequest = try XCTUnwrap(recordedRequest)
+        XCTAssertEqual(executionRequest.agent, .codex)
+        XCTAssertEqual(executionRequest.model, "gpt-5.6")
+        XCTAssertEqual(executionRequest.reasoningEffort, "high")
         guard case .object(let payload) = completed.result?.payload,
               case .string(let summary) = payload["summary"] else {
             return XCTFail("Expected the exact CI result payload.")
@@ -2942,12 +3172,18 @@ final class BrowserBridgeTests: XCTestCase {
             page: .pullRequest(repository: "owner/repo", number: 42),
             pullRequest: nil,
             requestedByClientID: "dev.ghpr.test",
-            subject: .pullRequestRevision(revision)
+            subject: .pullRequestRevision(revision),
+            agent: .codex,
+            model: "gpt-5.6",
+            reasoningEffort: "high"
         )
         let completed = try await terminalRun(store: store, id: queued.id)
         XCTAssertEqual(completed.status, .completed)
         XCTAssertEqual(completed.result?.kind, .codeReview)
         XCTAssertEqual(completed.result?.codeReview?.headSHA, revision.headSHA)
+        XCTAssertEqual(completed.agent, .codex)
+        XCTAssertEqual(completed.model, "gpt-5.6")
+        XCTAssertEqual(completed.reasoningEffort, "high")
         XCTAssertEqual(completed.result?.codeReview?.findings.first?.file, "Sources/Worker.swift")
         let inputLines = completed.logEntries?
             .filter { $0.stream == .skillInput }
@@ -2990,6 +3226,256 @@ final class BrowserBridgeTests: XCTestCase {
         let request = try XCTUnwrap(recordedRequest)
         XCTAssertEqual(request.context.reviewRevision?.baseSHA, revision.baseSHA)
         XCTAssertTrue(request.context.reviewRevision?.unifiedDiff.contains("state = next") == true)
+        XCTAssertEqual(request.agent, .codex)
+        XCTAssertEqual(request.model, "gpt-5.6")
+        XCTAssertEqual(request.reasoningEffort, "high")
+    }
+
+    func testImportReviewPersistsCompletedRunAndMatchingFinding() throws {
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let runtime = SkillRuntime(store: store, installedSkillsRootURL: temporaryDirectory())
+        let now = Date(timeIntervalSince1970: 1_775_000_000)
+        let payload = LocalReviewImportPayload(
+            baseSHA: String(repeating: "b", count: 40),
+            headSHA: String(repeating: "a", count: 40),
+            engine: "claude-code",
+            overviewMarkdown: "## Overview\nOne correctness issue.",
+            findings: [
+                LocalReviewImportFinding(
+                    file: "Sources/Worker.swift",
+                    startLine: 18,
+                    endLine: 18,
+                    side: .right,
+                    title: "Lost update",
+                    summary: "The write drops concurrent changes.",
+                    why: "Both tasks replace the same stale value.",
+                    suggestedFix: "Perform the mutation atomically.",
+                    background: nil,
+                    quotedCode: "state = next",
+                    severity: .error,
+                    confidence: 0.95,
+                    category: "concurrency"
+                )
+            ]
+        )
+
+        let revisionBefore = store.revision
+        let result = try runtime.importReview(
+            repository: "owner/repo",
+            number: 42,
+            payload: payload,
+            now: now
+        )
+
+        XCTAssertFalse(result.alreadyImported)
+        XCTAssertEqual(result.repository, "owner/repo")
+        XCTAssertEqual(result.number, 42)
+        XCTAssertEqual(result.headSHA, payload.headSHA)
+        XCTAssertEqual(result.findingCount, 1)
+        XCTAssertEqual(store.revision, revisionBefore + 1)
+
+        let run = try XCTUnwrap(store.run(id: result.runID))
+        XCTAssertEqual(run.skillID, SkillRuntime.reviewPRSkillID)
+        XCTAssertEqual(run.status, .completed)
+        XCTAssertEqual(run.requestedByClientID, "mcp-ghpr")
+        XCTAssertEqual(run.result?.kind, .codeReview)
+        XCTAssertEqual(run.result?.codeReview?.engine, "claude-code")
+        XCTAssertEqual(run.result?.codeReview?.reviewedBaseSHA, payload.baseSHA)
+        XCTAssertEqual(run.result?.codeReview?.reviewedHeadSHA, payload.headSHA)
+        XCTAssertEqual(run.result?.codeReview?.headSHA, payload.headSHA)
+
+        let displayFinding = try XCTUnwrap(run.result?.codeReview?.findings.first)
+        let persistedFinding = try XCTUnwrap(store.allFindings.first)
+        XCTAssertEqual(displayFinding.id, persistedFinding.id)
+        XCTAssertEqual(persistedFinding.lifecycle, .exact)
+        guard case .diffLine(let anchor) = persistedFinding.subject else {
+            return XCTFail("Expected an exact diff-line subject.")
+        }
+        XCTAssertEqual(anchor.repository, "owner/repo")
+        XCTAssertEqual(anchor.prNumber, 42)
+        XCTAssertEqual(anchor.baseSHA, payload.baseSHA)
+        XCTAssertEqual(anchor.headSHA, payload.headSHA)
+        XCTAssertEqual(anchor.filePath, "Sources/Worker.swift")
+        XCTAssertEqual(anchor.side, .right)
+        XCTAssertEqual(anchor.startLine, 18)
+        XCTAssertEqual(anchor.endLine, 18)
+    }
+
+    func testImportReviewIsIdempotentForIdenticalPayload() throws {
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let runtime = SkillRuntime(store: store, installedSkillsRootURL: temporaryDirectory())
+        let payload = LocalReviewImportPayload(
+            baseSHA: String(repeating: "b", count: 40),
+            headSHA: String(repeating: "a", count: 40),
+            engine: "claude-code",
+            overviewMarkdown: "## Overview\nAll good.",
+            findings: [
+                LocalReviewImportFinding(
+                    file: "Sources/Worker.swift",
+                    startLine: 18,
+                    endLine: 18,
+                    side: .right,
+                    title: "Lost update",
+                    summary: "The write drops concurrent changes.",
+                    why: nil,
+                    suggestedFix: nil,
+                    background: nil,
+                    quotedCode: nil,
+                    severity: .warning,
+                    confidence: 0.5,
+                    category: "concurrency"
+                )
+            ]
+        )
+
+        let first = try runtime.importReview(repository: "owner/repo", number: 42, payload: payload)
+        let revisionAfterFirst = store.revision
+        let runCountAfterFirst = store.allRuns.count
+        let findingCountAfterFirst = store.allFindings.count
+
+        let second = try runtime.importReview(repository: "owner/repo", number: 42, payload: payload)
+
+        XCTAssertEqual(second.runID, first.runID)
+        XCTAssertTrue(second.alreadyImported)
+        XCTAssertFalse(first.alreadyImported)
+        XCTAssertEqual(store.revision, revisionAfterFirst)
+        XCTAssertEqual(store.allRuns.count, runCountAfterFirst)
+        XCTAssertEqual(store.allFindings.count, findingCountAfterFirst)
+    }
+
+    func testImportReviewRejectsInvalidFindingWithoutPartialWrite() {
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let runtime = SkillRuntime(store: store, installedSkillsRootURL: temporaryDirectory())
+        let payload = LocalReviewImportPayload(
+            baseSHA: String(repeating: "b", count: 40),
+            headSHA: String(repeating: "a", count: 40),
+            engine: "claude-code",
+            overviewMarkdown: "## Overview\nAll good.",
+            findings: [
+                LocalReviewImportFinding(
+                    file: "Sources/Worker.swift",
+                    startLine: 20,
+                    endLine: 10,
+                    side: .right,
+                    title: "Invalid range",
+                    summary: "end_line is before start_line.",
+                    why: nil,
+                    suggestedFix: nil,
+                    background: nil,
+                    quotedCode: nil,
+                    severity: .warning,
+                    confidence: 0.5,
+                    category: "concurrency"
+                )
+            ]
+        )
+
+        let revisionBefore = store.revision
+        XCTAssertThrowsError(
+            try runtime.importReview(repository: "owner/repo", number: 42, payload: payload)
+        ) { error in
+            XCTAssertTrue(error is LocalReviewImportError)
+        }
+        XCTAssertEqual(store.revision, revisionBefore)
+        XCTAssertTrue(store.allRuns.isEmpty)
+        XCTAssertTrue(store.allFindings.isEmpty)
+    }
+
+    func testRerunFailedJobsRequiresConfirmationButNotSkillRun() async throws {
+        let store = ExtensionPlatformStore(storageURL: nil)
+        let runtime = SkillRuntime(
+            store: store,
+            installedSkillsRootURL: temporaryDirectory(),
+            bundledSkillsRootURL: nil
+        )
+        let pullRequest = LocalPRSnapshot(
+            id: 42,
+            section: .authored,
+            repository: "owner/repo",
+            number: 42,
+            title: "Make CI deterministic",
+            author: "xiaocang",
+            url: "https://github.com/owner/repo/pull/42",
+            state: "OPEN",
+            isDraft: false,
+            isPinned: false,
+            hasBaseConflicts: false,
+            unresolvedCount: 0,
+            ciStatus: "FAILURE",
+            checkSuccessCount: 1,
+            checkFailureCount: 2,
+            checkPendingCount: 0,
+            ciIsRunning: false,
+            approvalCount: 0,
+            changesRequestedCount: nil,
+            myReviewStatus: nil,
+            jiraTicket: nil,
+            ciWorkflows: [],
+            updatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            mergedAt: nil
+        )
+        var rerunRequests: [Int] = []
+        let router = BrowserBridgeRouter(
+            store: store,
+            runtime: runtime,
+            snapshotProvider: { Self.snapshot(authored: [pullRequest]) },
+            rerunFailedJobs: { requested in
+                rerunRequests.append(requested.number)
+                return 2
+            },
+            assetProvider: BrowserAssetProvider(roots: []),
+            appVersion: "1.0",
+            draftsRootURL: temporaryDirectory()
+        )
+        let baseURL = URL(string: "http://127.0.0.1:48120")!
+        let token = try approveClient(
+            store: store,
+            id: "dev.ghpr.checks-only",
+            scopes: [.prRead, .ciRead]
+        )
+        func rerun(confirmed: Bool?) async throws -> BrowserHTTPResponse {
+            await router.response(
+                for: BrowserHTTPRequest(
+                    method: "POST",
+                    target: "/api/v1/actions",
+                    headers: [
+                        "Authorization": "Bearer \(token)",
+                        "Content-Type": "application/json"
+                    ],
+                    body: try BrowserJSON.encode(
+                        ActionEnvelope(
+                            page: .pullRequest(repository: "owner/repo", number: 42),
+                            action: BrowserAction(
+                                kind: .rerunFailedJobs,
+                                skillID: nil,
+                                runID: nil,
+                                analysisID: nil,
+                                tag: nil,
+                                event: nil
+                            ),
+                            confirmed: confirmed
+                        )
+                    )
+                ),
+                baseURL: baseURL
+            )
+        }
+
+        let unconfirmed = try await rerun(confirmed: nil)
+        XCTAssertEqual(
+            unconfirmed.status,
+            409,
+            "Rerunning GitHub jobs must still require explicit confirmation"
+        )
+        XCTAssertTrue(rerunRequests.isEmpty)
+
+        let confirmed = try await rerun(confirmed: true)
+        XCTAssertEqual(
+            confirmed.status,
+            200,
+            "A confirmed rerun must not require the skill:run scope"
+        )
+        XCTAssertEqual(rerunRequests, [42])
     }
 
     private func approveClient(
@@ -3045,6 +3531,62 @@ final class BrowserBridgeTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testCatalogWarmUpProbesEveryUncachedProbeCapableAgent() async throws {
+        let cachedClaude = AgentCapabilityCatalog(
+            agent: .claudeCode,
+            models: [AgentModelOption(slug: "cached", displayName: "Cached", detail: nil, defaultEffort: nil, reasoningEfforts: [])],
+            reasoningEfforts: [],
+            listsModels: true,
+            listsReasoningEfforts: false,
+            source: "cache",
+            refreshedAt: Date(timeIntervalSince1970: 1_700_000_000)
+        )
+        var probed: [SkillAgent] = []
+        let controller = ExtensionPlatformController(
+            snapshotProvider: { Self.emptySnapshot() },
+            storageURL: nil,
+            appVersion: "1.0.0",
+            agentCapabilityProbe: { agent in
+                probed.append(agent)
+                return AgentCapabilityCatalog(
+                    agent: agent,
+                    models: [AgentModelOption(
+                        slug: "gpt-5.6",
+                        displayName: "GPT-5.6",
+                        detail: nil,
+                        defaultEffort: "high",
+                        reasoningEfforts: [AgentReasoningEffortOption(effort: "high", detail: "Thorough")]
+                    )],
+                    reasoningEfforts: [AgentReasoningEffortOption(effort: "high", detail: "Thorough")],
+                    listsModels: true,
+                    listsReasoningEfforts: true,
+                    source: "probe",
+                    refreshedAt: Date(timeIntervalSince1970: 1_700_000_100)
+                )
+            }
+        )
+        controller.store.save(agentCapabilityCatalog: cachedClaude)
+
+        await controller.warmAgentCapabilityCatalogs()
+
+        XCTAssertEqual(probed, [.codex], "Only uncached probe-capable agents may be probed")
+        XCTAssertEqual(
+            controller.cachedAgentCapabilityCatalog(for: .codex)?.models.first?.slug,
+            "gpt-5.6",
+            "The review dialog reads codex models from the cached catalog"
+        )
+        XCTAssertEqual(
+            controller.cachedAgentCapabilityCatalog(for: .claudeCode)?.models.first?.slug,
+            "cached",
+            "An existing catalog must not be re-probed or overwritten"
+        )
+        XCTAssertNil(controller.cachedAgentCapabilityCatalog(for: .omp))
+
+        await controller.warmAgentCapabilityCatalogs()
+        XCTAssertEqual(probed, [.codex], "Warm-up must run once per launch")
+    }
+
     private func decodeValue<Value: Codable & Equatable>(
         _ type: Value.Type,
         from data: Data
@@ -3061,6 +3603,10 @@ final class BrowserBridgeTests: XCTestCase {
     }
 
     private static func emptySnapshot() -> LocalSnapshot {
+        snapshot(authored: [])
+    }
+
+    private static func snapshot(authored: [LocalPRSnapshot]) -> LocalSnapshot {
         LocalSnapshot(
             schemaVersion: 1,
             generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
@@ -3101,7 +3647,7 @@ final class BrowserBridgeTests: XCTestCase {
                 waitingForMyReview: 0
             ),
             pullRequests: LocalPRSectionsSnapshot(
-                authored: [],
+                authored: authored,
                 reviewRequests: [],
                 mentioned: [],
                 directMentions: [],

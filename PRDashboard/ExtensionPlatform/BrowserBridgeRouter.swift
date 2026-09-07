@@ -118,6 +118,9 @@ final class BrowserBridgeRouter {
         let skillID: String
         let page: GitHubPageContext?
         let subject: GitHubSubject?
+        let agent: SkillAgent?
+        let model: String?
+        let reasoningEffort: String?
     }
 
     private struct TagBody: Codable {
@@ -619,7 +622,22 @@ final class BrowserBridgeRouter {
                     findings: pageFindings,
                     currentRevisionSubject: currentRevisionSubject,
                     githubSurfaceV2: store.githubSurfaceV2Enabled,
-                    surfaceHealth: store.unhealthySurfaces
+                    surfaceHealth: store.unhealthySurfaces,
+                    agentRuntime: client.scopes.contains(.skillList)
+                        ? SkillAgent.allCases
+                            .filter { $0 != .external }
+                            .map {
+                                AgentRuntimeSetting(
+                                    agent: $0,
+                                    preference: store.agentRuntimePreference(for: $0)
+                                )
+                            }
+                        : [],
+                    agentCatalogs: client.scopes.contains(.skillList)
+                        ? SkillAgent.allCases
+                            .filter { $0 != .external }
+                            .compactMap { store.agentCapabilityCatalog(for: $0) }
+                        : []
                 )
             )
         }
@@ -647,7 +665,10 @@ final class BrowserBridgeRouter {
                         page: page,
                         pullRequest: pullRequest(for: page),
                         requestedByClientID: client.id,
-                        subject: subject
+                        subject: subject,
+                        agent: body.agent,
+                        model: body.model,
+                        reasoningEffort: body.reasoningEffort
                     ),
                     includeArtifacts: client.scopes.contains(.artifactRead)
                 )
@@ -926,7 +947,10 @@ final class BrowserBridgeRouter {
                     page: page,
                     pullRequest: pullRequest(for: page),
                     requestedByClientID: client.id,
-                    subject: action.subject
+                    subject: action.subject,
+                    agent: action.agent,
+                    model: action.model,
+                    reasoningEffort: action.reasoningEffort
                 )
                 return json(
                     ActionResponse(
@@ -1018,9 +1042,9 @@ final class BrowserBridgeRouter {
                 let url = "ghpr://show?repository=\(urlEncode(page.repository))&number=\(page.prNumber ?? 0)"
                 return json(ActionResponse(run: nil, url: url, tags: nil, rerunCount: nil, event: nil))
             case .rerunFailedJobs:
-                guard client.scopes.contains(.skillRun) else {
-                    return scopeDenied(.skillRun)
-                }
+                // Rerunning GitHub's own failed jobs is a check-result action,
+                // not a Skill invocation: an approved client plus the explicit
+                // confirmation below is the whole gate.
                 guard confirmed else {
                     return error(
                         status: 409,
@@ -1090,8 +1114,10 @@ final class BrowserBridgeRouter {
 
     private func requiredScope(for action: BrowserActionKind) -> BrowserScope? {
         switch action {
-        case .runSkill, .retryRun, .rerunFailedJobs:
+        case .runSkill, .retryRun:
             return .skillRun
+        case .rerunFailedJobs:
+            return nil
         case .cancelRun:
             return .skillCancel
         case .openDetail:
@@ -1321,18 +1347,31 @@ final class BrowserBridgeRouter {
                 )
             )
         case "install_builder":
-            guard let source = assetProvider.url(relativePath: "ghpr-skill-builder/SKILL.md") else {
-                return error(status: 500, code: "asset_missing", message: "Skill Builder asset is missing.")
+            guard let sourceSkillURL = assetProvider.url(
+                relativePath: "ghpr-skill-builder/SKILL.md"
+            ), let sourceMCPServerURL = assetProvider.url(
+                relativePath: "mcp-ghpr-bundle/index.mjs"
+            ) else {
+                return error(
+                    status: 500,
+                    code: "asset_missing",
+                    message: "Coding Agent Integration assets are missing."
+                )
             }
             let agents = request.agents ?? [.claudeCode, .codex, .omp]
-            let statuses = try SkillBuilderInstaller.install(sourceSkillURL: source, agents: agents)
-                .map {
-                    WorkbenchInstallStatus(
-                        agent: $0.agent,
-                        path: $0.destination.path,
-                        installed: $0.installed
-                    )
-                }
+            let statuses = try CodingAgentIntegrationInstaller.install(
+                sourceSkillURL: sourceSkillURL,
+                sourceMCPServerURL: sourceMCPServerURL,
+                agents: agents,
+                homeURL: agentSkillsHomeURL
+            )
+            .map {
+                WorkbenchInstallStatus(
+                    agent: $0.agent,
+                    path: $0.skillDestination.path,
+                    installed: $0.installed
+                )
+            }
             return json(
                 WorkbenchResponse(
                     path: nil,

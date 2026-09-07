@@ -161,12 +161,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        localSocketServer = LocalSocketServer { [weak self] in
-            AppDelegate.makeLocalSnapshot(
-                oauthManager: self?.oauthManager,
-                prManager: self?.prManager
-            )
-        }
+        localSocketServer = LocalSocketServer(
+            snapshotProvider: { [weak self] in
+                AppDelegate.makeLocalSnapshot(
+                    oauthManager: self?.oauthManager,
+                    prManager: self?.prManager
+                )
+            },
+            reviewImporter: { [weak extensionPlatformController] repository, number, payload in
+                guard let extensionPlatformController else {
+                    throw CocoaError(.featureUnsupported)
+                }
+                return try extensionPlatformController.importReview(
+                    repository: repository,
+                    number: number,
+                    payload: payload
+                )
+            }
+        )
         localSocketServer?.start()
         extensionPlatformController.onPendingPairing = { [weak self] approval in
             self?.openBrowserPairingWindow(approval: approval)

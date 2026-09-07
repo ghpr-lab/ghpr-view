@@ -552,6 +552,15 @@ final class ExtensionPlatformStore: ObservableObject {
         touch()
     }
 
+    func save(run: SkillRun, findings: [SkillFinding]) {
+        state.runs[run.id] = run
+        if state.findings == nil { state.findings = [:] }
+        for finding in findings {
+            state.findings?[finding.id] = finding
+        }
+        touch()
+    }
+
     func run(id: String) -> SkillRun? {
         state.runs[id]
     }

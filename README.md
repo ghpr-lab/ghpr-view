@@ -39,7 +39,7 @@ brew install xiaocang/tap/prdashboard
 - **Jira Integration** - Enrich detected Jira tickets with titles, statuses, and labels
 - **Notifications** - Desktop alerts for new unresolved comments, CI status changes, and important changes on pinned PRs
 - **Rate Limit Display** - Shows GitHub API rate limit in footer
-- **Local Integrations** - Query the running app over a read-only Unix socket with `ghpr` or the bundled MCP server
+- **Local Integrations** - Query the running app over a local Unix socket with `ghpr` (read-only) or the bundled MCP server (read-only tools plus `import_review` to persist an externally produced code review)
 - **GitHub Browser Integration** - Official `ghpr for GitHub` userscript adds CI analysis, Skill actions, tags, and local detail views to GitHub PR and Actions pages
 - **Extension Platform** - Versioned Skill, presentation, and browser-contribution contracts with scoped third-party userscript capabilities
 - **Skill Workbench** - Create, migrate, validate, fixture-test, preview, package, and install ghpr Skills
@@ -87,7 +87,7 @@ ghpr prs --json
 ghpr snapshot --json
 ```
 
-The CLI connects to a read-only Unix socket at `/tmp/com.xiaocang.PRDashboard.<uid>.sock`. Use `GHPR_SOCKET_PATH` or `--socket PATH` to override the path.
+The CLI connects to a local Unix socket at `/tmp/com.xiaocang.PRDashboard.<uid>.sock` and only ever sends read commands (`status`, `ping`, `prs`, `pr`, `snapshot`). Use `GHPR_SOCKET_PATH` or `--socket PATH` to override the path.
 
 Available `prs` sections are `authored`, `review`, `mentioned`, `direct-mentions`, `merged`, and `all`. For MCP integration, run `make install-mcp` and see [`mcp-ghpr/README.md`](mcp-ghpr/README.md).
 
@@ -119,7 +119,7 @@ ghpr skill pack ./team.ci.policy-check
 ghpr skill install ./team.ci.policy-check
 ```
 
-The app can install the bundled `ghpr-skill-builder` into Claude Code, Codex, and OMP user-skill directories. The builder reads the contracts exported by the installed `ghpr` binary instead of carrying a stale copy. Workbench Enhance automatically discovers Skills in those three user scopes and adds presentation and GitHub surfaces to an app-managed copy; the source `SKILL.md` and pass-through result semantics remain unchanged.
+The app's Coding Agent Integration installs both the bundled `ghpr-skill-builder` and a standalone review-import MCP for Claude Code, Codex, and OMP. The MCP executable is copied from the app bundle into stable user Application Support storage before each agent configuration is updated. The builder reads the contracts exported by the installed `ghpr` binary instead of carrying a stale copy. Workbench Enhance automatically discovers Skills in those three user scopes and adds presentation and GitHub surfaces to an app-managed copy; the source `SKILL.md` and pass-through result semantics remain unchanged.
 
 Runnable managed Skills execute through a restricted Claude Code, Codex, or OMP CLI invocation in a private temporary run directory. `execution.isolation: strict` describes the ghpr invocation contract, not an OS sandbox: ghpr disables Agent-exposed tools, shell actions, repository checkout, and task-directed network tools; passes the package instructions, result schema, and sanitized snapshot; and builds the child environment from an explicit model-provider allowlist so ambient application and repository credential variables are not inherited. The trusted host CLI still retains its normal `HOME`, configuration/plugins, provider credentials, and provider network transport. Codex starts after its working directory is switched to the private run root (`-C`) inside a read-only sandbox. ghpr validates final structured output against the package schema before persisting it.
 
@@ -147,8 +147,7 @@ A GitHub PR page never submits the same Skill twice: while a run for that Skill 
 - **Open PRs in cmux First** - Reuse a matching cmux PR tab before falling back to the default browser
 - **Jira** - Configure Jira Cloud credentials, metadata refresh interval, and connection testing
 - **Browser Integration** - Install the official userscript, inspect bridge and GitHub-page health, test the local connection, and revoke paired clients
-- **Skill Builder** - Install the user-level builder for supported coding agents and open the local Workbench or current contracts
-- **Coding Agent Runtime** - Pin the model and reasoning effort ghpr passes to Claude Code, Codex, and OMP, with CLI-sourced lists and a refresh action
+- **Coding Agent Integration** - Install the Skill Builder and review-import MCP for Claude Code, Codex, and OMP, then open the local Workbench or current contracts
 - **Updates** - Enable automatic update checks or check manually
 - **Developer Options** - Replay onboarding, clear caches, override the GraphQL endpoint, or configure an HTTP proxy
 

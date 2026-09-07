@@ -397,7 +397,7 @@
       const returnURL = this.safeGitHubReturnURL();
       const workbenchPage = ["workbench", "github-preview", "browser-test"].includes(this.page);
       const message = capabilityFailure && workbenchPage
-        ? "Open ghpr → Settings → Skill Builder → Open Skill Workbench"
+        ? "Open ghpr → Settings → Coding Agent Integration → Open Skill Workbench"
         : capabilityFailure
           ? "Reopen this page from GitHub to receive a fresh capability."
           : (error.message || String(error));
@@ -902,7 +902,7 @@
       const frameActions = [
         element(d, "button", {
           className: "button secondary",
-          text: "Install Skill Builder",
+          text: "Install Coding Agent Integration",
           disabled: state.busy,
           onClick: () => this.workbenchOperation("install_builder", {
             agents: ["claude_code", "codex", "omp"]
@@ -1487,7 +1487,7 @@
           }
         }
         if (payload.install_statuses) {
-          state.notice = `Skill Builder installed for ${payload.install_statuses.map(
+          state.notice = `Coding Agent Integration installed for ${payload.install_statuses.map(
             (status) => titleCase(status.agent)
           ).join(", ")}.`;
         } else if (operation === "test") {

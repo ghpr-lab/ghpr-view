@@ -44,10 +44,10 @@ server 通过 `getpeereid()` 校验对端 UID 必须等于当前进程 UID，否
 ## 2. 协议版本
 
 ```
-schemaVersion = 1
+schemaVersion = 2
 ```
 
-每个响应都会带 `schemaVersion` 字段。client 应当校验它等于自己支持的版本，不一致时按协议错误处理。
+每个响应都会带 `schemaVersion` 字段。client 应当校验它等于自己支持的版本，不一致时按协议错误处理。`schemaVersion` 从 1 升级到 2 是可加字段的兼容变更：新增了 `import_review` 命令、请求体的 `review` 字段、响应体的 `reviewImport` 字段，以及 `summary.directMentions` / `pullRequests.directMentions`；旧客户端忽略未知字段仍可继续工作。
 
 ---
 
@@ -55,9 +55,10 @@ schemaVersion = 1
 
 ```json
 {
-  "command": "ping" | "snapshot" | "pr",
-  "repository": "owner/name",   // 仅 pr 命令必填
-  "number": 123                 // 仅 pr 命令必填
+  "command": "ping" | "snapshot" | "pr" | "import_review",
+  "repository": "owner/name",   // 仅 pr / import_review 命令必填
+  "number": 123,                // 仅 pr / import_review 命令必填
+  "review": { ... }             // 仅 import_review 命令必填，结构见 5.4
 }
 ```
 
@@ -66,8 +67,9 @@ schemaVersion = 1
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `command` | string | 是 | 命令名，见下文 |
-| `repository` | string | 仅 `pr` | `owner/name` 形式；大小写不敏感匹配 |
-| `number` | int | 仅 `pr` | PR 号 |
+| `repository` | string | `pr` / `import_review` | `owner/name` 形式；大小写不敏感匹配 |
+| `number` | int | `pr` / `import_review` | PR 号 |
+| `review` | object | 仅 `import_review` | 见 5.4 `LocalReviewImportPayload` |
 
 未识别的 `command` 会返回 `unsupported_command` 错误。
 
@@ -77,28 +79,29 @@ schemaVersion = 1
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "ok": true,
   "snapshot": { ... } | null,
   "pullRequest": { ... } | null,
+  "reviewImport": { ... } | null,
   "error": null | { "code": "...", "message": "..." }
 }
 ```
 
 约定：
 
-- `ok = true` 时 `error = null`，且至少有一个数据字段（`snapshot` / `pullRequest`）非空，由命令决定哪个字段被填充。
+- `ok = true` 时 `error = null`，且至少有一个数据字段（`snapshot` / `pullRequest` / `reviewImport`）非空，由命令决定哪个字段被填充。
 - `ok = false` 时数据字段均为 `null`，`error` 必填。
 
 ### 错误码
 
 | `error.code` | 含义 |
 |--------------|------|
-| `invalid_request` | JSON 不合法、缺少必填字段、或请求超出长度限制 |
+| `invalid_request` | JSON 不合法、缺少必填字段、请求超出长度限制、或 `import_review` 校验失败 |
 | `unsupported_command` | `command` 不在已知集合中 |
 | `unauthorized_peer` | 对端 UID 不匹配（同源校验失败） |
 | `not_found` | `pr` 命令找不到对应的 PR |
-| `internal_error` | server 内部错误（如生成 snapshot 超时） |
+| `internal_error` | server 内部错误（如生成 snapshot 超时，或 `import_review` 时扩展平台控制器不可用） |
 
 ---
 
@@ -117,12 +120,12 @@ schemaVersion = 1
 响应：
 
 ```json
-{ "schemaVersion": 1, "ok": true, "snapshot": null, "pullRequest": null, "error": null }
+{ "schemaVersion": 2, "ok": true, "snapshot": null, "pullRequest": null, "reviewImport": null, "error": null }
 ```
 
 ### 5.2 `snapshot`
 
-返回应用当前完整快照，包含版本、登录状态、刷新状态、限流信息、聚合统计以及四个分组下的所有 PR。
+返回应用当前完整快照，包含版本、登录状态、刷新状态、限流信息、聚合统计以及五个分组下的所有 PR。
 
 请求：
 
@@ -134,10 +137,11 @@ schemaVersion = 1
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "ok": true,
   "snapshot": { /* LocalSnapshot，结构见第 6 节 */ },
   "pullRequest": null,
+  "reviewImport": null,
   "error": null
 }
 ```
@@ -146,7 +150,7 @@ schemaVersion = 1
 
 ### 5.3 `pr`
 
-按 `owner/name` + PR 号查询单个 PR。匹配范围限定为 snapshot 中已加载的四个分组（`authored` / `reviewRequests` / `mentioned` / `mergedLast24h`），未加载的 PR 不会去 GitHub 重查。
+按 `owner/name` + PR 号查询单个 PR。匹配范围限定为 snapshot 中已加载的五个分组（`authored` / `reviewRequests` / `mentioned` / `directMentions` / `mergedLast24h`），未加载的 PR 不会去 GitHub 重查。
 
 请求：
 
@@ -158,10 +162,11 @@ schemaVersion = 1
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "ok": true,
   "snapshot": null,
   "pullRequest": { /* LocalPRSnapshot，结构见第 6 节 */ },
+  "reviewImport": null,
   "error": null
 }
 ```
@@ -170,13 +175,96 @@ schemaVersion = 1
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "ok": false,
   "snapshot": null,
   "pullRequest": null,
+  "reviewImport": null,
   "error": { "code": "not_found", "message": "No PR found for example-org/example-repo#1234." }
 }
 ```
+
+### 5.4 `import_review`
+
+将一份已经完成的 code review 以 `pr.review` Skill run 的形式落盘到 PRDashboard 本地存储（`extension-platform.json`），供 UI 和其它读命令展示。**该命令绝不会向 GitHub 提交 review 或评论**，纯本地写入。
+
+请求 `review` 字段结构（`LocalReviewImportPayload`）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `baseSHA` | string | 40 位十六进制 base commit SHA |
+| `headSHA` | string | 40 位十六进制 head commit SHA |
+| `engine` | string | 1-200 字符，任意 provenance 标签（如 `claude-code`） |
+| `overviewMarkdown` | string | 1-100000 字符，review 总览 Markdown |
+| `findings` | `LocalReviewImportFinding[]` | 1-50 条，每条一个 line-anchored finding |
+
+`LocalReviewImportFinding` 字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `file` | string | 仓库相对路径，1-1024 字符，不含 `..` 或前导 `/` |
+| `startLine` / `endLine` | int | `startLine > 0` 且 `endLine >= startLine` |
+| `side` | `"left"` \| `"right"` | diff 侧 |
+| `title` | string | 1-200 字符 |
+| `summary` | string | 1-2000 字符 |
+| `why` / `suggestedFix` / `background` / `quotedCode` | string? | 各自最多 20000 字符 |
+| `severity` | `"error"` \| `"warning"` \| `"info"` | |
+| `confidence` | number | `0...1` |
+| `category` | string | 1-200 字符 |
+
+请求：
+
+```json
+{
+  "command": "import_review",
+  "repository": "example-org/example-repo",
+  "number": 1234,
+  "review": {
+    "baseSHA": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "headSHA": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "engine": "claude-code",
+    "overviewMarkdown": "## Summary\nLooks good overall, one correctness issue.",
+    "findings": [
+      {
+        "file": "src/worker.ts",
+        "startLine": 18,
+        "endLine": 18,
+        "side": "right",
+        "title": "Lost update",
+        "summary": "The write drops concurrent changes.",
+        "severity": "error",
+        "confidence": 0.95,
+        "category": "concurrency"
+      }
+    ]
+  }
+}
+```
+
+成功响应（`reviewImport` 为 `LocalReviewImportResult`）：
+
+```json
+{
+  "schemaVersion": 2,
+  "ok": true,
+  "snapshot": null,
+  "pullRequest": null,
+  "reviewImport": {
+    "runID": "run_mcp_1a2b3c4d5e6f7a8b9c0d1e2f",
+    "repository": "example-org/example-repo",
+    "number": 1234,
+    "headSHA": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "findingCount": 1,
+    "importedAt": "2026-01-01T00:00:00Z",
+    "alreadyImported": false
+  },
+  "error": null
+}
+```
+
+**幂等**：使用完全相同的 `(repository, number, review)` 再次调用会返回相同的 `runID`，`alreadyImported: true`，不会产生新的 run、不会触碰 store revision。
+
+校验失败（例如 SHA 不是 40 位十六进制、`endLine < startLine`、字段超长、findings 超过 50 条）会在写入任何数据前返回 `invalid_request`，不会产生部分写入。扩展平台控制器不可用时返回 `internal_error`。
 
 ---
 
@@ -195,7 +283,7 @@ schemaVersion = 1
 | `refresh` | `LocalRefreshSnapshot` | 上次刷新状态 |
 | `rateLimit` | `LocalRateLimitSnapshot` | GitHub API 限流 |
 | `summary` | `LocalSummarySnapshot` | 聚合计数 |
-| `pullRequests` | `LocalPRSectionsSnapshot` | 四个分组的 PR 列表 |
+| `pullRequests` | `LocalPRSectionsSnapshot` | 五个分组的 PR 列表 |
 
 ### 6.2 `LocalAppSnapshot`
 
@@ -238,6 +326,7 @@ schemaVersion = 1
 | `authored` | int | 我创建的 PR 数 |
 | `reviewRequests` | int | 待我 review 的 PR 数 |
 | `mentioned` | int | @我 的 PR 数 |
+| `directMentions` | int | 评论中直接 @我 的 PR 数 |
 | `mergedLast24h` | int | 24 小时内已合并 |
 | `totalUnresolved` | int | 全部 PR 的未解决评论数总和 |
 | `authoredUnresolved` | int | 我创建的 PR 中未解决评论数总和 |
@@ -254,6 +343,7 @@ schemaVersion = 1
 | `authored` | `LocalPRSnapshot[]` |
 | `reviewRequests` | `LocalPRSnapshot[]` |
 | `mentioned` | `LocalPRSnapshot[]` |
+| `directMentions` | `LocalPRSnapshot[]` |
 | `mergedLast24h` | `LocalPRSnapshot[]` |
 
 ### 6.8 `LocalPRSnapshot`
@@ -261,7 +351,7 @@ schemaVersion = 1
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | int | 应用内部 PR ID |
-| `section` | enum: `authored` / `review` / `mentioned` / `merged` | 该 PR 所属分组（注意是单数 `review` / `merged`，与 `LocalPRSectionsSnapshot` 字段名不同） |
+| `section` | enum: `authored` / `review` / `mentioned` / `directMentions` / `merged` | 该 PR 所属分组（注意是单数 `review` / `merged`，与 `LocalPRSectionsSnapshot` 字段名不同） |
 | `repository` | string | `owner/name` |
 | `number` | int | PR 号 |
 | `title` | string | 标题 |
@@ -283,6 +373,20 @@ schemaVersion = 1
 | `jiraTicket` | string? | 解析到的 Jira ticket |
 | `updatedAt` | Date | PR 更新时间 |
 | `mergedAt` | Date? | 合并时间，未合并为 null |
+
+### 6.9 `LocalReviewImportResult`
+
+`import_review` 成功时填充在响应的 `reviewImport` 字段。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `runID` | string | 生成的 `pr.review` run ID，形如 `run_mcp_<24 位十六进制>` |
+| `repository` | string | 归一化（小写）后的 `owner/name` |
+| `number` | int | PR 号 |
+| `headSHA` | string | 归一化（小写）后的 head SHA |
+| `findingCount` | int | 落盘的 finding 数 |
+| `importedAt` | Date | 首次导入完成时间；重复导入时为原始导入时间 |
+| `alreadyImported` | bool | 是否命中了已存在的相同 review（幂等） |
 
 ---
 
@@ -374,5 +478,5 @@ call({ command: "ping" }).then(console.log);
 
 - 仅支持 macOS（应用本身为 macOS menu bar app）。
 - 不提供推送 / 流式接口，需要轮询 `snapshot` 才能拿到最新值。
-- `pr` 命令只能查询已加载的 PR；不在四个分组里的 PR 不会被命中。
-- 没有写操作；socket 当前只读。
+- `pr` 命令只能查询已加载的 PR；不在五个分组里的 PR 不会被命中。
+- `import_review` 是当前唯一的写命令：其余命令（`ping` / `snapshot` / `pr`）仍然只读；`import_review` 只写本地存储，绝不触达 GitHub。

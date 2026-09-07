@@ -16,17 +16,21 @@
   const SURFACE_IDS = Object.freeze({
     conversationReviewSummary: "github.pr.conversation.review-summary",
     checksJobTrailing: "github.pr.checks.job.trailing",
+    checksSummary: "github.pr.checks.summary",
     checksJobInsight: "github.pr.checks.job.insight",
     actionsJobAfterFailureSummary: "github.actions.job.after-failure-summary",
     filesFileHeader: "github.pr.files.file.header",
     filesDiffLineAfter: "github.pr.files.diff.line.after",
-    pageFindingDrawer: "github.page.finding-drawer"
+    pageFindingDrawer: "github.page.finding-drawer",
+    reviewLaunchDialog: "github.pr.review-launch-dialog"
   });
 
   const VIEW_TYPES = Object.freeze([
     "job_verdict",
     "ci_insight",
+    "ci_summary",
     "review_summary",
+    "review_launch_dialog",
     "review_finding_preview",
     "finding_count",
     "review_finding",
@@ -126,6 +130,42 @@
     .ghpr-job-verdict[data-status="failed"] .ghpr-job-verdict-copy { color: var(--fgColor-danger, #d1242f); }
     .ghpr-job-verdict[data-status="queued"] .ghpr-job-verdict-copy,
     .ghpr-job-verdict[data-status="running"] .ghpr-job-verdict-copy { color: var(--fgColor-muted, #656d76); }
+    .ghpr-job-reason {
+      color: var(--fgColor-muted, #656d76);
+      flex: 1 1 180px;
+      max-width: 360px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .ghpr-ci-summary {
+      background: var(--bgColor-attention-muted, #fff8c5);
+      border: 1px solid var(--borderColor-attention-muted, #d4a72c66);
+      color: #1f2328;
+      border-radius: 6px;
+      margin: 8px 0;
+      padding: 10px 12px;
+    }
+    .ghpr-ci-summary-title {
+      font-weight: 600;
+      margin: 0 0 4px;
+    }
+    .ghpr-ci-summary-list {
+      margin: 0;
+      padding-left: 18px;
+    }
+    @media (prefers-color-scheme: dark) {
+      .ghpr-ci-summary {
+        background: #2d2a12;
+        border-color: #9e6a03;
+        color: #f0f6fc;
+      }
+    }
+    :root[data-color-mode="dark"] .ghpr-ci-summary {
+      background: #2d2a12;
+      border-color: #9e6a03;
+      color: #f0f6fc;
+    }
     .ghpr-ci-insight {
       background: var(--bgColor-default, #fff);
       border: 1px solid var(--borderColor-default, #d1d9e0);
@@ -237,7 +277,67 @@
       border: 1px solid var(--borderColor-default, #d1d9e0);
       border-radius: 6px;
       margin: 12px 0;
-      overflow: hidden;
+      overflow: visible;
+    }
+    .ghpr-review-summary-checks {
+      align-items: center;
+      border-bottom: 1px solid var(--borderColor-muted, #d8dee4);
+      display: flex;
+      gap: 8px;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border-radius: 6px 6px 0 0;
+    }
+    .ghpr-review-summary-checks-copy { color: var(--fgColor-muted, #656d76); }
+    .ghpr-review-summary-checks-copy[data-hint] {
+      cursor: help;
+      outline-offset: 2px;
+      position: relative;
+    }
+    .ghpr-review-summary-checks-copy[data-hint]::after {
+      background: var(--bgColor-emphasis, #25292e);
+      border-radius: 6px;
+      color: var(--fgColor-onEmphasis, #fff);
+      content: attr(data-hint);
+      display: none;
+      font-size: 12px;
+      left: 0;
+      max-width: min(420px, 80vw);
+      padding: 8px 10px;
+      position: absolute;
+      top: calc(100% + 6px);
+      white-space: pre-line;
+      width: max-content;
+      z-index: 1000;
+    }
+    .ghpr-review-summary-checks-copy[data-hint]:hover::after,
+    .ghpr-review-summary-checks-copy[data-hint]:focus-visible::after {
+      display: block;
+    }
+    .ghpr-review-summary-checks-actions {
+      align-items: center;
+      display: flex;
+      gap: 4px;
+    }
+    .ghpr-review-summary-check-action {
+      background: transparent;
+      border-color: transparent;
+      border-radius: 4px;
+      color: var(--fgColor-accent, #0969da);
+      font-size: 11px;
+      font-weight: 600;
+      min-height: 24px;
+      padding: 2px 6px;
+    }
+    .ghpr-review-summary-check-action:hover {
+      background: var(--bgColor-accent-muted, #ddf4ff);
+      border-color: transparent;
+    }
+    .ghpr-review-summary-rerun::before {
+      content: "↻";
+      font-size: 15px;
+      font-weight: 400;
+      line-height: 1;
     }
     .ghpr-review-summary-identity {
       align-items: center;
@@ -289,6 +389,155 @@
       padding: 0 12px 9px;
     }
     .ghpr-review-summary-findings { border-top: 1px solid var(--borderColor-muted, #d8dee4); }
+    .ghpr-surface-modal-backdrop {
+      align-items: center;
+      background: rgba(31, 35, 40, .45);
+      display: flex;
+      inset: 0;
+      justify-content: center;
+      padding: 24px;
+      position: fixed;
+      z-index: 10000;
+    }
+    .ghpr-surface-modal {
+      background: var(--bgColor-default, #fff);
+      border: 1px solid var(--borderColor-default, #d1d9e0);
+      border-radius: 12px;
+      box-shadow: var(--shadow-floating-large, 0 16px 48px rgba(31, 35, 40, .24));
+      max-height: calc(100vh - 48px);
+      max-width: 560px;
+      overflow: auto;
+      position: relative;
+      width: 100%;
+    }
+    .ghpr-surface-modal-close {
+      align-items: center;
+      appearance: none;
+      background: transparent;
+      border: 0;
+      border-radius: 6px;
+      color: var(--fgColor-muted, #656d76);
+      cursor: pointer;
+      display: inline-flex;
+      font-size: 20px;
+      height: 32px;
+      justify-content: center;
+      position: absolute;
+      right: 12px;
+      top: 12px;
+      width: 32px;
+      z-index: 1;
+    }
+    .ghpr-surface-modal-close:hover {
+      background: var(--button-default-bgColor-hover, var(--bgColor-neutral-muted, #eaeef2));
+      color: var(--fgColor-default, #1f2328);
+    }
+    .ghpr-review-launch-head { padding: 20px 52px 14px 20px; }
+    .ghpr-review-launch-title {
+      font-size: 18px;
+      line-height: 1.35;
+      margin: 0;
+    }
+    .ghpr-review-launch-subtitle {
+      color: var(--fgColor-muted, #656d76);
+      margin: 4px 0 0;
+    }
+    .ghpr-review-revision-rail {
+      align-items: center;
+      background: var(--bgColor-muted, #f6f8fa);
+      border-bottom: 1px solid var(--borderColor-muted, #d8dee4);
+      border-top: 1px solid var(--borderColor-muted, #d8dee4);
+      display: flex;
+      font: 11px ui-monospace, "SFMono-Regular", Consolas, monospace;
+      gap: 8px;
+      padding: 9px 20px;
+    }
+    .ghpr-review-revision-label {
+      color: var(--fgColor-muted, #656d76);
+      font: 600 10px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: .04em;
+      margin-right: auto;
+      text-transform: uppercase;
+    }
+    .ghpr-review-revision-arrow { color: var(--fgColor-accent, #0969da); }
+    .ghpr-review-launch-section { padding: 18px 20px; }
+    .ghpr-review-launch-section + .ghpr-review-launch-section {
+      border-top: 1px solid var(--borderColor-muted, #d8dee4);
+    }
+    .ghpr-review-launch-section h3 {
+      font-size: 13px;
+      margin: 0 0 3px;
+    }
+    .ghpr-review-launch-section-copy {
+      color: var(--fgColor-muted, #656d76);
+      margin: 0 0 14px;
+    }
+    .ghpr-review-launch-fields {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .ghpr-review-launch-field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+      min-width: 0;
+    }
+    .ghpr-review-launch-field > span {
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .ghpr-review-launch-field select,
+    .ghpr-review-launch-field input {
+      appearance: none;
+      background: var(--bgColor-default, #fff);
+      border: 1px solid var(--borderColor-default, #d1d9e0);
+      border-radius: 6px;
+      color: var(--fgColor-default, #1f2328);
+      font: inherit;
+      height: 34px;
+      min-width: 0;
+      padding: 6px 10px;
+      width: 100%;
+    }
+    .ghpr-review-launch-field select {
+      background-image: linear-gradient(45deg, transparent 50%, currentColor 50%), linear-gradient(135deg, currentColor 50%, transparent 50%);
+      background-position: calc(100% - 14px) 14px, calc(100% - 10px) 14px;
+      background-repeat: no-repeat;
+      background-size: 4px 4px, 4px 4px;
+      padding-right: 28px;
+    }
+    .ghpr-review-launch-field select:focus,
+    .ghpr-review-launch-field input:focus {
+      border-color: var(--focus-outlineColor, #0969da);
+      box-shadow: 0 0 0 3px var(--focus-outlineColor, #0969da33);
+      outline: none;
+    }
+    .ghpr-review-launch-actions {
+      align-items: center;
+      display: flex;
+      gap: 10px;
+      justify-content: flex-end;
+      margin-top: 16px;
+    }
+    .ghpr-review-import-tool {
+      background: var(--bgColor-muted, #f6f8fa);
+      border: 1px solid var(--borderColor-muted, #d8dee4);
+      border-radius: 6px;
+      color: var(--fgColor-default, #1f2328);
+      display: inline-block;
+      font: 11px ui-monospace, "SFMono-Regular", Consolas, monospace;
+      margin: 0 0 12px;
+      padding: 5px 8px;
+    }
+    @media (max-width: 560px) {
+      .ghpr-surface-modal-backdrop { align-items: flex-end; padding: 0; }
+      .ghpr-surface-modal { border-radius: 12px 12px 0 0; max-height: 92vh; max-width: none; }
+      .ghpr-review-launch-fields { grid-template-columns: 1fr; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ghpr-surface-modal { scroll-behavior: auto; }
+    }
     .ghpr-review-finding {
       padding: 10px 12px;
     }
@@ -923,12 +1172,13 @@
 
   function renderActionButton(document, action) {
     const button = h(document, "button", {
-      className: "ghpr-action-button",
+      className: ["ghpr-action-button", action.className].filter(Boolean).join(" "),
       text: action.label,
       attrs: {
         type: "button",
         "data-primary": action.primary ? "true" : undefined,
         "data-action-id": action.id,
+        title: action.title,
         disabled: action.disabled ? "" : undefined
       }
     });
@@ -1203,7 +1453,7 @@
   }
 
   // --- job_verdict --------------------------------------------------------
-  // model: { status, confidencePercent, actions: [{id,label,primary,onSelect}] }
+  // model: { status, confidencePercent, reason, actions: [{id,label,primary,onSelect}] }
   function renderJobVerdict(document, model = {}) {
     const status = model.status || "idle";
     const labels = {
@@ -1226,6 +1476,13 @@
         attrs: { "aria-live": status === "queued" || status === "running" ? "polite" : undefined }
       }));
     }
+    if (model.reason) {
+      children.push(h(document, "span", {
+        className: "ghpr-job-reason",
+        text: model.reason,
+        attrs: { title: model.reason }
+      }));
+    }
     for (const action of model.actions || []) {
       children.push(renderActionButton(document, action));
     }
@@ -1233,6 +1490,23 @@
       className: "ghpr-surface ghpr-job-verdict",
       attrs: { "data-status": status }
     }, children);
+  }
+
+  // --- ci_summary ----------------------------------------------------------
+  // model: { title, reasons: [{label, reason}] }
+  function renderCISummary(document, model = {}) {
+    const reasons = (model.reasons || []).filter((item) => item?.reason);
+    return h(document, "section", { className: "ghpr-surface ghpr-ci-summary" }, [
+      h(document, "p", {
+        className: "ghpr-ci-summary-title",
+        text: model.title || "ghpr CI failure summary"
+      }),
+      h(document, "ul", { className: "ghpr-ci-summary-list" }, reasons.map((item) =>
+        h(document, "li", {
+          text: item.label ? `${item.label}: ${item.reason}` : item.reason
+        })
+      ))
+    ]);
   }
 
   // --- ci_insight ----------------------------------------------------------
@@ -1789,13 +2063,276 @@
       }
     });
 
+    const checksActions = model.checksActions;
+    const checkButtons = Array.isArray(checksActions?.actions)
+      ? checksActions.actions
+          .filter((action) => typeof action?.onSelect === "function")
+          .map((action) => renderActionButton(document, {
+            ...action,
+            className: [
+              "ghpr-review-summary-check-action",
+              action.className
+            ].filter(Boolean).join(" ")
+          }))
+      : [];
+    const checksRow = checksActions && checkButtons.length
+      ? h(document, "div", { className: "ghpr-review-summary-checks" }, [
+          h(document, "span", {
+            className: "ghpr-review-summary-checks-copy",
+            text: checksActions.summary || "",
+            attrs: {
+              tabindex: checksActions.hint ? "0" : undefined,
+              "data-hint": checksActions.hint || undefined,
+              "aria-label": checksActions.hint
+                ? `${checksActions.summary || ""}. ${checksActions.hint.replace(/\n/g, " ")}`
+                : undefined
+            }
+          }),
+          h(document, "div", {
+            className: "ghpr-review-summary-checks-actions"
+          }, checkButtons)
+        ])
+      : null;
+
     return h(document, "div", { className: "ghpr-surface ghpr-review-summary" }, [
+      checksRow,
       identity,
       h(document, "div", { className: "ghpr-review-summary-toolbar" }, toolbar),
       meta,
       findingsList
     ]);
   }
+
+  function renderReviewLaunchDialog(document, model = {}) {
+    const runtimes = Array.isArray(model.runtimes) ? model.runtimes : [];
+    const selectedRuntimeID = model.selectedRuntime ||
+      runtimes.find((runtime) => runtime.selected)?.id ||
+      runtimes[0]?.id ||
+      "";
+    const runtimeSelect = h(document, "select", {
+      attrs: { id: "ghpr-review-runtime", "aria-label": "Review runtime" }
+    });
+    for (const runtime of runtimes) {
+      runtimeSelect.append(h(document, "option", {
+        text: runtime.label || runtime.id,
+        attrs: { value: runtime.id }
+      }));
+    }
+    runtimeSelect.value = selectedRuntimeID;
+
+    const modelField = h(document, "label", { className: "ghpr-review-launch-field" });
+    const effortField = h(document, "label", { className: "ghpr-review-launch-field" });
+    let modelControl = null;
+    let effortControl = null;
+
+    const runtimeConfig = () =>
+      runtimes.find((runtime) => runtime.id === runtimeSelect.value) || runtimes[0] || {};
+    const effortOptions = (runtime, modelID) => {
+      const modelOption = (runtime.models || []).find((option) => option.slug === modelID);
+      const options = modelOption?.reasoningEfforts?.length
+        ? modelOption.reasoningEfforts
+        : (runtime.reasoningEfforts || []);
+      const preferred = runtime.selectedReasoningEffort || "";
+      return {
+        options,
+        selected: options.some((option) => option.effort === preferred)
+          ? preferred
+          : (modelOption?.defaultEffort || "")
+      };
+    };
+    const renderEffortControl = (runtime, modelID) => {
+      const { options, selected } = effortOptions(runtime, modelID);
+      effortField.replaceChildren();
+      effortControl = null;
+      if (!options.length) {
+        effortField.hidden = true;
+        return;
+      }
+      effortField.hidden = false;
+      effortControl = h(document, "select", {
+        attrs: { id: "ghpr-review-reasoning", "aria-label": "Reasoning effort" }
+      }, [
+        h(document, "option", { text: "Runtime default", attrs: { value: "" } }),
+        ...options.map((option) => h(document, "option", {
+          text: option.detail ? `${option.effort} — ${option.detail}` : option.effort,
+          attrs: { value: option.effort }
+        }))
+      ]);
+      effortControl.value = selected;
+      effortField.append(
+        h(document, "span", { text: "Reasoning" }),
+        effortControl
+      );
+    };
+    const renderModelControl = () => {
+      const runtime = runtimeConfig();
+      const models = Array.isArray(runtime.models) ? runtime.models : [];
+      modelField.replaceChildren();
+      if (models.length) {
+        modelControl = h(document, "select", {
+          attrs: { id: "ghpr-review-model", "aria-label": "Review model" }
+        }, [
+          h(document, "option", { text: "Runtime default", attrs: { value: "" } }),
+          ...models.map((option) => h(document, "option", {
+            text: option.displayName || option.slug,
+            attrs: { value: option.slug }
+          }))
+        ]);
+      } else {
+        modelControl = h(document, "input", {
+          attrs: {
+            id: "ghpr-review-model",
+            type: "text",
+            maxlength: "80",
+            placeholder: "Runtime default or model name",
+            "aria-label": "Review model"
+          }
+        });
+      }
+      modelControl.value = runtime.selectedModel || "";
+      modelControl.addEventListener("change", () =>
+        renderEffortControl(runtimeConfig(), modelControl.value)
+      );
+      modelField.append(
+        h(document, "span", { text: "Model" }),
+        modelControl
+      );
+      renderEffortControl(runtime, modelControl.value);
+    };
+    runtimeSelect.addEventListener("change", renderModelControl);
+    renderModelControl();
+    const startLabel = model.startLabel || "Start review";
+    const startingLabel = model.startingLabel || "Starting…";
+
+    const startButton = h(document, "button", {
+      className: "ghpr-action-button",
+      text: startLabel,
+      attrs: {
+        type: "button",
+        "data-action-id": model.startActionID || "start-review",
+        "data-primary": "true"
+      }
+    });
+    startButton.addEventListener("click", async () => {
+      if (typeof model.onStart !== "function" || startButton.disabled) return;
+      startButton.disabled = true;
+      startButton.textContent = startingLabel;
+      try {
+        const started = await model.onStart({
+          agent: runtimeSelect.value,
+          model: modelControl?.value || null,
+          reasoningEffort: effortControl?.value || null
+        });
+        if (!started) {
+          startButton.disabled = false;
+          startButton.textContent = startLabel;
+        }
+      } catch {
+        startButton.disabled = false;
+        startButton.textContent = startLabel;
+      }
+    });
+
+    const copyPrompt = renderCopyButton(document, {
+      id: "copy-import-prompt",
+      label: "Copy import prompt",
+      className: "ghpr-action-button",
+      ariaLabel: "Copy instructions for importing an external review",
+      onCopy: model.onCopyImportPrompt
+    });
+
+    return h(document, "div", { className: "ghpr-surface ghpr-review-launch" }, [
+      h(document, "div", { className: "ghpr-review-launch-head" }, [
+        h(document, "h2", {
+          className: "ghpr-review-launch-title",
+          text: model.title || "Review this revision"
+        }),
+        h(document, "p", {
+          className: "ghpr-review-launch-subtitle",
+          text: model.subtitle || "Choose how this exact pull request revision should be reviewed."
+        })
+      ]),
+      h(document, "div", {
+        className: "ghpr-review-revision-rail",
+        attrs: {
+          title: `${model.baseSHA || ""}…${model.headSHA || ""}`,
+          "aria-label": `Review revision ${model.baseSHA || ""} to ${model.headSHA || ""}`
+        }
+      }, [
+        h(document, "span", { className: "ghpr-review-revision-label", text: `${model.repository || ""}#${model.number || ""}` }),
+        h(document, "span", { text: String(model.baseSHA || "").slice(0, 7) }),
+        h(document, "span", { className: "ghpr-review-revision-arrow", text: "→", attrs: { "aria-hidden": "true" } }),
+        h(document, "strong", { text: String(model.headSHA || "").slice(0, 7) })
+      ]),
+      h(document, "section", { className: "ghpr-review-launch-section" }, [
+        h(document, "h3", { text: model.sectionTitle || "Run review with ghpr" }),
+        h(document, "p", {
+          className: "ghpr-review-launch-section-copy",
+          text: model.sectionCopy || "ghpr prepares the exact diff and runs the selected coding agent locally."
+        }),
+        h(document, "div", { className: "ghpr-review-launch-fields" }, [
+          h(document, "label", { className: "ghpr-review-launch-field" }, [
+            h(document, "span", { text: "Runtime" }),
+            runtimeSelect
+          ]),
+          modelField,
+          effortField
+        ]),
+        h(document, "div", { className: "ghpr-review-launch-actions" }, [startButton])
+      ]),
+      model.showImport === false
+        ? null
+        : h(document, "section", { className: "ghpr-review-launch-section" }, [
+            h(document, "h3", { text: "Import an existing review" }),
+            h(document, "p", {
+              className: "ghpr-review-launch-section-copy",
+              text: "Review in your usual CLI session, then ask the agent to save its structured findings through the configured ghpr MCP server."
+            }),
+            h(document, "code", { className: "ghpr-review-import-tool", text: "ghpr.import_review" }),
+            h(document, "div", { className: "ghpr-review-launch-actions" }, [copyPrompt])
+          ])
+    ]);
+  }
+  function renderFailedChecksRerunDialog(document, model = {}) {
+    return h(document, "div", { className: "ghpr-surface ghpr-review-launch" }, [
+      h(document, "div", { className: "ghpr-review-launch-head" }, [
+        h(document, "h2", {
+          className: "ghpr-review-launch-title",
+          text: "Re-run failed jobs?"
+        }),
+        h(document, "p", {
+          className: "ghpr-review-launch-subtitle",
+          text: model.canExplain === false
+            ? "Re-run the failed GitHub jobs now?"
+            : "Would you like ghpr to explain the failed checks before re-running them?"
+        })
+      ]),
+      h(document, "section", { className: "ghpr-review-launch-section" }, [
+        h(document, "p", {
+          className: "ghpr-review-launch-section-copy",
+          text: model.canExplain === false
+            ? "This immediately retries the failed GitHub jobs."
+            : "Explain CI Failure lets you choose the coding agent runtime and model. Re-run anyway immediately retries the failed GitHub jobs."
+        }),
+        h(document, "div", { className: "ghpr-review-launch-actions" }, [
+          model.canExplain === false
+            ? null
+            : renderActionButton(document, {
+                id: "explain-before-rerun",
+                label: "Explain CI Failure",
+                onSelect: model.onExplain
+              }),
+          renderActionButton(document, {
+            id: "rerun-anyway",
+            label: "Re-run anyway",
+            primary: true,
+            onSelect: model.onRerun
+          })
+        ])
+      ])
+    ]);
+  }
+
 
   // --- detail_drawer -----------------------------------------------------------
   // model: { title, subtitle, sections: [{heading, body}], actions: [{id, label, onSelect}], raw }
@@ -1829,8 +2366,10 @@
 
   const RENDERERS = Object.freeze({
     job_verdict: renderJobVerdict,
+    ci_summary: renderCISummary,
     ci_insight: renderCiInsight,
     review_summary: renderReviewSummary,
+    review_launch_dialog: renderReviewLaunchDialog,
     review_finding_preview: renderReviewFindingPreview,
     finding_count: renderFindingCount,
     review_finding: renderReviewFinding,
@@ -2064,6 +2603,96 @@
     }
   }
 
+  class ModalHost {
+    constructor({ document }) {
+      this.document = document;
+      this._backdrop = null;
+      this._panel = null;
+      this._trigger = null;
+      this._onClose = null;
+      this._keydownHandler = (event) => this._onKeydown(event);
+    }
+
+    get isOpen() {
+      return !!(this._backdrop && this._backdrop.isConnected);
+    }
+
+    open(contentElement, { onClose = null, triggerEl = null, ariaLabel = "Dialog" } = {}) {
+      this.close();
+      const document = this.document;
+      this._trigger = triggerEl || document.activeElement || null;
+      this._onClose = onClose;
+      const backdrop = h(document, "div", {
+        className: "ghpr-surface-modal-backdrop",
+        attrs: { "data-ghpr-surface": SURFACE_IDS.reviewLaunchDialog },
+        onClick: (event) => {
+          if (event.target === backdrop) this.close();
+        }
+      });
+      const closeButton = h(document, "button", {
+        className: "ghpr-surface-modal-close",
+        text: "\u00d7",
+        attrs: { type: "button", "aria-label": "Close" },
+        onClick: () => this.close()
+      });
+      const panel = h(document, "div", {
+        className: "ghpr-surface-modal",
+        attrs: { role: "dialog", "aria-modal": "true", "aria-label": ariaLabel, tabindex: "-1" }
+      }, [closeButton, contentElement]);
+      backdrop.appendChild(panel);
+      document.body.appendChild(backdrop);
+      document.addEventListener("keydown", this._keydownHandler, true);
+      this._backdrop = backdrop;
+      this._panel = panel;
+      const firstControl = panel.querySelector("select, input, button");
+      (firstControl || panel).focus?.();
+      return panel;
+    }
+
+    close() {
+      if (!this._backdrop) return;
+      const document = this.document;
+      document.removeEventListener("keydown", this._keydownHandler, true);
+      this._backdrop.remove();
+      const trigger = this._trigger;
+      const onClose = this._onClose;
+      this._backdrop = null;
+      this._panel = null;
+      this._trigger = null;
+      this._onClose = null;
+      trigger?.focus?.();
+      if (typeof onClose === "function") onClose();
+    }
+
+    _onKeydown(event) {
+      if (!this._panel) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        this.close();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(this._panel.querySelectorAll(
+        'a[href], button:not([disabled]), textarea, input, select, [tabindex]:not([tabindex="-1"])'
+      ));
+      if (!focusable.length) {
+        event.preventDefault();
+        this._panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = this.document.activeElement;
+      if (event.shiftKey && active === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && active === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
+
   // --- SurfaceRegistry: thin convenience wrapper over keyed SurfaceMounts -----
   class SurfaceRegistry {
     constructor({ document }) {
@@ -2124,6 +2753,8 @@
     renderJobVerdict,
     renderCiInsight,
     renderReviewSummary,
+    renderReviewLaunchDialog,
+    renderFailedChecksRerunDialog,
     renderReviewFindingPreview,
     renderReviewFinding,
     renderFindingCount,
@@ -2134,6 +2765,7 @@
     SurfaceMount,
     InlinePanelHost,
     DrawerHost,
+    ModalHost,
     SurfaceRegistry
   };
 

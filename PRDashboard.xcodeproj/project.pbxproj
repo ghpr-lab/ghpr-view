@@ -86,6 +86,7 @@
 		G1000003 /* styles.css in Resources */ = {isa = PBXBuildFile; fileRef = G2000003 /* styles.css */; };
 		H1000001 /* userscript-sdk in Resources */ = {isa = PBXBuildFile; fileRef = H2000001 /* userscript-sdk */; };
 		H1000003 /* ghpr-skill-builder in Resources */ = {isa = PBXBuildFile; fileRef = H2000003 /* ghpr-skill-builder */; };
+		H1000004 /* mcp-ghpr-bundle in Resources */ = {isa = PBXBuildFile; fileRef = H2000004 /* mcp-ghpr-bundle */; };
 		I1000001 /* GitHubSurfaceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = I2000001 /* GitHubSurfaceTests.swift */; };
 		J1000001 /* surface-renderers.js in Resources */ = {isa = PBXBuildFile; fileRef = J2000001 /* surface-renderers.js */; };
 /* End PBXBuildFile section */
@@ -185,6 +186,7 @@
 		G2000003 /* styles.css */ = {isa = PBXFileReference; lastKnownFileType = text.css; path = styles.css; sourceTree = "<group>"; };
 		H2000001 /* userscript-sdk */ = {isa = PBXFileReference; explicitFileType = folder; path = "userscript-sdk"; sourceTree = "<group>"; };
 		H2000003 /* ghpr-skill-builder */ = {isa = PBXFileReference; explicitFileType = folder; path = "ghpr-skill-builder"; sourceTree = "<group>"; };
+		H2000004 /* mcp-ghpr-bundle */ = {isa = PBXFileReference; explicitFileType = folder; path = "mcp-ghpr-bundle"; sourceTree = "<group>"; };
 		I2000001 /* GitHubSurfaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GitHubSurfaceTests.swift; sourceTree = "<group>"; };
 		J2000001 /* surface-renderers.js */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.javascript; path = surface-renderers.js; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -233,6 +235,7 @@
 				G5000001 /* browser */,
 				H2000001 /* userscript-sdk */,
 				H2000003 /* ghpr-skill-builder */,
+				H2000004 /* mcp-ghpr-bundle */,
 				B5000013 /* Frameworks */,
 				A5000010 /* Products */,
 			);
@@ -577,6 +580,7 @@
 				G1000003 /* styles.css in Resources */,
 				H1000001 /* userscript-sdk in Resources */,
 				H1000003 /* ghpr-skill-builder in Resources */,
+				H1000004 /* mcp-ghpr-bundle in Resources */,
 				J1000001 /* surface-renderers.js in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

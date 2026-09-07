@@ -275,14 +275,6 @@ struct SettingsView: View {
                     BrowserIntegrationView(controller: extensionPlatformController)
                 }
 
-                Section("Skill Builder") {
-                    SkillBuilderSettingsView(controller: extensionPlatformController)
-                }
-
-                Section("Coding Agent Runtime") {
-                    AgentRuntimeSettingsView(controller: extensionPlatformController)
-                }
-
                 Section("Power & Network") {
                     Toggle("Pause background refresh in Low Power Mode", isOn: $pausePollingInLowPowerMode)
                     Toggle("Pause background refresh on cellular/hotspot", isOn: $pausePollingOnExpensiveNetwork)

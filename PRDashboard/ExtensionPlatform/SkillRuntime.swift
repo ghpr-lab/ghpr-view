@@ -233,6 +233,7 @@ final class SkillRuntime: ObservableObject {
         case subjectPageMismatch
         case subjectTargetMismatch
         case duplicateActiveRun
+        case invalidRuntimeSelection(String)
 
         var errorDescription: String? {
             switch self {
@@ -251,6 +252,8 @@ final class SkillRuntime: ObservableObject {
                 return "The Skill does not support this exact GitHub subject type."
             case .duplicateActiveRun:
                 return "This Skill is already running for the exact GitHub subject."
+            case .invalidRuntimeSelection(let message):
+                return message
             }
         }
     }
@@ -435,7 +438,7 @@ final class SkillRuntime: ObservableObject {
                 displayName: "Explain CI Failure",
                 summary: "Summarize failed checks and the evidence available to ghpr.",
                 targets: [.workflowJob],
-                agents: [.omp, .claudeCode],
+                agents: [.omp, .claudeCode, .codex],
                 defaultAgent: .omp,
                 isBuiltIn: true,
                 hasBrowserCompanion: false,
@@ -517,6 +520,9 @@ final class SkillRuntime: ObservableObject {
         requestedByClientID: String?,
         retryOfRunID: String? = nil,
         subject: GitHubSubject? = nil,
+        agent requestedAgent: SkillAgent? = nil,
+        model requestedModel: String? = nil,
+        reasoningEffort requestedReasoningEffort: String? = nil,
         now: Date = Date()
     ) throws -> SkillRun {
         guard let definition = skills.first(where: { $0.id == skillID }) else {
@@ -525,6 +531,20 @@ final class SkillRuntime: ObservableObject {
         guard definition.isRunnable else {
             throw RuntimeError.unavailableRuntime(skillID)
         }
+        let selectedAgent = requestedAgent ?? definition.defaultAgent
+        guard selectedAgent != .external, definition.agents.contains(selectedAgent) else {
+            throw RuntimeError.invalidRuntimeSelection(
+                "\(selectedAgent.displayName) cannot run Skill '\(skillID)'."
+            )
+        }
+        let selectedModel = try Self.validatedRuntimeSelection(
+            requestedModel,
+            field: "model"
+        )
+        let selectedReasoningEffort = try Self.validatedRuntimeSelection(
+            requestedReasoningEffort,
+            field: "reasoning effort"
+        )
         let effectiveSubject = subject ?? .legacyPage(page)
         guard Self.subject(effectiveSubject, belongsTo: page) else {
             throw RuntimeError.subjectPageMismatch
@@ -543,7 +563,9 @@ final class SkillRuntime: ObservableObject {
         var run = SkillRun(
             id: "run_\(Self.randomID())",
             skillID: skillID,
-            agent: definition.defaultAgent,
+            agent: selectedAgent,
+            model: selectedModel,
+            reasoningEffort: selectedReasoningEffort,
             page: page,
             requestedByClientID: requestedByClientID,
             createdAt: now,
@@ -570,6 +592,247 @@ final class SkillRuntime: ObservableObject {
             )
         }
         return run
+    }
+
+    func importReview(
+        repository: String,
+        number: Int,
+        payload: LocalReviewImportPayload,
+        now: Date = Date()
+    ) throws -> LocalReviewImportResult {
+        let normalizedRepository = repository.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let subject = try? PullRequestRevisionSubject(
+            repository: normalizedRepository,
+            prNumber: number,
+            baseSHA: payload.baseSHA,
+            headSHA: payload.headSHA
+        ) else {
+            throw LocalReviewImportError.invalid("repository, number, base_sha, or head_sha is invalid.")
+        }
+
+        let engine = payload.engine.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !engine.isEmpty, engine.count <= 200 else {
+            throw LocalReviewImportError.invalid("engine must be 1-200 characters.")
+        }
+        let overviewMarkdown = payload.overviewMarkdown
+        guard !overviewMarkdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              overviewMarkdown.count <= 100_000 else {
+            throw LocalReviewImportError.invalid("overview_markdown must be non-blank and at most 100000 characters.")
+        }
+        guard !payload.findings.isEmpty, payload.findings.count <= 50 else {
+            throw LocalReviewImportError.invalid("findings must contain between 1 and 50 entries.")
+        }
+
+        var normalizedFindings: [LocalReviewImportFinding] = []
+        normalizedFindings.reserveCapacity(payload.findings.count)
+        for finding in payload.findings {
+            let file = finding.file.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !file.isEmpty, file.count <= 1_024, !file.hasPrefix("/"),
+                  !file.split(separator: "/").contains(".."),
+                  finding.startLine > 0, finding.endLine >= finding.startLine else {
+                throw LocalReviewImportError.invalid("finding file path or line range is invalid.")
+            }
+            let title = finding.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !title.isEmpty, title.count <= 200 else {
+                throw LocalReviewImportError.invalid("finding title must be 1-200 characters.")
+            }
+            let summary = finding.summary.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !summary.isEmpty, finding.summary.count <= 2_000 else {
+                throw LocalReviewImportError.invalid("finding summary must be non-blank and at most 2000 characters.")
+            }
+            let category = finding.category.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !category.isEmpty, category.count <= 200 else {
+                throw LocalReviewImportError.invalid("finding category must be 1-200 characters.")
+            }
+            guard finding.confidence.isFinite, (0...1).contains(finding.confidence) else {
+                throw LocalReviewImportError.invalid("finding confidence must be between 0 and 1.")
+            }
+            for optionalDetail in [finding.why, finding.suggestedFix, finding.background, finding.quotedCode] {
+                if let optionalDetail, optionalDetail.count > 20_000 {
+                    throw LocalReviewImportError.invalid("finding detail fields must be at most 20000 characters.")
+                }
+            }
+            normalizedFindings.append(
+                LocalReviewImportFinding(
+                    file: file,
+                    startLine: finding.startLine,
+                    endLine: finding.endLine,
+                    side: finding.side,
+                    title: title,
+                    summary: summary,
+                    why: finding.why,
+                    suggestedFix: finding.suggestedFix,
+                    background: finding.background,
+                    quotedCode: finding.quotedCode,
+                    severity: finding.severity,
+                    confidence: finding.confidence,
+                    category: category
+                )
+            )
+        }
+
+        let normalizedPayload = LocalReviewImportPayload(
+            baseSHA: subject.baseSHA,
+            headSHA: subject.headSHA,
+            engine: engine,
+            overviewMarkdown: overviewMarkdown,
+            findings: normalizedFindings
+        )
+
+        guard let encodedPayload = try? LocalAPIJSON.encode(normalizedPayload),
+              let encodedPayloadUTF8 = String(data: encodedPayload, encoding: .utf8) else {
+            throw LocalReviewImportError.invalid("Unable to normalize review payload.")
+        }
+        let reviewHash = reviewSHA256(
+            "import-review:v1\0\(subject.repository)\0\(number)\0\(encodedPayloadUTF8)"
+        )
+        let runID = "run_mcp_\(reviewHash.prefix(24))"
+
+        if let existing = store.run(id: runID) {
+            return LocalReviewImportResult(
+                runID: runID,
+                repository: subject.repository,
+                number: subject.prNumber,
+                headSHA: subject.headSHA,
+                findingCount: normalizedFindings.count,
+                importedAt: existing.completedAt ?? existing.createdAt,
+                alreadyImported: true
+            )
+        }
+
+        var reviewFindings: [ReviewFinding] = []
+        var persistedFindings: [SkillFinding] = []
+        for (ordinal, finding) in normalizedFindings.enumerated() {
+            let targetCode = finding.quotedCode ?? finding.summary
+            let fingerprint = reviewFindingFingerprint(
+                skillID: Self.reviewPRSkillID,
+                category: finding.category,
+                file: finding.file,
+                side: finding.side,
+                targetCode: targetCode
+            )
+            let findingID = "finding_\(reviewSHA256("\(runID)\0\(fingerprint)\0\(ordinal)").prefix(24))"
+
+            let anchor = try DiffAnchor(
+                repository: subject.repository,
+                prNumber: subject.prNumber,
+                baseSHA: subject.baseSHA,
+                headSHA: subject.headSHA,
+                filePath: finding.file,
+                side: finding.side,
+                startLine: finding.startLine,
+                endLine: finding.endLine,
+                quotedCode: finding.quotedCode
+            )
+            let findingSubject = GitHubSubject.diffLine(anchor)
+
+            reviewFindings.append(
+                ReviewFinding(
+                    id: findingID,
+                    file: finding.file,
+                    line: finding.endLine,
+                    body: finding.summary,
+                    quotedCode: finding.quotedCode,
+                    details: ReviewFindingDetails(
+                        why: finding.why,
+                        suggestedFix: finding.suggestedFix,
+                        background: finding.background,
+                        triggerScenarios: []
+                    ),
+                    severity: finding.severity,
+                    confidence: finding.confidence,
+                    category: finding.category,
+                    title: finding.title,
+                    side: finding.side,
+                    startLine: finding.startLine,
+                    endLine: finding.endLine,
+                    snippet: nil
+                )
+            )
+
+            let findingSeverity: FindingSeverity
+            switch finding.severity {
+            case .error: findingSeverity = .error
+            case .warning: findingSeverity = .warning
+            case .info: findingSeverity = .info
+            }
+            let detailSections = [
+                finding.why.map { "Why\n\($0)" },
+                finding.suggestedFix.map { "Suggested fix\n\($0)" },
+                finding.background.map { "Background\n\($0)" }
+            ].compactMap { $0 }
+            persistedFindings.append(
+                SkillFinding(
+                    id: findingID,
+                    subjectKey: findingSubject.subjectKey,
+                    subject: findingSubject,
+                    kind: .reviewFinding,
+                    severity: findingSeverity,
+                    title: finding.title,
+                    summary: finding.summary,
+                    details: detailSections.isEmpty ? nil : detailSections.joined(separator: "\n\n"),
+                    confidence: finding.confidence,
+                    lifecycle: .exact,
+                    createdAt: now,
+                    fingerprint: fingerprint
+                )
+            )
+        }
+
+        let codeReview = CodeReviewResult(
+            overviewMarkdown: overviewMarkdown,
+            findings: reviewFindings,
+            engine: engine,
+            reviewedAt: now,
+            headSHA: subject.headSHA,
+            reviewedBaseSHA: subject.baseSHA,
+            reviewedHeadSHA: subject.headSHA,
+            reviewedFiles: nil,
+            skippedFiles: nil
+        )
+        let result = SkillResult(
+            kind: .codeReview,
+            title: "Review Summary",
+            summary: String(overviewMarkdown.prefix(2_000)),
+            analysis: nil,
+            codeReview: codeReview,
+            markdown: overviewMarkdown,
+            artifacts: [],
+            payload: nil
+        )
+
+        let page = GitHubPageContext.pullRequest(repository: subject.repository, number: subject.prNumber)
+        let run = SkillRun(
+            id: runID,
+            skillID: Self.reviewPRSkillID,
+            agent: nil,
+            page: page,
+            requestedByClientID: "mcp-ghpr",
+            createdAt: now,
+            startedAt: now,
+            completedAt: now,
+            status: .completed,
+            progressMessage: nil,
+            progressCurrent: nil,
+            progressTotal: nil,
+            logEntries: nil,
+            result: result,
+            error: nil,
+            retryOfRunID: nil,
+            subject: .pullRequestRevision(subject)
+        )
+
+        store.save(run: run, findings: persistedFindings)
+
+        return LocalReviewImportResult(
+            runID: runID,
+            repository: subject.repository,
+            number: subject.prNumber,
+            headSHA: subject.headSHA,
+            findingCount: persistedFindings.count,
+            importedAt: now,
+            alreadyImported: false
+        )
     }
 
     func cancel(runID: String, now: Date = Date()) throws -> SkillRun {
@@ -603,9 +866,13 @@ final class SkillRuntime: ObservableObject {
             pullRequest: pullRequest,
             requestedByClientID: requestedByClientID,
             retryOfRunID: oldRun.id,
-            subject: oldRun.subject
+            subject: oldRun.subject,
+            agent: oldRun.agent,
+            model: oldRun.model,
+            reasoningEffort: oldRun.reasoningEffort
         )
     }
+
     private static func supportedTargets(for subject: GitHubSubject) -> Set<SkillTarget> {
         switch subject {
         case .pullRequestRevision:
@@ -666,10 +933,16 @@ final class SkillRuntime: ObservableObject {
                     page: sourcePage,
                     pullRequest: pullRequest,
                     subject: run.subject,
+                    agent: run.agent ?? .omp,
                     ciLogFetch: ciLogFetch,
                     exactCILogFetch: exactCILogFetch
                 )
-                let rawResult = try await runAgent(request, runID: runID)
+                let rawResult = try await runAgent(
+                    request,
+                    runID: runID,
+                    model: run.model,
+                    reasoningEffort: run.reasoningEffort
+                )
                 let normalizedResult = try Self.analysisResult(
                     from: rawResult,
                     page: run.page,
@@ -677,7 +950,7 @@ final class SkillRuntime: ObservableObject {
                     subject: run.subject,
                     agent: request.agent,
                     startedAt: startedAt,
-                    resolvedJobName: request.context.failedJobLogs?.workflowName
+                    resolvedJob: request.context.failedJobLogs
                 )
                 if case .workflowJob = run.subject,
                    let finding = Self.ciFinding(
@@ -703,9 +976,15 @@ final class SkillRuntime: ObservableObject {
                     page: run.page,
                     pullRequest: pullRequest,
                     subject: revision,
-                    workspace: workspace
+                    workspace: workspace,
+                    agent: run.agent ?? .omp
                 )
-                let rawResult = try await runAgent(request, runID: runID)
+                let rawResult = try await runAgent(
+                    request,
+                    runID: runID,
+                    model: run.model,
+                    reasoningEffort: run.reasoningEffort
+                )
                 let review = try Self.reviewResult(
                     from: rawResult,
                     runID: runID,
@@ -776,15 +1055,34 @@ final class SkillRuntime: ObservableObject {
         return String(message.prefix(maximumLogMessageLength - 1)) + "…"
     }
 
+    private static func validatedRuntimeSelection(
+        _ value: String?,
+        field: String
+    ) throws -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        guard let sanitized = AgentCLIAdapter.sanitizedSelection(trimmed) else {
+            throw RuntimeError.invalidRuntimeSelection(
+                "The selected \(field) contains unsupported characters."
+            )
+        }
+        return sanitized
+    }
+
     private func runAgent(
         _ request: AgentExecutionRequest,
-        runID: String
+        runID: String,
+        model: String? = nil,
+        reasoningEffort: String? = nil
     ) async throws -> SkillResult {
         updateProgress(runID: runID, event: .startingRuntime)
         var request = request
         let preference = store.agentRuntimePreference(for: request.agent)
-        request.model = preference.model
-        request.reasoningEffort = preference.reasoningEffort
+        request.model = model ?? preference.model
+        request.reasoningEffort = model == nil
+            ? (reasoningEffort ?? preference.reasoningEffort)
+            : reasoningEffort
         recordExecutionInput(runID: runID, request: request)
         return try await agentRunner(
             request,
@@ -1131,7 +1429,8 @@ final class SkillRuntime: ObservableObject {
         page: GitHubPageContext,
         pullRequest: LocalPRSnapshot?,
         subject: PullRequestRevisionSubject,
-        workspace: PRReviewWorkspace
+        workspace: PRReviewWorkspace,
+        agent: SkillAgent
     ) -> AgentExecutionRequest {
         let exactSubject = GitHubSubject.pullRequestRevision(subject)
         let context = AgentSkillInvocationContext.make(
@@ -1149,7 +1448,7 @@ final class SkillRuntime: ObservableObject {
         return AgentExecutionRequest(
             skillID: reviewPRSkillID,
             displayName: "Review PR",
-            agent: .omp,
+            agent: agent,
             timeoutSeconds: 300,
             instructions: """
             Review only the exact unified diff in ghpr_context.review_revision. Report only
@@ -1171,6 +1470,7 @@ final class SkillRuntime: ObservableObject {
         page: GitHubPageContext,
         pullRequest: LocalPRSnapshot?,
         subject: GitHubSubject?,
+        agent: SkillAgent,
         ciLogFetch: CILogFetchHandler,
         exactCILogFetch: ExactCILogFetchHandler
     ) async throws -> AgentExecutionRequest {
@@ -1251,7 +1551,7 @@ final class SkillRuntime: ObservableObject {
         return AgentExecutionRequest(
             skillID: skillID,
             displayName: displayName,
-            agent: .omp,
+            agent: agent,
             timeoutSeconds: 600,
             instructions: instructions,
             resultSchema: Data(resultSchema.utf8),
@@ -1280,6 +1580,28 @@ final class SkillRuntime: ObservableObject {
         )
     }
 
+    private static func attachingResolvedJob(
+        _ job: FailedJobLogs?,
+        to payload: SkillStructuredValue?
+    ) -> SkillStructuredValue? {
+        guard let job,
+              let runID = job.runID,
+              let jobID = job.jobID,
+              case .object(var object) = payload else {
+            return payload
+        }
+        var metadata: [String: SkillStructuredValue] = [
+            "repository": .string(job.repository),
+            "workflow_run_id": .string(String(runID)),
+            "workflow_job_id": .string(String(jobID))
+        ]
+        if let workflowName = job.workflowName, !workflowName.isEmpty {
+            metadata["workflow_name"] = .string(workflowName)
+        }
+        object["_ghpr_job"] = .object(metadata)
+        return .object(object)
+    }
+
     private static func analysisResult(
         from result: SkillResult,
         page: GitHubPageContext,
@@ -1287,13 +1609,14 @@ final class SkillRuntime: ObservableObject {
         subject: GitHubSubject?,
         agent: SkillAgent,
         startedAt: Date,
-        resolvedJobName: String? = nil
+        resolvedJob: FailedJobLogs? = nil
     ) throws -> SkillResult {
-        let status = result.payload?.objectString(for: "verdict") ??
-            result.payload?.objectString(for: "status")
+        let payload = Self.attachingResolvedJob(resolvedJob, to: result.payload)
+        let status = payload?.objectString(for: "verdict") ??
+            payload?.objectString(for: "status")
         let verdict = status.flatMap(AnalysisVerdict.init(rawValue:))
             ?? .needsInvestigation
-        let suggestedAction = result.payload?.objectString(for: "suggested_action") ??
+        let suggestedAction = payload?.objectString(for: "suggested_action") ??
             "Inspect the failed job evidence before taking action."
         guard let pullRequest, let prNumber = page.prNumber else {
             guard case .workflowJob = subject else {
@@ -1307,10 +1630,10 @@ final class SkillRuntime: ObservableObject {
                 codeReview: nil,
                 markdown: result.markdown,
                 artifacts: result.artifacts,
-                payload: result.payload
+                payload: payload
             )
         }
-        let failed = resolvedJobName.flatMap { name in
+        let failed = resolvedJob?.workflowName.flatMap { name in
             name.isEmpty ? nil : [name]
         } ?? pullRequest.ciWorkflows?
             .filter { $0.failureCount > 0 }
@@ -1349,7 +1672,7 @@ final class SkillRuntime: ObservableObject {
             codeReview: nil,
             markdown: result.markdown,
             artifacts: result.artifacts,
-            payload: result.payload
+            payload: payload
         )
     }
 
@@ -2434,6 +2757,7 @@ enum AgentCLIAdapter {
         }
         return executable
     }
+
 
     static func sanitizedSelection(_ value: String?) -> String? {
         guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
