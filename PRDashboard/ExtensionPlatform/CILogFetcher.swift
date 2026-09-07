@@ -6,7 +6,7 @@ private let ciLogFetcherLogger = Logger(subsystem: "com.prdashboard", category: 
 
 /// Head of the most recent failed CI job log for a pull request, embedded in the
 /// agent context as the `failed_job_logs` section. Resolution and download mirror
-/// the `kong-ci-log` skill's `fetch-ci-log.sh` script: `gh pr checks` selects the
+/// the CI log fetcher's `fetch-ci-log.sh` script: `gh pr checks` selects the
 /// latest failed check link, then the job/run log is downloaded through the gh CLI.
 struct FailedJobLogs: Codable, Equatable, Sendable {
     let repository: String
@@ -552,7 +552,7 @@ enum CILogFetcher {
     /// `Error`/`fatal` scan is the last resort. flaky-analyzer's single loose
     /// pattern anchors on package names like `libgpg-error` or env vars like
     /// `FAILED_TEST_FILES_FILE`, which would slice the wrong region of a real
-    /// Kong log (the `##[error]` annotation sits at line ~11662 of ~22600).
+    /// CI logs (the `##[error]` annotation sits at line ~11662 of ~22600).
     static func failureAnchor(in text: String) -> Range<String.Index>? {
         if let range = text.range(
             of: "##\\[error\\]",
@@ -578,10 +578,11 @@ enum CILogFetcher {
     /// Keeps a window around the first failure-like line when the log exceeds
     /// `byteLimit`, falling back to `tailTruncate` when no failure line matches.
     /// Mirrors flaky-analyzer's `sliceAroundFailure` (window math, elision
-    /// markers, tail fallback); the anchor itself is tiered via
-    /// `failureAnchor(in:)`. Failure markers in real Kong logs (e.g.
-    /// `##[error]Unable to download artifact(s)…`) can sit past the halfway
-    /// point, so head-truncation would lose the signal entirely.
+    /// markers, and tail fallback). The anchor uses a tiered search:
+    /// `##[error]` annotations, strong uppercase failure words, then a
+    /// case-insensitive `Error`/`fatal` scan. Failure markers in real CI logs
+    /// (e.g. `##[error]Unable to download artifact(s)…`) can sit past the
+    /// halfway point, so head-truncation would lose the signal entirely.
     static func sliceAroundFailure(_ input: String, byteLimit: Int) -> String {
         let data = Data(input.utf8)
         guard data.count > byteLimit else { return input }

@@ -1316,7 +1316,7 @@ final class UpdateLogicTests: XCTestCase {
         )
         cachedPR.githubLabels = [GitHubLabel(name: "backend", color: "abcdef")]
         cachedPR.githubMilestone = GitHubMilestone(title: "3.14")
-        cachedPR.jiraProjectKey = "KONG"
+        cachedPR.jiraProjectKey = "ACME"
         let entry = makeTrackingEntry(
             id: 502,
             source: oldSource,

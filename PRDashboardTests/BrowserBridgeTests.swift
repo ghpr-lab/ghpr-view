@@ -2858,11 +2858,11 @@ final class BrowserBridgeTests: XCTestCase {
     }
 
     func testCILogFetcherExtractsRunAndJobIDsFromCheckLinks() throws {
-        let jobLink = "https://github.com/Kong/kong-ee/actions/runs/123456789/job/987654321"
+        let jobLink = "https://github.com/example/repository/actions/runs/123456789/job/987654321"
         XCTAssertEqual(CILogFetcher.extractRunID(from: jobLink), Int64(123456789))
         XCTAssertEqual(CILogFetcher.extractJobID(from: jobLink), Int64(987654321))
 
-        let runLink = "https://github.com/Kong/kong-ee/actions/runs/123456789"
+        let runLink = "https://github.com/example/repository/actions/runs/123456789"
         XCTAssertEqual(CILogFetcher.extractRunID(from: runLink), Int64(123456789))
         XCTAssertNil(CILogFetcher.extractJobID(from: runLink))
 
