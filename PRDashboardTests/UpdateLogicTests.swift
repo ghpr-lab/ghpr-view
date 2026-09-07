@@ -921,16 +921,17 @@ final class UpdateLogicTests: XCTestCase {
             autoCheckInterval: 60,
             initialAutoCheckDelay: 0.01
         )
+        let presentationRequested = expectation(description: "Automatic update check requested presentation")
         var presentationCount = 0
         manager.onRequestPresentation = {
             presentationCount += 1
+            presentationRequested.fulfill()
         }
 
         manager.checkForUpdates(userInitiated: false)
 
-        await waitForCondition {
-            MockUpdateURLProtocol.requestedURLs.count >= 2 && presentationCount == 1
-        }
+        await fulfillment(of: [presentationRequested], timeout: 10)
+        XCTAssertEqual(presentationCount, 1)
         XCTAssertEqual(manager.displayedRelease?.displayVersion, "999.0.0")
         XCTAssertTrue(MockUpdateURLProtocol.requestedURLs.contains(URL(string: "https://github.com/xiaocang/ghpr-view/releases.atom")!))
         XCTAssertTrue(MockUpdateURLProtocol.requestedURLs.contains(URL(string: "https://api.github.com/repos/xiaocang/ghpr-view/releases/tags/v999.0.0")!))
