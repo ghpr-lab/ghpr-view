@@ -358,6 +358,148 @@ final class LocalAPITests: XCTestCase {
         XCTAssertEqual(response.error?.code, LocalAPIErrorCode.invalidRequest.rawValue)
     }
 
+    func testLocalAPIImportReviewRequiresRepositoryNumberAndReview() {
+        var didInvokeImporter = false
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .importReview, repository: "  ", number: nil),
+            snapshotProvider: { fatalError("snapshot should not be built") },
+            reviewImporter: { _, _, _ in
+                didInvokeImporter = true
+                fatalError("importer should not run for an invalid request")
+            }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.invalidRequest.rawValue)
+        XCTAssertFalse(didInvokeImporter)
+    }
+
+    func testLocalAPIImportReviewReturnsInternalErrorWhenImporterUnavailable() {
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(
+                command: .importReview,
+                repository: "owner/repo",
+                number: 7,
+                review: makeReviewImportPayload()
+            ),
+            snapshotProvider: { fatalError("snapshot should not be built") }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.internalError.rawValue)
+    }
+
+    func testLocalAPIImportReviewDispatchesToInjectedClosureAndReturnsResult() {
+        var receivedRepository: String?
+        var receivedNumber: Int?
+        var receivedReview: LocalReviewImportPayload?
+        let payload = makeReviewImportPayload()
+        let expected = LocalReviewImportResult(
+            runID: "run_mcp_abc123",
+            repository: "owner/repo",
+            number: 7,
+            headSHA: payload.headSHA,
+            findingCount: 1,
+            importedAt: Date(timeIntervalSince1970: 1_775_000_000),
+            alreadyImported: false
+        )
+
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(
+                command: .importReview,
+                repository: "owner/repo",
+                number: 7,
+                review: payload
+            ),
+            snapshotProvider: { fatalError("snapshot should not be built") },
+            reviewImporter: { repository, number, review in
+                receivedRepository = repository
+                receivedNumber = number
+                receivedReview = review
+                return expected
+            }
+        )
+
+        XCTAssertTrue(response.ok)
+        XCTAssertNil(response.error)
+        XCTAssertEqual(receivedRepository, "owner/repo")
+        XCTAssertEqual(receivedNumber, 7)
+        XCTAssertEqual(receivedReview, payload)
+        XCTAssertEqual(response.reviewImport, expected)
+    }
+
+    func testLocalAPIImportReviewMapsImportErrorToInvalidRequest() {
+        let response = LocalAPIHandler.response(
+            for: LocalAPIRequest(
+                command: .importReview,
+                repository: "owner/repo",
+                number: 7,
+                review: makeReviewImportPayload()
+            ),
+            snapshotProvider: { fatalError("snapshot should not be built") },
+            reviewImporter: { _, _, _ in
+                throw LocalReviewImportError.invalid("head_sha is invalid.")
+            }
+        )
+
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, LocalAPIErrorCode.invalidRequest.rawValue)
+        XCTAssertEqual(response.error?.message, "head_sha is invalid.")
+    }
+
+    func testLocalAPIReadCommandsNeverInvokeReviewImporter() {
+        let snapshot = makeTwoPRSnapshot()
+        var didInvokeImporter = false
+        let importer: (String, Int, LocalReviewImportPayload) throws -> LocalReviewImportResult = { _, _, _ in
+            didInvokeImporter = true
+            fatalError("read commands must never invoke the review importer")
+        }
+
+        _ = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .ping),
+            snapshotProvider: { snapshot },
+            reviewImporter: importer
+        )
+        _ = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .snapshot),
+            snapshotProvider: { snapshot },
+            reviewImporter: importer
+        )
+        _ = LocalAPIHandler.response(
+            for: LocalAPIRequest(command: .pr, repository: "OWNER/repo", number: 202),
+            snapshotProvider: { snapshot },
+            reviewImporter: importer
+        )
+
+        XCTAssertFalse(didInvokeImporter)
+    }
+
+    private func makeReviewImportPayload() -> LocalReviewImportPayload {
+        LocalReviewImportPayload(
+            baseSHA: String(repeating: "a", count: 40),
+            headSHA: String(repeating: "b", count: 40),
+            engine: "claude-code",
+            overviewMarkdown: "## Overview\nLooks good.",
+            findings: [
+                LocalReviewImportFinding(
+                    file: "src/index.ts",
+                    startLine: 10,
+                    endLine: 12,
+                    side: .right,
+                    title: "Missing null check",
+                    summary: "This can throw if value is null.",
+                    why: nil,
+                    suggestedFix: nil,
+                    background: nil,
+                    quotedCode: nil,
+                    severity: .warning,
+                    confidence: 0.8,
+                    category: "correctness"
+                )
+            ]
+        )
+    }
+
     func testCLIParsesPrCommandWithRepoAndNumber() throws {
         let options = try GHPRCLI.parse(
             arguments: ["pr", "--repo", "owner/repo", "--number", "42", "--json"],
@@ -382,6 +524,119 @@ final class LocalAPITests: XCTestCase {
                 arguments: ["pr", "--repo", "owner/repo", "--number", "0"],
                 environment: [:]
             )
+        )
+    }
+
+    func testCLIExportsVersionedExtensionCapabilities() throws {
+        var stdout = ""
+        var stderr = ""
+        let exitCode = GHPRCLI.run(
+            arguments: ["contract", "capabilities", "--json"],
+            environment: [:],
+            stdout: { stdout += $0 },
+            stderr: { stderr += $0 }
+        )
+
+        XCTAssertEqual(exitCode, GHPRCLIExitCode.success.rawValue, stderr)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(stdout.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(
+            object["skill_contract"] as? [String],
+            ["v1"],
+            "Skill Builder clients need a machine-verifiable contract version."
+        )
+        XCTAssertTrue(
+            (object["supported_browser_slots"] as? [String])?.contains(
+                BrowserSlot.prHeaderActions.rawValue
+            ) == true,
+            "Capabilities should advertise the stable GitHub header fallback slot."
+        )
+        XCTAssertEqual(
+            object["supported_agents"] as? [String],
+            [SkillAgent.claudeCode.rawValue, SkillAgent.codex.rawValue, SkillAgent.omp.rawValue],
+            "Capabilities should advertise every supported user-scope agent."
+        )
+    }
+
+    func testCLISkillLifecycleScaffoldsTestsPreviewsInstallsAndPacks() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let packageURL = root.appendingPathComponent("dev.example.cli", isDirectory: true)
+        let installedRoot = root.appendingPathComponent("installed", isDirectory: true)
+        let archiveURL = root.appendingPathComponent("cli-skill.ghpr-skill.zip")
+
+        func run(_ arguments: [String]) -> (Int32, String, String) {
+            var output = ""
+            var error = ""
+            let code = GHPRCLI.run(
+                arguments: arguments,
+                environment: [:],
+                stdout: { output += $0 },
+                stderr: { error += $0 }
+            )
+            return (code, output, error)
+        }
+
+        var result = run([
+            "skill", "scaffold",
+            "--id", "dev.example.cli",
+            "--name", "CLI Skill",
+            "--directory", root.path,
+            "--json"
+        ])
+        XCTAssertEqual(result.0, GHPRCLIExitCode.success.rawValue, result.2)
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: packageURL.appendingPathComponent("ghpr.skill.yaml").path
+            ),
+            "Scaffold should create the complete package contract."
+        )
+
+        result = run(["skill", "test", packageURL.path, "--json"])
+        XCTAssertEqual(
+            result.0,
+            GHPRCLIExitCode.success.rawValue,
+            "The generated fixture should satisfy its result schema: \(result.2)"
+        )
+
+        result = run(["skill", "preview", packageURL.path, "--json"])
+        XCTAssertEqual(result.0, GHPRCLIExitCode.success.rawValue, result.2)
+        let previewOutput = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.1.utf8)) as? [String: Any]
+        )
+        XCTAssertTrue(
+            (previewOutput["presentation"] as? String)?.contains(
+                GHPRContract.presentationVersion
+            ) == true,
+            "Preview should expose the declared presentation contract."
+        )
+
+        result = run([
+            "skill", "install", packageURL.path,
+            "--skills-root", installedRoot.path,
+            "--json"
+        ])
+        XCTAssertEqual(result.0, GHPRCLIExitCode.success.rawValue, result.2)
+        XCTAssertTrue(
+            FileManager.default.fileExists(
+                atPath: installedRoot
+                    .appendingPathComponent("dev.example.cli/ghpr.skill.yaml").path
+            ),
+            "Install should copy the validated package into the requested Skill root."
+        )
+
+        result = run([
+            "skill", "pack", packageURL.path,
+            "--output", archiveURL.path,
+            "--json"
+        ])
+        XCTAssertEqual(result.0, GHPRCLIExitCode.success.rawValue, result.2)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: archiveURL.path),
+            "Pack should produce a distributable archive."
         )
     }
 

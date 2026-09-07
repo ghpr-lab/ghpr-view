@@ -205,6 +205,15 @@ enum LocalSnapshotFactory {
             changesRequestedCount: pr.changesRequestedCount,
             myReviewStatus: pr.myReviewStatus?.rawValue,
             jiraTicket: pr.jiraTicket,
+            ciWorkflows: pr.ciWorkflows.map {
+                LocalCIWorkflowSnapshot(
+                    name: $0.name,
+                    isWorkflow: $0.isWorkflow,
+                    successCount: $0.successCount,
+                    failureCount: $0.failureCount,
+                    pendingCount: $0.pendingCount
+                )
+            },
             updatedAt: pr.updatedAt,
             mergedAt: pr.mergedAt
         )

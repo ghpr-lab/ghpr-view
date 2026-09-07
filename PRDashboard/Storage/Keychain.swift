@@ -34,10 +34,16 @@ final class Keychain {
 
     #if DEBUG
     private var keychainReadCount = 0
+    private let usesObfuscatedFile: Bool
+    private let obfuscatedFileURL: URL?
     #endif
 
     private init(service: String = Keychain.defaultService) {
         self.service = service
+        #if DEBUG
+        usesObfuscatedFile = service == Keychain.defaultService
+        obfuscatedFileURL = usesObfuscatedFile ? Keychain.debugCredentialFileURL() : nil
+        #endif
     }
 
     // MARK: - AuthState (consolidated as single JSON item)
@@ -50,7 +56,7 @@ final class Keychain {
         shared.loadAuthStateValue()
     }
 
-    /// Drops only the process-local auth cache. Persisted Keychain data is untouched.
+    /// Drops only the process-local auth cache. Persisted credential data is untouched.
     static func invalidateAuthStateCache() {
         shared.invalidateAuthStateCacheValue()
     }
@@ -187,7 +193,68 @@ final class Keychain {
         lock.unlock()
     }
 
+#if DEBUG
+    // Debug and UITesting builds intentionally avoid macOS Keychain prompts.
+    // This is convenience persistence only; Release builds always use Keychain.
+    private static let debugObfuscationKey = Array("ghpr-debug-credential-key".utf8)
+
+    private static func debugCredentialFileURL() -> URL? {
+        guard let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else {
+            return nil
+        }
+        return applicationSupport
+            .appendingPathComponent("ghpr", isDirectory: true)
+            .appendingPathComponent("debug-credentials.json")
+    }
+
+    private func loadObfuscatedStore() throws -> [String: String] {
+        guard let obfuscatedFileURL else {
+            throw KeychainError.itemNotFound
+        }
+        guard FileManager.default.fileExists(atPath: obfuscatedFileURL.path) else {
+            throw KeychainError.itemNotFound
+        }
+        let data = try Data(contentsOf: obfuscatedFileURL)
+        guard let store = try? JSONDecoder().decode([String: String].self, from: data) else {
+            throw KeychainError.invalidData
+        }
+        return store
+    }
+
+    private func saveObfuscatedStore(_ store: [String: String]) throws {
+        guard let obfuscatedFileURL else {
+            throw KeychainError.invalidData
+        }
+        try FileManager.default.createDirectory(
+            at: obfuscatedFileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let data = try JSONEncoder().encode(store)
+        try data.write(to: obfuscatedFileURL, options: .atomic)
+    }
+
+    private func obfuscate(_ data: Data) -> String {
+        let bytes = data.enumerated().map { index, byte in
+            byte ^ Self.debugObfuscationKey[index % Self.debugObfuscationKey.count]
+        }
+        return Data(bytes).base64EncodedString()
+    }
+
+    private func deobfuscate(_ value: String) throws -> Data {
+        guard let encoded = Data(base64Encoded: value) else {
+            throw KeychainError.invalidData
+        }
+        return Data(encoded.enumerated().map { index, byte in
+            byte ^ Self.debugObfuscationKey[index % Self.debugObfuscationKey.count]
+        })
+    }
+#endif
+
     // MARK: - In-memory cache
+
 
     private func saveCachedValue(_ value: String, key: String) throws {
         lock.lock()
@@ -245,6 +312,15 @@ final class Keychain {
             throw KeychainError.invalidData
         }
 
+        #if DEBUG
+        if usesObfuscatedFile {
+            var store = (try? loadObfuscatedStore()) ?? [:]
+            store[key] = obfuscate(data)
+            try saveObfuscatedStore(store)
+            return
+        }
+        #endif
+
         // Delete existing item first.
         try? delete(key: key)
 
@@ -268,6 +344,17 @@ final class Keychain {
 
     private func load(key: String) throws -> String {
         #if DEBUG
+        if usesObfuscatedFile {
+            let store = try loadObfuscatedStore()
+            guard let encoded = store[key] else {
+                throw KeychainError.itemNotFound
+            }
+            let data = try deobfuscate(encoded)
+            guard let value = String(data: data, encoding: .utf8) else {
+                throw KeychainError.invalidData
+            }
+            return value
+        }
         keychainReadCount += 1
         #endif
 
@@ -298,6 +385,21 @@ final class Keychain {
     }
 
     private func delete(key: String) throws {
+        #if DEBUG
+        if usesObfuscatedFile {
+            var store = (try? loadObfuscatedStore()) ?? [:]
+            store.removeValue(forKey: key)
+            if store.isEmpty {
+                if let obfuscatedFileURL {
+                    try? FileManager.default.removeItem(at: obfuscatedFileURL)
+                }
+            } else {
+                try saveObfuscatedStore(store)
+            }
+            return
+        }
+        #endif
+
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -312,10 +414,15 @@ final class Keychain {
     }
 
     #if DEBUG
-    // Test-only isolated Keychain instance. It uses a unique service supplied
-    // by the test and never touches the application's credential entries.
     init(serviceForTesting: String) {
         self.service = serviceForTesting
+        usesObfuscatedFile = false
+        obfuscatedFileURL = nil
+    }
+    init(obfuscatedFileForTesting url: URL) {
+        self.service = Keychain.defaultService
+        usesObfuscatedFile = true
+        obfuscatedFileURL = url
     }
 
     var keychainReadCountForTesting: Int {

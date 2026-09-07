@@ -9,31 +9,37 @@ enum LocalAPICommand: String, CaseIterable, Codable {
     case ping
     case snapshot
     case pr
+    case importReview = "import_review"
 }
 
 struct LocalAPIRequest: Codable, Equatable {
     let command: String
     let repository: String?
     let number: Int?
+    let review: LocalReviewImportPayload?
 
     init(
         command: LocalAPICommand,
         repository: String? = nil,
-        number: Int? = nil
+        number: Int? = nil,
+        review: LocalReviewImportPayload? = nil
     ) {
         self.command = command.rawValue
         self.repository = repository
         self.number = number
+        self.review = review
     }
 
     init(
         command: String,
         repository: String? = nil,
-        number: Int? = nil
+        number: Int? = nil,
+        review: LocalReviewImportPayload? = nil
     ) {
         self.command = command
         self.repository = repository
         self.number = number
+        self.review = review
     }
 }
 
@@ -50,22 +56,71 @@ struct LocalAPIErrorPayload: Codable, Equatable {
     let message: String
 }
 
+/// Validation failure for an `import_review` request. Maps to `invalid_request`.
+enum LocalReviewImportError: Error, Equatable {
+    case invalid(String)
+
+    var message: String {
+        switch self {
+        case .invalid(let detail):
+            return detail
+        }
+    }
+}
+
+struct LocalReviewImportFinding: Codable, Equatable {
+    let file: String
+    let startLine: Int
+    let endLine: Int
+    let side: DiffSide
+    let title: String
+    let summary: String
+    let why: String?
+    let suggestedFix: String?
+    let background: String?
+    let quotedCode: String?
+    let severity: ReviewSeverity
+    let confidence: Double
+    let category: String
+}
+
+struct LocalReviewImportPayload: Codable, Equatable {
+    let baseSHA: String
+    let headSHA: String
+    let engine: String
+    let overviewMarkdown: String
+    let findings: [LocalReviewImportFinding]
+}
+
+struct LocalReviewImportResult: Codable, Equatable {
+    let runID: String
+    let repository: String
+    let number: Int
+    let headSHA: String
+    let findingCount: Int
+    let importedAt: Date
+    let alreadyImported: Bool
+}
+
 struct LocalAPIResponse: Codable, Equatable {
     let schemaVersion: Int
     let ok: Bool
     let snapshot: LocalSnapshot?
     let pullRequest: LocalPRSnapshot?
+    let reviewImport: LocalReviewImportResult?
     let error: LocalAPIErrorPayload?
 
     static func success(
         snapshot: LocalSnapshot? = nil,
-        pullRequest: LocalPRSnapshot? = nil
+        pullRequest: LocalPRSnapshot? = nil,
+        reviewImport: LocalReviewImportResult? = nil
     ) -> LocalAPIResponse {
         LocalAPIResponse(
             schemaVersion: LocalAPIProtocol.schemaVersion,
             ok: true,
             snapshot: snapshot,
             pullRequest: pullRequest,
+            reviewImport: reviewImport,
             error: nil
         )
     }
@@ -76,6 +131,7 @@ struct LocalAPIResponse: Codable, Equatable {
             ok: false,
             snapshot: nil,
             pullRequest: nil,
+            reviewImport: nil,
             error: LocalAPIErrorPayload(code: code.rawValue, message: message)
         )
     }
@@ -84,7 +140,8 @@ struct LocalAPIResponse: Codable, Equatable {
 enum LocalAPIHandler {
     static func response(
         for request: LocalAPIRequest,
-        snapshotProvider: () -> LocalSnapshot
+        snapshotProvider: () -> LocalSnapshot,
+        reviewImporter: ((String, Int, LocalReviewImportPayload) throws -> LocalReviewImportResult)? = nil
     ) -> LocalAPIResponse {
         guard let command = LocalAPICommand(rawValue: request.command) else {
             return .failure(
@@ -115,6 +172,34 @@ enum LocalAPIHandler {
                 )
             }
             return .success(pullRequest: match)
+        case .importReview:
+            guard let repository = request.repository?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !repository.isEmpty,
+                  let number = request.number,
+                  number > 0,
+                  let review = request.review else {
+                return .failure(
+                    code: .invalidRequest,
+                    message: "import_review command requires 'repository', a positive 'number', and 'review'."
+                )
+            }
+            guard let reviewImporter else {
+                return .failure(
+                    code: .internalError,
+                    message: "Review import is not available."
+                )
+            }
+            do {
+                let result = try reviewImporter(repository, number, review)
+                return .success(reviewImport: result)
+            } catch let error as LocalReviewImportError {
+                return .failure(code: .invalidRequest, message: error.message)
+            } catch {
+                return .failure(
+                    code: .internalError,
+                    message: "Failed to import review: \(error.localizedDescription)"
+                )
+            }
         }
     }
 
@@ -267,6 +352,15 @@ struct LocalPRSnapshot: Codable, Equatable {
     let changesRequestedCount: Int?
     let myReviewStatus: String?
     let jiraTicket: String?
+    let ciWorkflows: [LocalCIWorkflowSnapshot]?
     let updatedAt: Date
     let mergedAt: Date?
+}
+
+struct LocalCIWorkflowSnapshot: Codable, Equatable {
+    let name: String
+    let isWorkflow: Bool
+    let successCount: Int
+    let failureCount: Int
+    let pendingCount: Int
 }

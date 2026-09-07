@@ -24,6 +24,7 @@ final class LocalSocketServer {
 
     private let socketPath: String
     private let snapshotProvider: @MainActor () -> LocalSnapshot
+    private let reviewImporter: @MainActor (String, Int, LocalReviewImportPayload) throws -> LocalReviewImportResult
     private let queue = DispatchQueue(label: "com.prdashboard.local-socket-server")
 
     private var listenFD: Int32 = -1
@@ -31,10 +32,12 @@ final class LocalSocketServer {
 
     init(
         socketPath: String = LocalSocketPath.defaultPath(),
-        snapshotProvider: @escaping @MainActor () -> LocalSnapshot
+        snapshotProvider: @escaping @MainActor () -> LocalSnapshot,
+        reviewImporter: @escaping @MainActor (String, Int, LocalReviewImportPayload) throws -> LocalReviewImportResult
     ) {
         self.socketPath = socketPath
         self.snapshotProvider = snapshotProvider
+        self.reviewImporter = reviewImporter
     }
 
     deinit {
@@ -248,7 +251,8 @@ final class LocalSocketServer {
         Task { @MainActor in
             response = LocalAPIHandler.response(
                 for: request,
-                snapshotProvider: snapshotProvider
+                snapshotProvider: snapshotProvider,
+                reviewImporter: reviewImporter
             )
             semaphore.signal()
         }
@@ -257,7 +261,7 @@ final class LocalSocketServer {
               let response else {
             return .failure(
                 code: .internalError,
-                message: "Timed out while building local app snapshot."
+                message: "Timed out while handling local API request."
             )
         }
 

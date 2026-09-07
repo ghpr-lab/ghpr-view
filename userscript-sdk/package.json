@@ -1,0 +1,8 @@
+{
+  "name": "@ghpr/userscript-sdk",
+  "version": "1.0.0",
+  "description": "Scoped Browser Bridge client for ghpr userscripts",
+  "main": "index.js",
+  "type": "commonjs",
+  "license": "Apache-2.0"
+}

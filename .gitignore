@@ -44,3 +44,6 @@ fastlane/test_output
 
 # Generated files
 GitVersion.generated.swift
+browser/node_modules/
+browser/playwright-report/
+browser/test-results/

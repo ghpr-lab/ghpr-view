@@ -1,4 +1,5 @@
 import XCTest
+import AppKit
 import Darwin
 @testable import PRDashboard
 
@@ -116,6 +117,30 @@ final class UpdateLogicTests: XCTestCase {
         XCTAssertEqual(reader.keychainReadCountForTesting, readsAfterDelete)
     }
 
+    #if DEBUG
+    func testDebugCredentialStoreObfuscatesValuesOnDisk() throws {
+        let fileURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ghpr-debug-credentials-\(UUID().uuidString).json")
+        let store = Keychain(obfuscatedFileForTesting: fileURL)
+        defer { try? FileManager.default.removeItem(at: fileURL) }
+
+        try store.saveAuthStateForTesting(
+            AuthState(accessToken: "debug-github-token", username: "debug-user", authMethod: .pat)
+        )
+        store.saveProxyPasswordForTesting("debug-proxy-password")
+
+        let raw = try String(contentsOf: fileURL, encoding: .utf8)
+        XCTAssertFalse(raw.contains("debug-github-token"))
+        XCTAssertFalse(raw.contains("debug-proxy-password"))
+        XCTAssertEqual(store.loadAuthStateForTesting().accessToken, "debug-github-token")
+        XCTAssertEqual(store.loadProxyPasswordForTesting(), "debug-proxy-password")
+
+        store.deleteAuthStateForTesting()
+        store.deleteProxyPasswordForTesting()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+    #endif
+
     @MainActor
     func testOAuthManagerReloadsExternallyUpdatedTokenAfterRejection() {
         let rejectedState = AuthState(
@@ -216,8 +241,9 @@ final class UpdateLogicTests: XCTestCase {
         )
         let manager = PRManager(
             apiClient: apiClient,
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         persistedState = replacementState
 
@@ -895,16 +921,17 @@ final class UpdateLogicTests: XCTestCase {
             autoCheckInterval: 60,
             initialAutoCheckDelay: 0.01
         )
+        let presentationRequested = expectation(description: "Automatic update check requested presentation")
         var presentationCount = 0
         manager.onRequestPresentation = {
             presentationCount += 1
+            presentationRequested.fulfill()
         }
 
         manager.checkForUpdates(userInitiated: false)
 
-        await waitForCondition {
-            MockUpdateURLProtocol.requestedURLs.count >= 2 && presentationCount == 1
-        }
+        await fulfillment(of: [presentationRequested], timeout: 10)
+        XCTAssertEqual(presentationCount, 1)
         XCTAssertEqual(manager.displayedRelease?.displayVersion, "999.0.0")
         XCTAssertTrue(MockUpdateURLProtocol.requestedURLs.contains(URL(string: "https://github.com/xiaocang/ghpr-view/releases.atom")!))
         XCTAssertTrue(MockUpdateURLProtocol.requestedURLs.contains(URL(string: "https://api.github.com/repos/xiaocang/ghpr-view/releases/tags/v999.0.0")!))
@@ -933,9 +960,13 @@ final class UpdateLogicTests: XCTestCase {
         manager.start()
 
         await waitForCondition {
-            MockUpdateURLProtocol.requestedURLs.count >= 2
+            manager.displayedRelease?.displayVersion == "999.0.0"
         }
-        XCTAssertEqual(manager.displayedRelease?.displayVersion, "999.0.0")
+        XCTAssertTrue(
+            MockUpdateURLProtocol.requestedURLs.contains(
+                URL(string: "https://api.github.com/repos/xiaocang/ghpr-view/releases/tags/v999.0.0")!
+            )
+        )
     }
 
     func testMentionParserRecognizesSameRepositoryReferences() {
@@ -1285,7 +1316,7 @@ final class UpdateLogicTests: XCTestCase {
         )
         cachedPR.githubLabels = [GitHubLabel(name: "backend", color: "abcdef")]
         cachedPR.githubMilestone = GitHubMilestone(title: "3.14")
-        cachedPR.jiraProjectKey = "KONG"
+        cachedPR.jiraProjectKey = "ACME"
         let entry = makeTrackingEntry(
             id: 502,
             source: oldSource,
@@ -2126,8 +2157,9 @@ final class UpdateLogicTests: XCTestCase {
 
         let manager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: GitHubOAuthManager(loadSavedAuth: false)
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: GitHubOAuthManager(loadSavedAuth: false),
+            loadKeychainSecrets: false
         )
         manager.configuration = .default
         manager.loadCachedData()
@@ -2883,13 +2915,69 @@ final class UpdateLogicTests: XCTestCase {
         )
     }
 
+    func testMenuTrackingUpdateBufferPublishesOnlyLatestDeferredUpdate() {
+        var buffer = MenuTrackingUpdateBuffer<String>()
+
+        XCTAssertEqual(
+            buffer.receive("initial"),
+            "initial",
+            "Updates must pass through while no menu is open."
+        )
+        XCTAssertNil(
+            buffer.setTracking(true),
+            "Opening a menu must not synthesize an update."
+        )
+        XCTAssertNil(
+            buffer.receive("incremental"),
+            "Incremental refreshes must remain hidden while the menu is open."
+        )
+        XCTAssertNil(
+            buffer.receive("complete"),
+            "The final refresh must remain hidden while the menu is open."
+        )
+        XCTAssertEqual(
+            buffer.setTracking(false),
+            "complete",
+            "Closing the menu must publish only the latest deferred refresh."
+        )
+        XCTAssertEqual(
+            buffer.receive("next"),
+            "next",
+            "Updates must resume immediately after menu tracking ends."
+        )
+    }
+
+    @MainActor
+    func testMenuTrackerRemainsActiveAcrossNestedSubmenuTracking() {
+        let tracker = MenuTracker(notificationCenter: NotificationCenter())
+        let rootMenu = NSMenu(title: "PR Actions")
+        let skillMenu = NSMenu(title: "Run Skill")
+
+        tracker.beginTracking(rootMenu)
+        XCTAssertTrue(tracker.isTracking, "The root context menu must start tracking.")
+
+        tracker.beginTracking(skillMenu)
+        tracker.endTracking(skillMenu)
+        XCTAssertTrue(
+            tracker.isTracking,
+            "Closing the Run Skill submenu must not end tracking for its parent menu."
+        )
+
+        tracker.endTracking(rootMenu)
+        XCTAssertFalse(
+            tracker.isTracking,
+            "Tracking must end after the complete context-menu hierarchy closes."
+        )
+    }
+
     @MainActor
     func testPRListViewModelSearchMatchesJiraTicketsAndMetadataAcrossSections() {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         let viewModel = PRListViewModel(
             prManager: prManager,
@@ -2953,8 +3041,9 @@ final class UpdateLogicTests: XCTestCase {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         let viewModel = PRListViewModel(
             prManager: prManager,
@@ -3479,8 +3568,9 @@ final class UpdateLogicTests: XCTestCase {
         let oauthManager = GitHubOAuthManager(loadSavedAuth: false)
         let prManager = PRManager(
             apiClient: GitHubAPIClient(token: ""),
-            notificationManager: NotificationManager(),
-            oauthManager: oauthManager
+            notificationManager: NotificationManager(useSystemNotificationCenter: false),
+            oauthManager: oauthManager,
+            loadKeychainSecrets: false
         )
         let linkOpener = FakePRLinkOpening(opensAtCmuxFirst: true)
         let viewModel = PRListViewModel(

@@ -39,7 +39,10 @@ brew install xiaocang/tap/prdashboard
 - **Jira Integration** - Enrich detected Jira tickets with titles, statuses, and labels
 - **Notifications** - Desktop alerts for new unresolved comments, CI status changes, and important changes on pinned PRs
 - **Rate Limit Display** - Shows GitHub API rate limit in footer
-- **Local Integrations** - Query the running app over a read-only Unix socket with `ghpr` or the bundled MCP server
+- **Local Integrations** - Query the running app over a local Unix socket with `ghpr` (read-only) or the bundled MCP server (read-only tools plus `import_review` to persist an externally produced code review)
+- **GitHub Browser Integration** - Official `ghpr for GitHub` userscript adds CI analysis, Skill actions, tags, and local detail views to GitHub PR and Actions pages
+- **Extension Platform** - Versioned Skill, presentation, and browser-contribution contracts with scoped third-party userscript capabilities
+- **Skill Workbench** - Create, migrate, validate, fixture-test, preview, package, and install ghpr Skills
 
 ## Usage
 
@@ -84,9 +87,50 @@ ghpr prs --json
 ghpr snapshot --json
 ```
 
-The CLI connects to a read-only Unix socket at `/tmp/com.xiaocang.PRDashboard.<uid>.sock`. Use `GHPR_SOCKET_PATH` or `--socket PATH` to override the path.
+The CLI connects to a local Unix socket at `/tmp/com.xiaocang.PRDashboard.<uid>.sock` and only ever sends read commands (`status`, `ping`, `prs`, `pr`, `snapshot`). Use `GHPR_SOCKET_PATH` or `--socket PATH` to override the path.
 
 Available `prs` sections are `authored`, `review`, `mentioned`, `direct-mentions`, `merged`, and `all`. For MCP integration, run `make install-mcp` and see [`mcp-ghpr/README.md`](mcp-ghpr/README.md).
+
+### GitHub Browser Integration
+
+1. Open **Settings → Browser Integration** and confirm that the loopback Browser Bridge is running.
+2. Click **Install Userscript** and install `ghpr for GitHub` in Tampermonkey.
+3. Open a GitHub PR or an Actions job. With **Use GitHub-native surfaces** enabled, `ghpr` renders a Review Summary in Conversation, an independent verdict and CI Insight for each Checks job, the same CI Insight on the matching Actions job, and line-level findings in Files changed. The former Header menu and standalone card remain available only through the rollback toggle.
+4. If the userscript is not paired, choose **Connect ghpr** from the Tampermonkey userscript menu, then review the requested scopes in the native ghpr window. Read-only scopes are selected by default; running Skills, cancelling runs, dismissing findings, writing local ghpr tags, and reading artifacts require explicit approval. Local ghpr tags are stored only by ghpr and never change GitHub labels.
+
+The bridge listens only on `127.0.0.1` within discovery ports `48120...48129`. Browser clients use individual revocable bearer capabilities—never cookies—and cannot obtain the GitHub token, local workspace paths, agent credentials, raw repository access, or shell execution. Third-party userscripts register declarative UI contributions through the bridge; the official userscript remains the only GitHub-page UI host.
+
+Bridge discovery reports the version of the official userscript currently served by the app. When that version is newer than the installed script, the v2 Conversation Review Summary shows **Update ghpr userscript**; the rollback card shows its existing **Update** notice. Both open the local Tampermonkey install route.
+
+Installed Skill packages can use the strict Browser Contract v2 allowlist to bind structured results to GitHub-native surfaces; arbitrary selectors, scripts, HTML, iframes, and external URLs are rejected. Existing v1 `browser/contributions.yaml` contracts remain supported by the rollback UI. Active runs show on the exact subject surface. Raw run logs and artifacts open in the local diagnostics UI and remain capability-scoped; raw Agent output and credentials are never exposed.
+
+Use **Open Browser Test Page** to verify bridge isolation and contract support. **Open Skill Workbench** provides Create, Migrate, and Enhance flows with fixture and permission gates. The equivalent contract-driven CLI workflow is:
+
+```bash
+ghpr contract capabilities --json
+ghpr contract export --version latest --json
+ghpr contract examples
+
+ghpr skill scaffold --id team.ci.policy-check --name "Team CI Policy Check"
+ghpr skill validate ./team.ci.policy-check
+ghpr skill test ./team.ci.policy-check
+ghpr skill preview ./team.ci.policy-check
+ghpr skill pack ./team.ci.policy-check
+ghpr skill install ./team.ci.policy-check
+```
+
+The app's Coding Agent Integration installs both the bundled `ghpr-skill-builder` and a standalone review-import MCP for Claude Code, Codex, and OMP. The MCP executable is copied from the app bundle into stable user Application Support storage before each agent configuration is updated. The builder reads the contracts exported by the installed `ghpr` binary instead of carrying a stale copy. Workbench Enhance automatically discovers Skills in those three user scopes and adds presentation and GitHub surfaces to an app-managed copy; the source `SKILL.md` and pass-through result semantics remain unchanged.
+
+Runnable managed Skills execute through a restricted Claude Code, Codex, or OMP CLI invocation in a private temporary run directory. `execution.isolation: strict` describes the ghpr invocation contract, not an OS sandbox: ghpr disables Agent-exposed tools, shell actions, repository checkout, and task-directed network tools; passes the package instructions, result schema, and sanitized snapshot; and builds the child environment from an explicit model-provider allowlist so ambient application and repository credential variables are not inherited. The trusted host CLI still retains its normal `HOME`, configuration/plugins, provider credentials, and provider network transport. Codex starts after its working directory is switched to the private run root (`-C`) inside a read-only sandbox. ghpr validates final structured output against the package schema before persisting it.
+
+While an Agent CLI is running, ghpr persists a fixed, sanitized lifecycle log. Browser and native clients can observe the transition from runtime launch to Agent execution, first output, result validation, and completion without receiving raw Agent output or credentials.
+
+Debug and UITesting builds keep GitHub, Jira, and proxy credentials in an obfuscated local file instead of invoking macOS Keychain. This storage is convenience-only and is never compiled into Release builds; Release continues to use Keychain.
+
+The model and reasoning effort for each coding agent are selectable. Claude Code and Codex lists are read from the agents themselves — `claude --help` for Claude Code model aliases and effort levels, `codex debug models` for the Codex model catalog and its per-model reasoning levels. Both lists are fetched on first use, cached with the app state, and refreshable from Settings. OMP takes a free-form model name because it resolves fuzzy names such as `opus` or `openai/gpt-5.2` itself. When nothing is selected, each agent keeps its own default.
+
+A GitHub PR page never submits the same Skill twice: while a run for that Skill is queued or running, its run control is greyed out, and a repeated click cannot start a second run. The local run page groups the lifecycle log into GitHub Actions-style steps, and every step expands to its detailed events.
+
 
 ### Settings
 
@@ -102,6 +146,8 @@ Available `prs` sections are `authored`, `review`, `mentioned`, `direct-mentions
 - **Show Review Status** - Show/hide review status badges on review-requested PRs
 - **Open PRs in cmux First** - Reuse a matching cmux PR tab before falling back to the default browser
 - **Jira** - Configure Jira Cloud credentials, metadata refresh interval, and connection testing
+- **Browser Integration** - Install the official userscript, inspect bridge and GitHub-page health, test the local connection, and revoke paired clients
+- **Coding Agent Integration** - Install the Skill Builder and review-import MCP for Claude Code, Codex, and OMP, then open the local Workbench or current contracts
 - **Updates** - Enable automatic update checks or check manually
 - **Developer Options** - Replay onboarding, clear caches, override the GraphQL endpoint, or configure an HTTP proxy
 

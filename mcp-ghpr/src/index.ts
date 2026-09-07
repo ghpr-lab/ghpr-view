@@ -5,8 +5,13 @@ import { userInfo } from "node:os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import {
+  registerImportReviewTool,
+  type ImportReviewResult,
+  type ImportReviewSocketRequest,
+} from "./review-import.js";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 5_000;
 const GH_COMMAND_TIMEOUT_MS = 15_000;
@@ -26,13 +31,16 @@ const GH_PR_VIEW_FIELDS = [
   "url",
 ];
 
-type Command = "ping" | "snapshot" | "pr";
-type Section = "authored" | "review" | "mentioned" | "merged" | "all";
+type Command = "ping" | "snapshot" | "pr" | "import_review";
+type Section = "authored" | "review" | "mentioned" | "direct-mentions" | "merged" | "all";
+/** The literal `section` value PRDashboard puts on each wire `PRSnapshot`. */
+type WireSection = "authored" | "review" | "mentioned" | "directMentions" | "merged";
 
 interface SocketRequest {
   command: Command;
   repository?: string;
   number?: number;
+  review?: ImportReviewSocketRequest["review"];
 }
 
 interface ErrorPayload {
@@ -45,13 +53,14 @@ interface SocketResponse {
   ok: boolean;
   snapshot?: Snapshot;
   pullRequest?: PRSnapshot;
+  reviewImport?: ImportReviewResult;
   error?: ErrorPayload;
 }
 
 interface PRSnapshot {
   source?: "gh";
   id: number;
-  section: Exclude<Section, "all">;
+  section: WireSection;
   repository: string;
   number: number;
   title: string;
@@ -86,6 +95,7 @@ interface Snapshot {
     authored: number;
     reviewRequests: number;
     mentioned: number;
+    directMentions: number;
     mergedLast24h: number;
     totalUnresolved: number;
     authoredUnresolved: number;
@@ -99,6 +109,7 @@ interface Snapshot {
     authored: PRSnapshot[];
     reviewRequests: PRSnapshot[];
     mentioned: PRSnapshot[];
+    directMentions: PRSnapshot[];
     mergedLast24h: PRSnapshot[];
   };
 }
@@ -250,6 +261,19 @@ async function fetchPr(repository: string, number: number): Promise<PRSnapshot> 
     throw new GhprSocketError("Response did not include a pull request.", "invalid_response");
   }
   return response.pullRequest;
+}
+
+async function importReviewOverSocket(request: ImportReviewSocketRequest): Promise<ImportReviewResult> {
+  const response = await call({
+    command: "import_review",
+    repository: request.repository,
+    number: request.number,
+    review: request.review,
+  });
+  if (!response.reviewImport) {
+    throw new GhprSocketError("Response did not include a review import result.", "invalid_response");
+  }
+  return response.reviewImport;
 }
 
 async function fetchPrWithFallback(repository: string, number: number): Promise<PRSnapshot> {
@@ -549,7 +573,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function flattenPrs(snapshot: Snapshot, section: Section): PRSnapshot[] {
-  const { authored, reviewRequests, mentioned, mergedLast24h } = snapshot.pullRequests;
+  const { authored, reviewRequests, mentioned, directMentions, mergedLast24h } = snapshot.pullRequests;
   switch (section) {
     case "authored":
       return authored;
@@ -557,11 +581,13 @@ function flattenPrs(snapshot: Snapshot, section: Section): PRSnapshot[] {
       return reviewRequests;
     case "mentioned":
       return mentioned;
+    case "direct-mentions":
+      return directMentions;
     case "merged":
       return mergedLast24h;
     case "all":
     default:
-      return [...authored, ...reviewRequests, ...mentioned, ...mergedLast24h];
+      return [...authored, ...reviewRequests, ...mentioned, ...directMentions, ...mergedLast24h];
   }
 }
 
@@ -625,7 +651,7 @@ function asErrorResult(err: unknown) {
 
 const server = new McpServer({
   name: "ghpr-mcp",
-  version: "0.1.0",
+  version: "0.2.0",
 });
 
 server.tool(
@@ -679,14 +705,14 @@ server.tool(
 
 server.tool(
   "list_prs",
-  "List PRs from the snapshot. Optional filters: `repository` (case-insensitive substring of OWNER/NAME), `section` (authored|review|mentioned|merged|all), `limit`.",
+  "List PRs from the snapshot. Optional filters: `repository` (case-insensitive substring of OWNER/NAME), `section` (authored|review|mentioned|direct-mentions|merged|all), `limit`.",
   {
     repository: z
       .string()
       .optional()
-      .describe("Case-insensitive substring of OWNER/NAME, e.g. 'kong/kong' or just 'kong'."),
+      .describe("Case-insensitive substring of OWNER/NAME, e.g. 'example-org/example-repo' or just 'example-org'."),
     section: z
-      .enum(["authored", "review", "mentioned", "merged", "all"])
+      .enum(["authored", "review", "mentioned", "direct-mentions", "merged", "all"])
       .optional()
       .describe("Which snapshot section to pull from. Defaults to 'all'."),
     limit: z
@@ -719,7 +745,7 @@ server.tool(
   "get_pr",
   "Fetch details for a single PR by repository and number. Falls back to `gh pr view` if the PR is not available from PRDashboard's local snapshot.",
   {
-    repository: z.string().describe("OWNER/NAME, e.g. 'kong/kong'."),
+    repository: z.string().describe("OWNER/NAME, e.g. 'example-org/example-repo'."),
     number: z.number().int().positive().describe("PR number."),
   },
   async ({ repository, number }) => {
@@ -793,6 +819,8 @@ server.tool(
     }
   },
 );
+
+registerImportReviewTool(server, importReviewOverSocket);
 
 async function main() {
   const transport = new StdioServerTransport();

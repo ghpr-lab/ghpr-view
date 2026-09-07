@@ -17,12 +17,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var jiraSetupWindow: NSWindow?
     var jiraSetupCoordinator: JiraSetupCoordinator?
     var presentationCoordinator: AppPresentationCoordinator?
+    var extensionPlatformController: ExtensionPlatformController?
+    var browserPairingWindow: NSWindow?
+    var extensionPlatformUITestWindow: NSWindow?
     private var jiraClient: JiraAPIClient?
     private var cancellables = Set<AnyCancellable>()
 
+
+
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 1. Create OAuth manager (loads saved auth automatically)
-        oauthManager = GitHubOAuthManager()
+        let isExtensionPlatformUITest = CommandLine.arguments.contains {
+            $0.hasPrefix("--ui-testing-browser-")
+        }
+
+        // 1. Create OAuth manager (loads saved auth automatically outside deterministic UI tests)
+        oauthManager = GitHubOAuthManager(loadSavedAuth: !isExtensionPlatformUITest)
 
         // 2. Create notification manager and request permission
         notificationManager = NotificationManager()
@@ -37,7 +46,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             jiraClient: jiraClient,
             notificationManager: notificationManager!,
             oauthManager: oauthManager!,
-            cmuxStatusProvider: CmuxBrowserRouter()
+            cmuxStatusProvider: CmuxBrowserRouter(),
+            loadKeychainSecrets: !isExtensionPlatformUITest
         )
         updateManager = UpdateManager(configuration: prManager!.configuration)
         updateManager?.onRequestPresentation = { [weak self] in
@@ -75,11 +85,50 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.presentationCoordinator?.present(.settings)
         }
 
+        let isPRActionsUITest = CommandLine.arguments.contains("--ui-testing-browser-pr-actions") ||
+            CommandLine.arguments.contains("--ui-testing-browser-pr-actions-passing")
+        let extensionPlatformController = ExtensionPlatformController(
+            snapshotProvider: { [weak self] in
+#if DEBUG
+                if isPRActionsUITest {
+                    return ExtensionPlatformUITestFixture.snapshot(
+                        hasFailedCI: CommandLine.arguments.contains("--ui-testing-browser-pr-actions")
+                    )
+                }
+#endif
+                return AppDelegate.makeLocalSnapshot(
+                    oauthManager: self?.oauthManager,
+                    prManager: self?.prManager
+                )
+            },
+            rerunFailedJobs: { [weak self] snapshot in
+                guard let self,
+                      let pr = self.prManager?.prList.allPRs.first(where: {
+                          $0.repoFullName.caseInsensitiveCompare(snapshot.repository) == .orderedSame &&
+                              $0.number == snapshot.number
+                      }),
+                      let prManager = self.prManager else {
+                    throw BrowserBridgeActionError.pullRequestUnavailable
+                }
+                return try await prManager.rerunFailedCI(for: pr)
+            },
+            storageURL: isExtensionPlatformUITest ? nil : defaultExtensionPlatformStorageURL(),
+            appVersion: Self.appInfoValue("CFBundleShortVersionString"),
+            ports: isExtensionPlatformUITest ? [0] : Array(48120...48129)
+        )
+        self.extensionPlatformController = extensionPlatformController
+#if DEBUG
+        if CommandLine.arguments.contains("--ui-testing-browser-settings") {
+            ExtensionPlatformUITestFixture.seedSurfaceHealth(in: extensionPlatformController.store)
+        }
+#endif
+
         // 6. Create main view
         let mainView = MainView(
             viewModel: viewModel,
             onboardingManager: onboardingManager!,
-            presentationCoordinator: presentationCoordinator
+            presentationCoordinator: presentationCoordinator,
+            extensionPlatformController: extensionPlatformController
         )
 
         // 7. Create popover
@@ -112,13 +161,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
             .store(in: &cancellables)
 
-        localSocketServer = LocalSocketServer { [weak self] in
-            AppDelegate.makeLocalSnapshot(
-                oauthManager: self?.oauthManager,
-                prManager: self?.prManager
-            )
-        }
+        localSocketServer = LocalSocketServer(
+            snapshotProvider: { [weak self] in
+                AppDelegate.makeLocalSnapshot(
+                    oauthManager: self?.oauthManager,
+                    prManager: self?.prManager
+                )
+            },
+            reviewImporter: { [weak extensionPlatformController] repository, number, payload in
+                guard let extensionPlatformController else {
+                    throw CocoaError(.featureUnsupported)
+                }
+                return try extensionPlatformController.importReview(
+                    repository: repository,
+                    number: number,
+                    payload: payload
+                )
+            }
+        )
         localSocketServer?.start()
+        extensionPlatformController.onPendingPairing = { [weak self] approval in
+            self?.openBrowserPairingWindow(approval: approval)
+        }
+        extensionPlatformController.start()
 
         // 10. Request notification permission if authenticated
         if oauthManager?.authState.isAuthenticated == true {
@@ -132,16 +197,129 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] _ in
                 self?.notificationManager?.requestPermission()
             }
-
             .store(in: &cancellables)
 
         updateManager?.start()
+
+        configureExtensionPlatformUITestIfRequested(viewModel: viewModel)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         localSocketServer?.stop()
         localSocketServer = nil
+        extensionPlatformController?.stop()
+        extensionPlatformController = nil
     }
+    private func configureExtensionPlatformUITestIfRequested(viewModel: PRListViewModel) {
+        guard let extensionPlatformController else { return }
+        if CommandLine.arguments.contains("--ui-testing-browser-settings") {
+            for client in extensionPlatformController.store.pairedClients {
+                extensionPlatformController.store.revokeClient(id: client.id)
+            }
+            let descriptor = BrowserClientDescriptor(
+                id: "dev.ghpr.ui-test-client",
+                name: "UI Test Client",
+                version: "1.0.0",
+                requestedScopes: [.prRead, .analysisRead]
+            )
+            if let pairing = try? extensionPlatformController.store.startPairing(
+                descriptor: descriptor,
+                bridgeBaseURL: URL(string: "http://127.0.0.1:48120")!
+            ) {
+                _ = try? extensionPlatformController.store.approvePairingFromNative(
+                    id: pairing.requestID,
+                    approvedScopes: descriptor.requestedScopes
+                )
+            }
+            browserPairingWindow?.close()
+            browserPairingWindow = nil
+            presentationCoordinator?.present(.settings)
+        } else if CommandLine.arguments.contains("--ui-testing-browser-pairing") ||
+            CommandLine.arguments.contains("--ui-testing-browser-permission-upgrade") {
+            let isUpgrade = CommandLine.arguments.contains("--ui-testing-browser-permission-upgrade")
+            let descriptor = BrowserClientDescriptor(
+                id: "com.example.team-ci-helper",
+                name: "Team CI Helper",
+                version: "1.2.0",
+                requestedScopes: [
+                    .prRead,
+                    .analysisRead,
+                    .uiContribute,
+                    .skillRun
+                ],
+                requiredScopes: isUpgrade ? [.skillRun] : []
+            )
+            _ = try? extensionPlatformController.store.startPairing(
+                descriptor: descriptor,
+                bridgeBaseURL: URL(string: "http://127.0.0.1:48120")!
+            )
+        }
+#if DEBUG
+        let hasFailedCI = CommandLine.arguments.contains("--ui-testing-browser-pr-actions")
+        let simulateMenuUpdate = CommandLine.arguments.contains(
+            "--ui-testing-browser-pr-actions-updating"
+        )
+        let hasPassingCI = CommandLine.arguments.contains("--ui-testing-browser-pr-actions-passing") ||
+            simulateMenuUpdate
+        if hasFailedCI || hasPassingCI {
+            openExtensionPlatformUITestWindow(
+                controller: extensionPlatformController,
+                hasFailedCI: hasFailedCI,
+                simulateMenuUpdate: simulateMenuUpdate
+            )
+        }
+#endif
+    }
+
+#if DEBUG
+    private func openExtensionPlatformUITestWindow(
+        controller: ExtensionPlatformController,
+        hasFailedCI: Bool,
+        simulateMenuUpdate: Bool
+    ) {
+        let window = NSWindow(
+            contentViewController: NSHostingController(
+                rootView: ExtensionPlatformPRActionsUITestView(
+                    controller: controller,
+                    hasFailedCI: hasFailedCI
+                )
+            )
+        )
+        window.title = "PR Actions"
+        window.styleMask = [.titled, .closable]
+        window.setContentSize(NSSize(width: 420, height: 190))
+        window.center()
+        extensionPlatformUITestWindow = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard simulateMenuUpdate else { return }
+        NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)
+            .compactMap { $0.object as? NSMenu }
+            .filter { menu in
+                menu.items.contains { $0.title == "Run Skill" }
+            }
+            .prefix(1)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak controller, weak window] _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    guard let controller else { return }
+                    let pr = ExtensionPlatformUITestFixture.passingPullRequest
+                    controller.store.setTag(
+                        .needsInvestigation,
+                        pageKey: GitHubPageContext.pullRequest(
+                            repository: pr.repoFullName,
+                            number: pr.number
+                        ).key,
+                        clientID: nil
+                    )
+                    window?.title = "PR Actions Updated"
+                }
+            }
+            .store(in: &cancellables)
+    }
+#endif
+
     private func openJiraSetupWindow(context: JiraSetupContext, viewModel: PRListViewModel) {
         if let jiraSetupWindow {
             jiraSetupWindow.makeKeyAndOrderFront(nil)
@@ -193,13 +371,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func openSettingsWindow(viewModel: PRListViewModel) {
-        guard let onboardingManager, let updateManager else { return }
+        guard let onboardingManager,
+              let updateManager,
+              let extensionPlatformController else {
+            return
+        }
 
         if settingsWindow == nil {
             let settingsView = SettingsView(
                 viewModel: viewModel,
                 onboardingManager: onboardingManager,
                 updateManager: updateManager,
+                extensionPlatformController: extensionPlatformController,
                 presentationCoordinator: presentationCoordinator
             )
             let hostingController = NSHostingController(rootView: settingsView)
@@ -207,12 +390,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let window = NSWindow(contentViewController: hostingController)
             window.title = String(localized: "Settings")
             window.styleMask = [.titled, .closable]
-            window.setContentSize(NSSize(width: 450, height: 620))
+            window.setContentSize(NSSize(width: 520, height: 720))
             window.center()
             settingsWindow = window
         }
 
         settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private func openBrowserPairingWindow(approval: PendingPairingApproval) {
+        browserPairingWindow?.close()
+
+        let pairingView = BrowserPairingApprovalView(
+            controller: extensionPlatformController!,
+            approval: approval
+        ) { [weak self] in
+            self?.browserPairingWindow?.close()
+            self?.browserPairingWindow = nil
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 430),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = String(localized: "Browser Client Permission")
+        window.contentViewController = NSHostingController(rootView: pairingView)
+        window.center()
+        window.isReleasedWhenClosed = false
+        browserPairingWindow = window
+        window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
@@ -282,3 +490,169 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         Bundle.main.object(forInfoDictionaryKey: key) as? String ?? "unknown"
     }
 }
+
+#if DEBUG
+private enum ExtensionPlatformUITestFixture {
+    static let pullRequest = makePullRequest(hasFailedCI: true)
+    static let passingPullRequest = makePullRequest(hasFailedCI: false)
+    @MainActor
+    static func seedSurfaceHealth(in store: ExtensionPlatformStore) {
+        store.reportSurfaceHealth(
+            surface: BrowserSurfaceV2.checksJobTrailing.rawValue,
+            state: .missing,
+            detail: "UI fixture: exact Checks job anchor missing"
+        )
+        store.reportSurfaceHealth(
+            surface: BrowserSurfaceV2.actionsJobAfterFailureSummary.rawValue,
+            state: .ambiguous,
+            detail: "UI fixture: multiple Actions failure summaries matched"
+        )
+    }
+
+
+    private static func makePullRequest(hasFailedCI: Bool) -> PullRequest {
+        PullRequest(
+            id: 1238,
+            number: 1238,
+            title: hasFailedCI ? "UI fixture failed check" : "UI fixture passing checks",
+            author: "octocat",
+            authorAvatarURL: nil,
+            repositoryOwner: "example-org",
+            repositoryName: "example-repo",
+            url: URL(string: "https://github.com/example-org/example-repo/pull/1238")!,
+            state: .open,
+            isDraft: false,
+            createdAt: Date(timeIntervalSince1970: 1_775_000_000),
+            updatedAt: Date(timeIntervalSince1970: 1_775_000_100),
+            mergedAt: nil,
+            body: nil,
+            conversationComments: [],
+            lastCommitAt: Date(timeIntervalSince1970: 1_775_000_100),
+            headCommitOid: "0123456789abcdef",
+            reviewThreads: [],
+            category: .authored,
+            hasBaseConflicts: false,
+            ciStatus: hasFailedCI ? .failure : .success,
+            checkSuccessCount: hasFailedCI ? 3 : 4,
+            checkFailureCount: hasFailedCI ? 1 : 0,
+            checkPendingCount: 0,
+            myLastReviewState: nil,
+            myLastReviewAt: nil,
+            reviewRequestedAt: nil,
+            myThreadsAllResolved: true,
+            approvalCount: 2,
+            changesRequestedCount: 0,
+            ciExtendedInfo: CIExtendedInfo(
+                isRunning: false,
+                workflows: [
+                    CIWorkflowInfo(
+                        name: "unit-test",
+                        isWorkflow: true,
+                        successCount: hasFailedCI ? 3 : 4,
+                        failureCount: hasFailedCI ? 1 : 0,
+                        pendingCount: 0
+                    )
+                ]
+            )
+        )
+    }
+
+    static func snapshot(hasFailedCI: Bool) -> LocalSnapshot {
+        let fixture = hasFailedCI ? pullRequest : passingPullRequest
+        return LocalSnapshotFactory.makeSnapshot(
+            input: LocalSnapshotInput(
+                appVersion: "1.0.0",
+                buildVersion: "1",
+                bundleIdentifier: "com.example.ghpr-ui-test",
+                authState: AuthState(accessToken: nil, username: "octocat", authMethod: nil),
+                prList: PRList(
+                    lastUpdated: Date(timeIntervalSince1970: 1_775_000_100),
+                    pullRequests: [fixture],
+                    isLoading: false,
+                    error: nil
+                ),
+                rateLimitInfo: RateLimitInfo(
+                    limit: 5_000,
+                    remaining: 4_999,
+                    resetDate: Date(timeIntervalSince1970: 1_775_003_600)
+                ),
+                pinnedPRIdentifiers: [],
+                minimumApprovalsForReadyToMerge: 2,
+                refreshStatus: "idle",
+                refreshError: nil
+            ),
+            now: Date(timeIntervalSince1970: 1_775_000_100)
+        )
+    }
+}
+
+@MainActor
+private struct ExtensionPlatformPRActionsUITestView: View {
+    @ObservedObject var controller: ExtensionPlatformController
+    let hasFailedCI: Bool
+
+    private var pullRequest: PullRequest {
+        hasFailedCI
+            ? ExtensionPlatformUITestFixture.pullRequest
+            : ExtensionPlatformUITestFixture.passingPullRequest
+    }
+
+    private var latestRun: SkillRun? {
+        controller.store.runs(
+            pageKey: GitHubPageContext.pullRequest(
+                repository: pullRequest.repoFullName,
+                number: pullRequest.number
+            ).key
+        ).first
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("PR Actions")
+                .font(.headline)
+            PRRowView(
+                pr: pullRequest,
+                onOpen: {},
+                onOpenJira: { _ in },
+                onCopyURL: {},
+                onRerunFailedCI: {},
+                onAnalyzeCIFailure: {},
+                onOpenRawDiagnostics: {},
+                onRunSkill: { skillID in
+                    Task { @MainActor in
+                        _ = try? await controller.runRevisionSkill(
+                            id: skillID,
+                            repository: pullRequest.repoFullName,
+                            number: pullRequest.number
+                        )
+                    }
+                },
+                onInstallBrowserUserscript: {},
+                runnableSkills: controller.runnableRevisionSkills(),
+                extensionRun: controller.activeRun(
+                    repository: pullRequest.repoFullName,
+                    number: pullRequest.number
+                ),
+                extensionAnalysis: controller.latestAnalysis(
+                    repository: pullRequest.repoFullName,
+                    number: pullRequest.number
+                ),
+                extensionTags: controller.tags(
+                    repository: pullRequest.repoFullName,
+                    number: pullRequest.number
+                )
+            )
+            Text("Tags: \(controller.tags(repository: pullRequest.repoFullName, number: pullRequest.number).map(\.displayName).sorted().joined(separator: ", "))")
+                .accessibilityIdentifier("pr-action-tags")
+            Text(
+                "Analysis: \(controller.latestAnalysis(repository: pullRequest.repoFullName, number: pullRequest.number)?.verdict.displayName ?? "None")"
+            )
+            .accessibilityIdentifier("pr-action-analysis")
+            Text("Last run: \(latestRun?.status.displayName ?? "None")")
+                .accessibilityIdentifier("pr-action-last-run")
+        }
+        .padding()
+        .frame(width: 420, height: 190)
+    }
+}
+#endif

@@ -190,6 +190,26 @@ enum JiraPrompt: Identifiable, Equatable {
     }
 }
 
+struct MenuTrackingUpdateBuffer<Value> {
+    private var isTracking = false
+    private var pendingValue: Value?
+
+    mutating func setTracking(_ newValue: Bool) -> Value? {
+        guard newValue != isTracking else { return nil }
+        isTracking = newValue
+        guard !newValue else { return nil }
+
+        defer { pendingValue = nil }
+        return pendingValue
+    }
+
+    mutating func receive(_ value: Value) -> Value? {
+        guard isTracking else { return value }
+        pendingValue = value
+        return nil
+    }
+}
+
 @MainActor
 final class PRListViewModel: ObservableObject {
     @Published var prList: PRList = .empty
@@ -219,6 +239,9 @@ final class PRListViewModel: ObservableObject {
     private let jiraURLOpener: (URL) -> Void
     private let savedViewStore: SavedViewStore
     private var cancellables = Set<AnyCancellable>()
+    private let menuTracker: MenuTracker
+    private var prListUpdateBuffer = MenuTrackingUpdateBuffer<PRList>()
+    private var rateLimitUpdateBuffer = MenuTrackingUpdateBuffer<RateLimitInfo>()
 
     var isJiraConfigured: Bool { jiraConnectionState == .configured }
     var openSettings: (() -> Void)?
@@ -226,12 +249,14 @@ final class PRListViewModel: ObservableObject {
         prManager: PRManager,
         oauthManager: GitHubOAuthManager,
         linkOpener: PRLinkOpening,
+        menuTracker: MenuTracker = .shared,
         jiraURLOpener: @escaping (URL) -> Void = { NSWorkspace.shared.open($0) },
         savedViewStore: SavedViewStore = SavedViewStore()
     ) {
         self.prManager = prManager
         self.oauthManager = oauthManager
         self.linkOpener = linkOpener
+        self.menuTracker = menuTracker
         self.jiraURLOpener = jiraURLOpener
         self.savedViewStore = savedViewStore
         self.savedViews = savedViewStore.views
@@ -239,19 +264,41 @@ final class PRListViewModel: ObservableObject {
     }
 
     private func setupBindings() {
-        // Bind prList from manager
-        prManager.$prList
+        // SwiftUI rebuilds an active context menu when its observed row tree changes.
+        // Keep refresh publications stable until the complete menu hierarchy closes.
+        menuTracker.$isTracking
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] prList in
-                self?.prList = prList
+            .sink { [weak self] isTracking in
+                guard let self else { return }
+                if let pendingPRList = self.prListUpdateBuffer.setTracking(isTracking) {
+                    self.prList = pendingPRList
+                }
+                if let pendingRateLimit = self.rateLimitUpdateBuffer.setTracking(isTracking) {
+                    self.rateLimitInfo = pendingRateLimit
+                }
             }
             .store(in: &cancellables)
 
-        // Bind rate limit info
+        prManager.$prList
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] prList in
+                guard let self,
+                      let visiblePRList = self.prListUpdateBuffer.receive(prList) else {
+                    return
+                }
+                self.prList = visiblePRList
+            }
+            .store(in: &cancellables)
+
         prManager.$rateLimitInfo
             .receive(on: DispatchQueue.main)
             .sink { [weak self] info in
-                self?.rateLimitInfo = info
+                guard let self,
+                      let visibleInfo = self.rateLimitUpdateBuffer.receive(info) else {
+                    return
+                }
+                self.rateLimitInfo = visibleInfo
             }
             .store(in: &cancellables)
 
@@ -666,6 +713,13 @@ final class PRListViewModel: ObservableObject {
             guard let self else { return }
             defer { self.clearOpeningPR(pr.id) }
             await self.linkOpener.open(pr.url)
+        }
+    }
+
+    func openPRChecks(_ pr: PullRequest) {
+        let checksURL = pr.url.appendingPathComponent("checks")
+        Task { @MainActor [linkOpener] in
+            await linkOpener.open(checksURL)
         }
     }
 

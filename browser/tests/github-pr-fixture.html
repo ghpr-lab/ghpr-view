@@ -1,0 +1,35 @@
+<!doctype html>
+<html>
+<head><title>Fixture PR</title></head>
+<body>
+  <div data-testid="issue-header">
+    <div class="gh-header-actions"></div>
+    <div class="gh-header-meta">Open</div>
+    <h1>Make CI history comparison deterministic</h1>
+  </div>
+  <main>
+    <section id="checks_tab">
+      <div class="Box-header">Checks</div>
+      <div data-testid="check-run-row">
+        <span>unit-test</span>
+        <strong>Failed</strong>
+      </div>
+      <div data-testid="check-run-row">
+        <span>lint</span>
+        <strong>Success</strong>
+      </div>
+    </section>
+    <div data-testid="merge-box">
+      <button>Merge pull request</button>
+    </div>
+    <aside id="partial-discussion-sidebar">
+      <div class="discussion-sidebar-item sidebar-reviewers" data-testid="reviewers-section">
+        <h3 class="discussion-sidebar-heading">审阅者</h3>
+      </div>
+      <div class="discussion-sidebar-item sidebar-assignee" data-testid="assignees-section">
+        <h3 class="discussion-sidebar-heading">经办人</h3>
+      </div>
+    </aside>
+  </main>
+</body>
+</html>
